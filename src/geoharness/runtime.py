@@ -25,7 +25,11 @@ from openharness.tools.base import ToolRegistry
 from openharness.ui.runtime import RuntimeBundle
 
 from geoharness.config.settings import GeoConfig, load_geo_config
-from geoharness.hooks.cascade import build_cascade_manager, register_cascade_hooks
+from geoharness.hooks.cascade import (
+    CascadeManager,
+    build_cascade_manager,
+    register_cascade_hooks,
+)
 from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
 
 logger = logging.getLogger(__name__)
@@ -72,18 +76,18 @@ async def build_geo_runtime(
     # 5. Build permission checker
     permission_checker = _build_permission_checker(config)
 
-    # 6. Build hook executor
+    # 6. Build hook executor (registers cascade hooks)
     hook_executor = _build_hook_executor(config, api_client)
 
-    # 7. Build system prompt
-    if system_prompt is None:
-        system_prompt = _build_system_prompt(config, cwd)
-
-    # 8. Build DataCatalog and CascadeManager, inject into tool_metadata
+    # 7. Build DataCatalog and CascadeManager (needed for system prompt)
     from geoharness.data.catalog import build_data_catalog
 
     data_catalog = build_data_catalog(config)
     cascade_manager = build_cascade_manager(config)
+
+    # 8. Build system prompt (uses cascade_manager for cascade state section)
+    if system_prompt is None:
+        system_prompt = _build_system_prompt(config, cwd, cascade_manager)
 
     engine = QueryEngine(
         api_client=api_client,
@@ -199,20 +203,19 @@ def _build_hook_executor(
     return HookExecutor(registry=registry, context=context)
 
 
-def _build_system_prompt(config: GeoConfig, cwd: Path) -> str:
+def _build_system_prompt(
+    config: GeoConfig,
+    cwd: Path,
+    cascade_manager: CascadeManager | None = None,
+) -> str:
     """Build GeoHarness system prompt.
 
-    Phase 1: Minimal prompt — full prompt in Phase 7.
+    Phase 7: Full system prompt with 6 geography principles, skills catalog,
+    tool catalog, cascade state, and bridge rules.
     """
-    return (
-        f"You are GeoHarness, a geography-oriented agent system.\n"
-        f"Working directory: {cwd}\n"
-        f"Model: {config.model}\n\n"
-        "Your primary purpose is spatial analysis. Cartography is a product "
-        "of analysis, not an end in itself.\n\n"
-        "Use the cognitive skills (geo-perception, geo-comprehension, "
-        "geo-reasoning) when deeper spatial understanding is needed.\n"
-    )
+    from geoharness.prompts.system_prompt import build_geo_system_prompt
+
+    return build_geo_system_prompt(cwd, config, cascade_manager)
 
 
 def _build_commands() -> Any:

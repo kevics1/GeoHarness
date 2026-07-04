@@ -107,10 +107,28 @@ def run(
     cwd: Optional[Path] = typer.Option(
         None, "--cwd", help="工作目录"
     ),
+    prompt: Optional[str] = typer.Option(
+        None, "--prompt", "-p", help="初始提示词"
+    ),
+    print_mode: bool = typer.Option(
+        False, "--print", help="使用打印模式（不启动 TUI）"
+    ),
 ) -> None:
     """启动 GeoHarness TUI。"""
-    console.print("[yellow]TUI 启动尚未实现（Phase 7）。[/yellow]")
-    console.print("请使用 `geoh dry-run` 验证运行时组装。")
+    import asyncio
+
+    from geoharness.launcher import launch_geo_tui
+
+    work_cwd = cwd or Path.cwd()
+    exit_code = asyncio.run(
+        launch_geo_tui(
+            cwd=work_cwd,
+            prompt=prompt,
+            print_mode=print_mode,
+        )
+    )
+    if exit_code != 0:
+        raise typer.Exit(exit_code)
 
 
 def _generate_config_template() -> str:
