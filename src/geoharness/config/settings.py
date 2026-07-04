@@ -73,6 +73,9 @@ class DataConfig:
     default_crs: str = "EPSG:4326"
     analysis_crs: str = "EPSG:3857"
     postgis_dsn: str = ""
+    file_dir: str = ""
+    admin_kg_api_url: str = "https://geo.datav.aliyun.com/v2/district"
+    admin_kg_cache_dir: str = ""
 
 
 @dataclass(frozen=True)
@@ -186,13 +189,44 @@ def _parse_cognition(raw: dict[str, Any] | None) -> CognitionConfig:
 
 
 def _parse_data(raw: dict[str, Any] | None) -> DataConfig:
-    """Parse data config from raw YAML dict."""
+    """Parse data config from raw YAML dict.
+
+    Supports both flat keys (postgis_dsn) and nested format:
+        postgis:
+          dsn: ...
+        admin_kg:
+          api_url: ...
+          cache_dir: ...
+    """
     if not raw:
         return DataConfig()
+
+    # Handle nested postgis config (only if "postgis" key exists)
+    if "postgis" in raw and isinstance(raw["postgis"], dict):
+        postgis_dsn = _expand_vars(raw["postgis"].get("dsn", ""))
+    else:
+        postgis_dsn = _expand_vars(raw.get("postgis_dsn", ""))
+
+    # Handle nested admin_kg config (only if "admin_kg" key exists)
+    if "admin_kg" in raw and isinstance(raw["admin_kg"], dict):
+        admin_kg_raw = raw["admin_kg"]
+        admin_kg_api_url = admin_kg_raw.get(
+            "api_url", "https://geo.datav.aliyun.com/v2/district"
+        )
+        admin_kg_cache_dir = _expand_vars(admin_kg_raw.get("cache_dir", ""))
+    else:
+        admin_kg_api_url = raw.get(
+            "admin_kg_api_url", "https://geo.datav.aliyun.com/v2/district"
+        )
+        admin_kg_cache_dir = _expand_vars(raw.get("admin_kg_cache_dir", ""))
+
     return DataConfig(
         default_crs=raw.get("default_crs", "EPSG:4326"),
         analysis_crs=raw.get("analysis_crs", "EPSG:3857"),
-        postgis_dsn=_expand_vars(raw.get("postgis_dsn", "")),
+        postgis_dsn=postgis_dsn,
+        file_dir=_expand_vars(raw.get("file_dir", "")),
+        admin_kg_api_url=admin_kg_api_url,
+        admin_kg_cache_dir=admin_kg_cache_dir,
     )
 
 
