@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "geoharness"
+version = "0.1.0"
+description = "Geography-oriented native agent harness built on OpenHarness"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "GeoHarness Team"}]
+keywords = ["gis", "spatial-analysis", "agent", "geography", "cartography"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "openharness-ai>=0.1.9",
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "psycopg[binary]>=3.1",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+geoh = "geoharness.cli:app"
+geoharness = "geoharness.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/geoharness"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
