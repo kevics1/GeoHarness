@@ -18,7 +18,6 @@ from openharness.engine.query_engine import QueryEngine
 from openharness.hooks.executor import HookExecutionContext, HookExecutor
 from openharness.hooks.loader import HookRegistry
 from openharness.mcp.client import McpClientManager
-from openharness.mcp.types import McpStdioServerConfig
 from openharness.permissions.checker import PermissionChecker
 from openharness.state.app_state import AppState
 from openharness.state.store import AppStateStore
@@ -26,6 +25,7 @@ from openharness.tools.base import ToolRegistry
 from openharness.ui.runtime import RuntimeBundle
 
 from geoharness.config.settings import GeoConfig, load_geo_config
+from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
 
 logger = logging.getLogger(__name__)
 
@@ -157,18 +157,10 @@ def _build_api_client(config: GeoConfig) -> OpenAICompatibleClient:
 def _build_mcp_manager(config: GeoConfig) -> McpClientManager:
     """Build MCP client manager with domain servers only.
 
-    Converts GeoConfig MCP server configs to McpStdioServerConfig objects.
+    Delegates to geoharness.mcp.config.build_mcp_configs() which converts
+    GeoConfig.mcp_servers to McpStdioServerConfig objects.
     """
-    server_configs: dict[str, McpStdioServerConfig] = {}
-    for name, cfg in config.mcp_servers.items():
-        server_configs[name] = McpStdioServerConfig(
-            type="stdio",
-            command=cfg.command,
-            args=cfg.args,
-            env=cfg.env if cfg.env else None,
-            cwd=cfg.cwd if cfg.cwd else None,
-        )
-
+    server_configs = build_mcp_configs(config)
     return McpClientManager(server_configs=server_configs)
 
 
@@ -226,21 +218,14 @@ def _build_commands() -> Any:
 def _verify_mcp_isolation(bundle: RuntimeBundle, config: GeoConfig) -> None:
     """Verify no upstream MCP servers leaked into the bundle.
 
-    Checks that only domain-configured MCP servers are present.
+    Delegates to geoharness.mcp.config.verify_mcp_isolation() which checks
+    that only domain-configured MCP servers are present.
     """
     expected = set(config.mcp_servers.keys())
-    try:
-        statuses = bundle.mcp_manager.list_statuses()
-        actual = {s.name for s in statuses}
-    except Exception:
-        # MCP manager might not be connected yet during construction
-        return
-
-    leaked = actual - expected
-    if leaked:
-        logger.warning("Leaked MCP servers from upstream: %s", leaked)
-        for name in leaked:
-            try:
-                bundle.mcp_manager.disconnect(name)
-            except Exception:
-                pass
+    is_isolated, leaked = verify_mcp_isolation(bundle.mcp_manager, expected)
+    if not is_isolated:
+        logger.warning(
+            "MCP isolation check failed: %d leaked servers: %s",
+            len(leaked),
+            leaked,
+        )

@@ -1,0 +1,1 @@
+"""GeoHarness MCP package."""
