@@ -79,6 +79,11 @@ async def build_geo_runtime(
         system_prompt = _build_system_prompt(config, cwd)
 
     # 8. Build QueryEngine
+    # 8. Build DataCatalog and inject into tool_metadata
+    from geoharness.data.catalog import build_data_catalog
+
+    data_catalog = build_data_catalog(config)
+
     engine = QueryEngine(
         api_client=api_client,
         tool_registry=tool_registry,
@@ -90,6 +95,7 @@ async def build_geo_runtime(
         hook_executor=hook_executor,
         tool_metadata={
             "geoharness_config": config,
+            "data_catalog": data_catalog,
         },
     )
 
@@ -107,6 +113,10 @@ async def build_geo_runtime(
     commands = _build_commands()
 
     # 11. Construct RuntimeBundle directly
+    # Auto-include project skills directory (skills/ at project root)
+    project_skills_dir = str(Path(__file__).parent.parent.parent / "skills")
+    all_skill_dirs = (project_skills_dir, *extra_skill_dirs)
+
     bundle = RuntimeBundle(
         api_client=api_client,
         cwd=str(cwd),
@@ -118,7 +128,7 @@ async def build_geo_runtime(
         commands=commands,
         external_api_client=True,
         enforce_max_turns=True,
-        extra_skill_dirs=extra_skill_dirs,
+        extra_skill_dirs=all_skill_dirs,
         extra_plugin_roots=(),
     )
 
