@@ -1,0 +1,284 @@
+"""GeoCartographyTool — cartography pipeline orchestration tool.
+
+QGIS MCP provides individual operations (symbolize, layout, export), but
+doesn't coordinate a complete cartography pipeline. This tool:
+1. Reads analysis type from context
+2. Looks up bridge rules in config (analysis_type → symbolization)
+3. Orchestrates QGIS MCP calls for symbolize → compose → export
+
+Bridge rules are config-driven — adding new analysis types = YAML edit.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
+
+class GeoCartographyInput(BaseModel):
+    """Input model for geo_cartography tool."""
+
+    action: Literal["symbolize", "compose", "export", "full"] = Field(
+        default="full",
+        description=(
+            "symbolize: apply symbolization to a layer; "
+            "compose: load template + add map elements; "
+            "export: export as PDF/image; "
+            "full: symbolize + compose + export in one step"
+        ),
+    )
+    layer_name: str = Field(
+        default="",
+        description="QGIS layer name to symbolize (for symbolize/full).",
+    )
+    analysis_type: str = Field(
+        default="",
+        description=(
+            "Analysis type for bridge rule lookup (e.g., 'moran_local', "
+            "'getis_ord', 'cluster_detect'). Determines symbolization strategy."
+        ),
+    )
+    field_name: str = Field(
+        default="",
+        description="Field name for symbolization (categorized/graduated).",
+    )
+    output_format: Literal["pdf", "image"] = Field(
+        default="pdf",
+        description="Export format.",
+    )
+    output_path: str = Field(
+        default="",
+        description="Output file path. If empty, saves to ~/.geoharness/exports/.",
+    )
+
+
+class GeoCartographyTool(BaseTool):
+    """Cartography pipeline orchestration tool."""
+
+    name: str = "geo_cartography"
+    description: str = (
+        "Orchestrate cartography pipeline: symbolize → compose → export. "
+        "Reads bridge rules from config to auto-select symbolization based "
+        "on analysis type. Uses QGIS MCP for actual rendering."
+    )
+    input_model: type[BaseModel] = GeoCartographyInput
+
+    async def execute(
+        self, arguments: BaseModel, context: ToolExecutionContext
+    ) -> ToolResult:
+        """Execute the geo_cartography tool."""
+        assert isinstance(arguments, GeoCartographyInput)
+        args: GeoCartographyInput = arguments
+
+        # Get config from tool_metadata
+        config = context.metadata.get("geoharness_config")
+        if config is None:
+            return ToolResult(
+                output="Error: GeoHarness config not found in context.",
+                is_error=True,
+            )
+
+        bridge_rules = config.cartography.bridge_rules
+        template_path = config.cartography.default_template
+
+        if args.action == "symbolize":
+            return self._symbolize(args, bridge_rules)
+        elif args.action == "compose":
+            return self._compose(args, template_path)
+        elif args.action == "export":
+            return self._export(args)
+        elif args.action == "full":
+            return self._full_pipeline(args, bridge_rules, template_path)
+        else:
+            return ToolResult(
+                output=f"Unknown action: {args.action}",
+                is_error=True,
+            )
+
+    def _get_bridge_rule(
+        self,
+        analysis_type: str,
+        bridge_rules: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Look up bridge rule for an analysis type.
+
+        Falls back to default rule if analysis type not found.
+        """
+        rule = bridge_rules.get(analysis_type)
+        if rule is None:
+            # Default: simple categorized symbolization
+            return {
+                "render_method": "categorized",
+                "color_scheme": "Set1",
+                "n_classes": 0,
+            }
+
+        # Convert BridgeRule dataclass to dict if needed
+        if hasattr(rule, "render_method"):
+            return {
+                "render_method": rule.render_method,
+                "color_scheme": rule.color_scheme,
+                "n_classes": rule.n_classes,
+            }
+        return rule if isinstance(rule, dict) else dict(rule)
+
+    def _symbolize(
+        self,
+        args: GeoCartographyInput,
+        bridge_rules: dict[str, Any],
+    ) -> ToolResult:
+        """Generate symbolization instructions for QGIS MCP.
+
+        This tool provides the orchestration plan — actual QGIS rendering
+        is done via qgis MCP tools (set_categorized, set_graduated, etc.).
+        """
+        if not args.layer_name:
+            return ToolResult(
+                output="Error: 'layer_name' is required for symbolize action.",
+                is_error=True,
+            )
+
+        if not args.analysis_type:
+            return ToolResult(
+                output="Error: 'analysis_type' is required for symbolize. "
+                "Specify the analysis type (e.g., 'moran_local', 'getis_ord').",
+                is_error=True,
+            )
+
+        rule = self._get_bridge_rule(args.analysis_type, bridge_rules)
+        method = rule.get("render_method", "categorized")
+        colors = rule.get("color_scheme", "Set1")
+        n_classes = rule.get("n_classes", 5)
+
+        instructions: list[str] = []
+        instructions.append(
+            f"Symbolization plan for layer '{args.layer_name}':"
+        )
+        instructions.append(f"  Analysis type: {args.analysis_type}")
+        instructions.append(f"  Render method: {method}")
+        instructions.append(f"  Color scheme: {colors}")
+
+        if method == "categorized":
+            field = args.field_name or "(auto-detect category field)"
+            instructions.append(
+                f"  → Use mcp__qgis__set_categorized with "
+                f"layer='{args.layer_name}', field='{field}', "
+                f"color_ramp='{colors}'"
+            )
+        elif method == "graduated":
+            field = args.field_name or "(auto-detect value field)"
+            instructions.append(
+                f"  → Use mcp__qgis__set_graduated with "
+                f"layer='{args.layer_name}', field='{field}', "
+                f"color_ramp='{colors}', n_classes={n_classes}"
+            )
+        elif method == "flow":
+            instructions.append(
+                f"  → Use mcp__qgis__set_single_symbol with "
+                f"layer='{args.layer_name}' (flow lines)"
+            )
+        elif method == "none":
+            instructions.append(
+                "  → No map symbolization needed for this analysis type "
+                "(e.g., global statistic)."
+            )
+
+        return ToolResult(
+            output="\n".join(instructions),
+            metadata={"bridge_rule": rule},
+        )
+
+    def _compose(
+        self,
+        args: GeoCartographyInput,
+        template_path: str,
+    ) -> ToolResult:
+        """Generate composition instructions using QPT template."""
+        if not template_path:
+            return ToolResult(
+                output="Error: No default template configured. "
+                "Set cartography.default_template in config.yaml.",
+                is_error=True,
+            )
+
+        instructions: list[str] = []
+        instructions.append("Composition plan:")
+        instructions.append(f"  Template: {template_path}")
+        instructions.append(
+            "  Steps (use QGIS MCP tools):"
+        )
+        instructions.append(
+            "  1. mcp__qgis__create_layout — create print layout from template"
+        )
+        instructions.append(
+            "  2. mcp__qgis__add_map_item — add map to layout"
+        )
+        instructions.append(
+            "  3. mcp__qgis__add_legend — add legend"
+        )
+        instructions.append(
+            "  4. mcp__qgis__add_scale_bar — add scale bar"
+        )
+        instructions.append(
+            "  5. mcp__qgis__add_north_arrow — add north arrow"
+        )
+
+        return ToolResult(output="\n".join(instructions))
+
+    def _export(self, args: GeoCartographyInput) -> ToolResult:
+        """Generate export instructions."""
+        output_path = args.output_path or "~/.geoharness/exports/map_output"
+
+        instructions: list[str] = []
+        instructions.append(f"Export plan ({args.output_format}):")
+
+        if args.output_format == "pdf":
+            instructions.append(
+                f"  → Use mcp__qgis__export_layout_pdf "
+                f"with output_path='{output_path}.pdf'"
+            )
+        else:
+            instructions.append(
+                f"  → Use mcp__qgis__export_layout_image "
+                f"with output_path='{output_path}.png'"
+            )
+
+        return ToolResult(output="\n".join(instructions))
+
+    def _full_pipeline(
+        self,
+        args: GeoCartographyInput,
+        bridge_rules: dict[str, Any],
+        template_path: str,
+    ) -> ToolResult:
+        """Execute full pipeline: symbolize → compose → export."""
+        sym_result = self._symbolize(args, bridge_rules)
+        if sym_result.is_error:
+            return sym_result
+
+        comp_result = self._compose(args, template_path)
+        if comp_result.is_error:
+            return comp_result
+
+        exp_result = self._export(args)
+
+        # Combine all results
+        combined = "\n\n".join([
+            sym_result.output,
+            comp_result.output,
+            exp_result.output,
+        ])
+
+        return ToolResult(
+            output=f"Full cartography pipeline:\n\n{combined}",
+            metadata={
+                "bridge_rule": sym_result.metadata.get("bridge_rule", {}),
+            },
+        )
+
+    def is_read_only(self, arguments: BaseModel) -> bool:
+        """geo_cartography writes files (exports) — not read-only."""
+        assert isinstance(arguments, GeoCartographyInput)
+        return arguments.action == "symbolize"
