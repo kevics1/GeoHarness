@@ -25,6 +25,7 @@ from openharness.tools.base import ToolRegistry
 from openharness.ui.runtime import RuntimeBundle
 
 from geoharness.config.settings import GeoConfig, load_geo_config
+from geoharness.hooks.cascade import build_cascade_manager, register_cascade_hooks
 from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
 
 logger = logging.getLogger(__name__)
@@ -78,11 +79,11 @@ async def build_geo_runtime(
     if system_prompt is None:
         system_prompt = _build_system_prompt(config, cwd)
 
-    # 8. Build QueryEngine
-    # 8. Build DataCatalog and inject into tool_metadata
+    # 8. Build DataCatalog and CascadeManager, inject into tool_metadata
     from geoharness.data.catalog import build_data_catalog
 
     data_catalog = build_data_catalog(config)
+    cascade_manager = build_cascade_manager(config)
 
     engine = QueryEngine(
         api_client=api_client,
@@ -96,6 +97,7 @@ async def build_geo_runtime(
         tool_metadata={
             "geoharness_config": config,
             "data_catalog": data_catalog,
+            "cascade_manager": cascade_manager,
         },
     )
 
@@ -181,11 +183,14 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
 def _build_hook_executor(
     config: GeoConfig, api_client: OpenAICompatibleClient
 ) -> HookExecutor:
-    """Build hook executor.
+    """Build hook executor with cascade hooks registered.
 
-    Phase 1: Empty executor — cascade hooks will be added in Phase 6.
+    Phase 6: Registers PromptHookDefinition cascade hooks for
+    USER_PROMPT_SUBMIT event via register_cascade_hooks().
     """
     registry = HookRegistry()
+    register_cascade_hooks(registry, config)
+
     context = HookExecutionContext(
         cwd=Path.cwd(),
         api_client=api_client,
