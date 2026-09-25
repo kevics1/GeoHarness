@@ -111,10 +111,10 @@ def run(
         None, "--prompt", "-p", help="初始提示词"
     ),
     print_mode: bool = typer.Option(
-        False, "--print", help="使用打印模式（不启动 TUI）"
+        False, "--print", help="使用打印模式（不启动 React TUI）"
     ),
 ) -> None:
-    """启动 GeoHarness TUI。"""
+    """启动 GeoHarness 交互式会话（默认 React TUI）。"""
     import asyncio
 
     from geoharness.launcher import launch_geo_tui

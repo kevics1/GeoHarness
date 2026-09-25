@@ -238,20 +238,20 @@ GeoHarness 运行时验证
 
 ## 使用
 
-### 启动 TUI
+### 启动交互式会话
 
 ```bash
-# 完整 TUI（需要 Node.js + React 前端）
+# 默认 React TUI（复用 OpenHarness 前端，环境变量隔离配置）
 geoh run
 
-# 打印模式（无需 React，直接 stdin/stdout）
-geoh run --print
-
 # 带初始提示词启动
-geoh run --print --prompt "分析武汉市 PM2.5 空间分布"
+geoh run --prompt "分析武汉市 PM2.5 空间分布"
 
 # 指定工作目录
 geoh run --cwd /path/to/project
+
+# 打印模式（不启动 React TUI，stdin/stdout 交互）
+geoh run --print
 ```
 
 ### 其他命令

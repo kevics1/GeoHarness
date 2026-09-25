@@ -14,7 +14,7 @@ Verifies that:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -327,13 +327,16 @@ class TestLauncher:
         )
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        # Mock build_geo_runtime to avoid actual MCP connections
-        # Note: launcher imports it inside the function, so patch at source
+        # Build a mock bundle with async mcp_manager.connect_all
+        mock_bundle = MagicMock()
+        mock_bundle.mcp_manager.connect_all = AsyncMock()
+        mock_bundle.engine = MagicMock()
+
         with patch(
             "geoharness.runtime.build_geo_runtime",
             new_callable=AsyncMock,
+            return_value=mock_bundle,
         ) as mock_build:
-            # Mock start_runtime and close_runtime
             with patch(
                 "openharness.ui.runtime.start_runtime",
                 new_callable=AsyncMock,
@@ -342,22 +345,76 @@ class TestLauncher:
                     "openharness.ui.runtime.close_runtime",
                     new_callable=AsyncMock,
                 ):
-                    with patch(
-                        "openharness.ui.runtime.handle_line",
-                        new_callable=AsyncMock,
-                    ):
-                        # Mock stdin to return 'exit' immediately
-                        import io
+                    from geoharness.launcher import launch_geo_tui
 
-                        from geoharness.launcher import launch_geo_tui
+                    # Mock input() to return 'exit' immediately
+                    monkeypatch.setattr("builtins.input", lambda _: "exit")
 
-                        monkeypatch.setattr("sys.stdin", io.StringIO("exit\n"))
+                    exit_code = await launch_geo_tui(
+                        cwd=tmp_path, print_mode=True
+                    )
+                    assert exit_code == 0
+                    mock_build.assert_called_once()
+                    mock_bundle.mcp_manager.connect_all.assert_called_once()
 
-                        exit_code = await launch_geo_tui(
-                            cwd=tmp_path, print_mode=True
-                        )
-                        assert exit_code == 0
-                        mock_build.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_launch_tui_mode_default(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """launch_geo_tui defaults to React TUI and writes the isolated settings.json."""
+        config_dir = tmp_path / ".geoharness"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_text(
+            "model: test-model\napi_key: fake-key\nbase_url: https://test.example.com/v1\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # The launcher writes os.environ directly — pre-register keys so
+        # monkeypatch cleans them up and nothing leaks into other tests.
+        monkeypatch.delenv("OPENHARNESS_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("OPENHARNESS_PROFILE", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        # Mock _run_react_tui to avoid actually launching the TUI
+        with patch(
+            "geoharness.launcher._run_react_tui",
+            new_callable=AsyncMock,
+            return_value=0,
+        ) as mock_tui:
+            from geoharness.launcher import launch_geo_tui
+
+            exit_code = await launch_geo_tui(cwd=tmp_path)
+            assert exit_code == 0
+            mock_tui.assert_called_once()
+
+            # New isolation strategy: point upstream OpenHarness at
+            # ~/.geoharness/ (OPENHARNESS_CONFIG_DIR) instead of relying on
+            # the old OPENHARNESS_PROFILE switch.
+            import json
+            import os
+
+            assert os.environ.get("OPENHARNESS_CONFIG_DIR") == str(config_dir)
+            assert os.environ.get("OPENHARNESS_PROFILE") is None
+            assert os.environ.get("OPENAI_API_KEY") == "fake-key"
+
+            # The generated settings.json IS the isolation artifact: OpenAI
+            # format, GeoHarness credentials, and no credential_slot overrides
+            # (which would hijack resolve_auth() in the TUI backend).
+            settings = json.loads(
+                (config_dir / "settings.json").read_text(encoding="utf-8")
+            )
+            assert settings["api_format"] == "openai"
+            assert settings["provider"] == "openai"
+            assert settings["api_key"] == "fake-key"
+            assert settings["base_url"] == "https://test.example.com/v1"
+            assert settings["model"] == "test-model"
+            assert all(
+                profile.get("credential_slot") is None
+                for profile in settings["profiles"].values()
+            )
 
 
 # ── Backend ───────────────────────────────────────────────────────

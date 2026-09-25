@@ -77,7 +77,7 @@ async def build_geo_runtime(
     permission_checker = _build_permission_checker(config)
 
     # 6. Build hook executor (registers cascade hooks)
-    hook_executor = _build_hook_executor(config, api_client)
+    hook_executor = _build_hook_executor(config, api_client, cwd)
 
     # 7. Build DataCatalog and CascadeManager (needed for system prompt)
     from geoharness.data.catalog import build_data_catalog
@@ -133,7 +133,13 @@ async def build_geo_runtime(
         engine=engine,
         commands=commands,
         external_api_client=True,
-        enforce_max_turns=True,
+        enforce_max_turns=False,
+        settings_overrides={
+            "model": config.model,
+            "api_key": config.api_key,
+            "api_format": "openai",
+            "base_url": config.base_url,
+        },
         extra_skill_dirs=all_skill_dirs,
         extra_plugin_roots=(),
     )
@@ -185,7 +191,7 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
 
 
 def _build_hook_executor(
-    config: GeoConfig, api_client: OpenAICompatibleClient
+    config: GeoConfig, api_client: OpenAICompatibleClient, cwd: Path
 ) -> HookExecutor:
     """Build hook executor with cascade hooks registered.
 
@@ -196,7 +202,7 @@ def _build_hook_executor(
     register_cascade_hooks(registry, config)
 
     context = HookExecutionContext(
-        cwd=Path.cwd(),
+        cwd=cwd,
         api_client=api_client,
         default_model=config.model,
     )
