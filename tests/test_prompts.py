@@ -138,7 +138,6 @@ class TestBuildGeoSystemPrompt:
         assert "geo_data" in prompt
         assert "geo_cartography" in prompt
         assert "geo-mcp-server" in prompt
-        assert "qgis" in prompt
         assert "postgres" in prompt
 
     def test_contains_tool_classification(

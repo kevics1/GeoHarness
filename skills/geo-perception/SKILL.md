@@ -166,7 +166,7 @@ python run.py
 - 高德API返回GCJ-02坐标，与WGS84偏移100-600米
 - 几何操作工具返回WKT（默认）或GeoJSON，通过output_format切换
 - 距离/拓扑/尺度工具返回JSON字符串
-- `python`（3.10）和`python3`（QGIS 3.12）指向不同安装，用`python run.py`
+- `python`（3.10）和系统其他 Python 安装指向不同环境，用`python run.py`
 
 ## 使用方式
 

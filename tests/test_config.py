@@ -59,16 +59,16 @@ class TestLoadGeoConfig:
     def test_mcp_servers_parsed(self, config_file: Path):
         config = load_geo_config(config_file)
         assert "geo-mcp-server" in config.mcp_servers
-        assert "qgis" in config.mcp_servers
+        assert "postgres" in config.mcp_servers
 
         geo_mcp = config.mcp_servers["geo-mcp-server"]
         assert geo_mcp.command == "python"
         assert geo_mcp.args == ["-m", "geo_mcp_server"]
         assert geo_mcp.env == {"PYTHONUTF8": "1"}
 
-        qgis_mcp = config.mcp_servers["qgis"]
-        assert qgis_mcp.command == "python"
-        assert qgis_mcp.args == ["-m", "qgis_mcp_server"]
+        postgres_mcp = config.mcp_servers["postgres"]
+        assert postgres_mcp.command == "python"
+        assert postgres_mcp.args == ["-m", "postgres_mcp_server"]
 
     def test_cartography_parsed(self, config_file: Path):
         config = load_geo_config(config_file)

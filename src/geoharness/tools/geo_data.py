@@ -1,7 +1,7 @@
 """GeoDataTool — unified geographic data access tool.
 
 Provides cross-source data discovery, file loading, and inspection.
-MCP tools (postgres, qgis) provide computation, but neither offers:
+MCP tools (geo-mcp-server, postgres) provide computation, but neither offers:
 - Cross-source unified discovery
 - File format loading (shp/geojson/gpkg/csv)
 - Chinese administrative boundary API access
@@ -24,7 +24,7 @@ class GeoDataInput(BaseModel):
         default="list",
         description=(
             "list: list available data sources; "
-            "load: load data into QGIS layer; "
+            "load: validate a source and get usage guidance; "
             "inspect: view schema/CRS/bbox of a source"
         ),
     )
@@ -111,10 +111,10 @@ class GeoDataTool(BaseTool):
     def _load_source(
         self, catalog: Any, args: GeoDataInput
     ) -> ToolResult:
-        """Load a data source for analysis.
+        """Validate a data source and return usage guidance.
 
-        This tool provides instructions for loading — actual QGIS layer
-        creation is done via qgis MCP tools (add_vector_layer, etc.).
+        Loading/rendering is handled natively (geopandas) by
+        geo_cartography; analysis is done via MCP tools.
         """
         if not args.name and not args.file_path:
             return ToolResult(
@@ -129,7 +129,7 @@ class GeoDataTool(BaseTool):
                 is_error=True,
             )
 
-        # Provide loading instructions based on source type
+        # Provide usage guidance based on source type
         source_type = detail.get("source_type", "")
         path = detail.get("path", "")
         crs = detail.get("crs", "")
@@ -138,26 +138,29 @@ class GeoDataTool(BaseTool):
         instructions: list[str] = []
         if source_type == "postgis":
             instructions.append(
-                f"To load PostGIS table '{args.name}':\n"
-                f"  Use mcp__qgis__add_vector_layer with "
-                f"provider='postgres' and connection string."
+                f"PostGIS table '{args.name}' is ready for use.\n"
+                f"  - Analyze via postgres MCP tools (SQL queries)\n"
+                f"  - Render via geo_cartography with "
+                f"source_type='postgis', source_name='{args.name}'"
             )
         elif source_type == "file":
             instructions.append(
-                f"To load {fmt} file '{path}':\n"
-                f"  Use mcp__qgis__add_vector_layer with path='{path}'."
+                f"File '{path}' ({fmt}) is ready for use.\n"
+                f"  - Render via geo_cartography with "
+                f"source_type='file', file_path='{path}'"
             )
             if crs == "GCJ-02":
                 instructions.append(
                     "  ⚠ WARNING: This data uses GCJ-02 coordinates. "
-                    "Use geo_transform_crs to convert to WGS84 before analysis."
+                    "Convert to WGS84 before precise analysis."
                 )
         elif source_type == "admin_kg":
             adcode = detail.get("adcode", "")
             instructions.append(
-                f"To load administrative boundary '{args.name}' "
-                f"(adcode: {adcode}):\n"
-                f"  Use mcp__qgis__add_vector_layer with the GeoJSON URL."
+                f"Administrative boundary '{args.name}' "
+                f"(adcode: {adcode}) is available.\n"
+                f"  - Render via geo_cartography with "
+                f"source_type='admin_kg', source_name='{args.name}'"
             )
 
         return ToolResult(

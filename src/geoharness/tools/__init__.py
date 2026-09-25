@@ -6,7 +6,7 @@ Builds a ToolRegistry with only domain-relevant tools:
   tool_search, brief) — user interaction helpers
 - MCP tools (registered dynamically when MCP manager is connected)
 
-Total target: 2 + 5 + 66 MCP = 73 tools (when all MCP servers connected).
+Total target: 2 + 5 + 27 MCP = 34 tools (when all MCP servers connected).
 """
 
 from __future__ import annotations

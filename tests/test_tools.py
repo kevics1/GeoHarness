@@ -264,7 +264,7 @@ class TestGeoCartographyTool:
         )
         assert not result.is_error
         assert "pdf" in result.output.lower()
-        assert "export_layout_pdf" in result.output
+        assert "Native renderer" in result.output
 
     @pytest.mark.asyncio
     async def test_full_pipeline(

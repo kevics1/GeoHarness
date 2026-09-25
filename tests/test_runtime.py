@@ -274,8 +274,8 @@ class TestMcpIsolation:
                 "geo-mcp-server": McpServerConfig(
                     command="python", args=["-m", "geo_mcp"]
                 ),
-                "qgis": McpServerConfig(
-                    command="python", args=["-m", "qgis_mcp"]
+                "postgres": McpServerConfig(
+                    command="python", args=["-m", "postgres_mcp"]
                 ),
             },
         )
@@ -290,7 +290,7 @@ class TestMcpIsolation:
             try:
                 statuses = bundle.mcp_manager.list_statuses()
                 server_names = {s.name for s in statuses}
-                expected = {"geo-mcp-server", "qgis"}
+                expected = {"geo-mcp-server", "postgres"}
                 leaked = server_names - expected
                 assert not leaked, f"Leaked MCP servers: {leaked}"
             except Exception:

@@ -33,9 +33,9 @@ mcp:
     args: ["-m", "geo_mcp_server"]
     env:
       PYTHONUTF8: "1"
-  qgis:
+  postgres:
     command: python
-    args: ["-m", "qgis_mcp_server"]
+    args: ["-m", "postgres_mcp_server"]
 
 cartography:
   default_template: "F:/test/template.qpt"

@@ -27,7 +27,7 @@ class TestEndToEndRuntime:
 
     @pytest.fixture
     def full_config(self) -> GeoConfig:
-        """Full config with all 3 MCP servers."""
+        """Full config with both domain MCP servers."""
         return GeoConfig(
             model="test-model",
             api_key="test-key",
@@ -37,10 +37,6 @@ class TestEndToEndRuntime:
                     command="python",
                     args=["-m", "geo_mcp_server"],
                     env={"PYTHONUTF8": "1"},
-                ),
-                "qgis": McpServerConfig(
-                    command="python",
-                    args=["-m", "qgis_mcp_server"],
                 ),
                 "postgres": McpServerConfig(
                     command="python",

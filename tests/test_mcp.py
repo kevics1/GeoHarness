@@ -3,7 +3,7 @@
 Verifies that:
 - build_mcp_configs() converts GeoConfig to McpStdioServerConfig correctly
 - verify_mcp_isolation() detects leaked upstream servers
-- EXPECTED_MCP_SERVERS contains exactly the 3 domain servers
+- EXPECTED_MCP_SERVERS contains exactly the 2 domain servers
 - get_mcp_server_names() returns config server names in order
 - build_mcp_configs() gracefully handles invalid server configs
 """
@@ -28,8 +28,8 @@ from geoharness.mcp.config import (
 
 
 @pytest.fixture
-def three_server_config() -> GeoConfig:
-    """Config with all 3 domain MCP servers."""
+def domain_server_config() -> GeoConfig:
+    """Config with both domain MCP servers."""
     return GeoConfig(
         model="test-model",
         api_key="test-key",
@@ -39,11 +39,6 @@ def three_server_config() -> GeoConfig:
                 command="python",
                 args=["-m", "geo_mcp_server"],
                 env={"PYTHONUTF8": "1", "AMAP_API_KEY": "test-key"},
-            ),
-            "qgis": McpServerConfig(
-                command="python",
-                args=["-m", "qgis_mcp_server"],
-                env={"PROJ_LIB": "/path/to/proj"},
             ),
             "postgres": McpServerConfig(
                 command="python",
@@ -101,13 +96,13 @@ class MockMcpManager:
 class TestExpectedServers:
     """Test EXPECTED_MCP_SERVERS constant."""
 
-    def test_contains_three_domain_servers(self) -> None:
-        """EXPECTED_MCP_SERVERS must contain exactly the 3 domain servers."""
-        assert EXPECTED_MCP_SERVERS == {"geo-mcp-server", "qgis", "postgres"}
+    def test_contains_domain_servers(self) -> None:
+        """EXPECTED_MCP_SERVERS must contain exactly the 2 domain servers."""
+        assert EXPECTED_MCP_SERVERS == {"geo-mcp-server", "postgres"}
 
-    def test_count_is_three(self) -> None:
-        """Exactly 3 servers expected."""
-        assert len(EXPECTED_MCP_SERVERS) == 3
+    def test_count_is_two(self) -> None:
+        """Exactly 2 servers expected."""
+        assert len(EXPECTED_MCP_SERVERS) == 2
 
     def test_is_a_set(self) -> None:
         """Must be a set for efficient membership testing."""
@@ -122,54 +117,52 @@ class TestBuildMcpConfigs:
 
     def test_returns_dict_of_mcp_stdio_server_config(
         self,
-        three_server_config: GeoConfig,
+        domain_server_config: GeoConfig,
     ) -> None:
         """build_mcp_configs returns dict[str, McpStdioServerConfig]."""
-        configs = build_mcp_configs(three_server_config)
+        configs = build_mcp_configs(domain_server_config)
         assert isinstance(configs, dict)
         for name, cfg in configs.items():
             assert isinstance(name, str)
             assert isinstance(cfg, McpStdioServerConfig)
 
-    def test_three_servers_built(self, three_server_config: GeoConfig) -> None:
-        """All 3 configured servers are built."""
-        configs = build_mcp_configs(three_server_config)
-        assert len(configs) == 3
-        assert set(configs.keys()) == {"geo-mcp-server", "qgis", "postgres"}
+    def test_domain_servers_built(self, domain_server_config: GeoConfig) -> None:
+        """All configured domain servers are built."""
+        configs = build_mcp_configs(domain_server_config)
+        assert len(configs) == 2
+        assert set(configs.keys()) == {"geo-mcp-server", "postgres"}
 
     def test_command_correctly_transferred(
         self,
-        three_server_config: GeoConfig,
+        domain_server_config: GeoConfig,
     ) -> None:
         """Command field is correctly transferred from config."""
-        configs = build_mcp_configs(three_server_config)
+        configs = build_mcp_configs(domain_server_config)
         assert configs["geo-mcp-server"].command == "python"
-        assert configs["qgis"].command == "python"
         assert configs["postgres"].command == "python"
 
     def test_args_correctly_transferred(
         self,
-        three_server_config: GeoConfig,
+        domain_server_config: GeoConfig,
     ) -> None:
         """Args list is correctly transferred from config."""
-        configs = build_mcp_configs(three_server_config)
+        configs = build_mcp_configs(domain_server_config)
         assert configs["geo-mcp-server"].args == ["-m", "geo_mcp_server"]
-        assert configs["qgis"].args == ["-m", "qgis_mcp_server"]
         assert configs["postgres"].args == ["-m", "postgres_mcp_server"]
 
     def test_env_correctly_transferred(
         self,
-        three_server_config: GeoConfig,
+        domain_server_config: GeoConfig,
     ) -> None:
         """Env dict is correctly transferred from config."""
-        configs = build_mcp_configs(three_server_config)
+        configs = build_mcp_configs(domain_server_config)
         assert configs["geo-mcp-server"].env["PYTHONUTF8"] == "1"
         assert configs["geo-mcp-server"].env["AMAP_API_KEY"] == "test-key"
-        assert configs["qgis"].env["PROJ_LIB"] == "/path/to/proj"
+        assert configs["postgres"].env["DSN"] == "postgresql://localhost/testdb"
 
-    def test_type_is_stdio(self, three_server_config: GeoConfig) -> None:
+    def test_type_is_stdio(self, domain_server_config: GeoConfig) -> None:
         """All server configs have type='stdio'."""
-        configs = build_mcp_configs(three_server_config)
+        configs = build_mcp_configs(domain_server_config)
         for cfg in configs.values():
             assert cfg.type == "stdio"
 
@@ -268,7 +261,7 @@ class TestVerifyMcpIsolation:
 
     def test_no_leak_returns_true(self) -> None:
         """Manager with only expected servers returns (True, empty set)."""
-        manager = MockMcpManager(["geo-mcp-server", "qgis", "postgres"])
+        manager = MockMcpManager(["geo-mcp-server", "postgres"])
         is_isolated, leaked = verify_mcp_isolation(manager)
         assert is_isolated is True
         assert leaked == set()
@@ -277,7 +270,6 @@ class TestVerifyMcpIsolation:
         """Unexpected server is detected as leak."""
         manager = MockMcpManager([
             "geo-mcp-server",
-            "qgis",
             "postgres",
             "upstream-server",  # This should be detected as leaked
         ])
@@ -296,7 +288,7 @@ class TestVerifyMcpIsolation:
 
     def test_expected_servers_not_disconnected(self) -> None:
         """Expected servers are NOT disconnected."""
-        manager = MockMcpManager(["geo-mcp-server", "qgis", "postgres"])
+        manager = MockMcpManager(["geo-mcp-server", "postgres"])
         verify_mcp_isolation(manager)
         assert len(manager.disconnected) == 0
 
@@ -318,12 +310,12 @@ class TestVerifyMcpIsolation:
 
     def test_all_leaked_when_expected_empty(self) -> None:
         """All servers are leaks when expected_servers is empty."""
-        manager = MockMcpManager(["geo-mcp-server", "qgis"])
+        manager = MockMcpManager(["geo-mcp-server", "postgres"])
         is_isolated, leaked = verify_mcp_isolation(
             manager, expected_servers=set()
         )
         assert is_isolated is False
-        assert leaked == {"geo-mcp-server", "qgis"}
+        assert leaked == {"geo-mcp-server", "postgres"}
 
     def test_list_statuses_error_returns_isolated(self) -> None:
         """If list_statuses() raises, return (True, set()) gracefully."""
@@ -358,18 +350,18 @@ class TestVerifyMcpIsolation:
 class TestGetMcpServerNames:
     """Test get_mcp_server_names() function."""
 
-    def test_returns_list(self, three_server_config: GeoConfig) -> None:
+    def test_returns_list(self, domain_server_config: GeoConfig) -> None:
         """Returns a list of strings."""
-        names = get_mcp_server_names(three_server_config)
+        names = get_mcp_server_names(domain_server_config)
         assert isinstance(names, list)
         for name in names:
             assert isinstance(name, str)
 
-    def test_three_servers(self, three_server_config: GeoConfig) -> None:
-        """All 3 server names returned."""
-        names = get_mcp_server_names(three_server_config)
-        assert len(names) == 3
-        assert set(names) == {"geo-mcp-server", "qgis", "postgres"}
+    def test_domain_servers(self, domain_server_config: GeoConfig) -> None:
+        """Both domain server names returned."""
+        names = get_mcp_server_names(domain_server_config)
+        assert len(names) == 2
+        assert set(names) == {"geo-mcp-server", "postgres"}
 
     def test_single_server(self, single_server_config: GeoConfig) -> None:
         """Single server name returned."""
@@ -389,10 +381,10 @@ class TestGetMcpServerNames:
 
     def test_returns_new_list_not_reference(
         self,
-        three_server_config: GeoConfig,
+        domain_server_config: GeoConfig,
     ) -> None:
         """Returned list is a new list, not a reference to internal dict."""
-        names = get_mcp_server_names(three_server_config)
+        names = get_mcp_server_names(domain_server_config)
         names.append("extra")
         # Original config should not be affected
-        assert "extra" not in three_server_config.mcp_servers
+        assert "extra" not in domain_server_config.mcp_servers

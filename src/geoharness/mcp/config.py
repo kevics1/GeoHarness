@@ -18,7 +18,7 @@ from geoharness.config.settings import GeoConfig
 logger = logging.getLogger(__name__)
 
 # Expected domain MCP servers (no upstream servers should leak in)
-EXPECTED_MCP_SERVERS = {"geo-mcp-server", "qgis", "postgres"}
+EXPECTED_MCP_SERVERS = {"geo-mcp-server", "postgres"}
 
 
 def build_mcp_configs(

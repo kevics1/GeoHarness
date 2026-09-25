@@ -147,9 +147,6 @@ mcp:
     args: ["-m", "geo_mcp_server"]
     env:
       PYTHONUTF8: "1"
-  qgis:
-    command: python
-    args: ["-m", "qgis_mcp_server"]
   postgres:
     command: python
     args: ["-m", "postgres_mcp_server"]

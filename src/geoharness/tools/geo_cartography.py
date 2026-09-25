@@ -1,12 +1,13 @@
 """GeoCartographyTool — cartography pipeline orchestration tool.
 
-QGIS MCP provides individual operations (symbolize, layout, export), but
-doesn't coordinate a complete cartography pipeline. This tool:
+Coordinates a complete cartography pipeline:
 1. Reads analysis type from context
 2. Looks up bridge rules in config (analysis_type → symbolization)
-3. Orchestrates QGIS MCP calls for symbolize → compose → export
+3. Plans symbolize → compose → export for the native renderer
 
 Bridge rules are config-driven — adding new analysis types = YAML edit.
+Rendering is performed natively (PNG/PDF/SVG/HTML), not via an external
+desktop GIS application.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ class GeoCartographyInput(BaseModel):
     )
     layer_name: str = Field(
         default="",
-        description="QGIS layer name to symbolize (for symbolize/full).",
+        description="Data layer name to symbolize (for symbolize/full).",
     )
     analysis_type: str = Field(
         default="",
@@ -59,9 +60,9 @@ class GeoCartographyTool(BaseTool):
 
     name: str = "geo_cartography"
     description: str = (
-        "Orchestrate cartography pipeline: symbolize → compose → export. "
-        "Reads bridge rules from config to auto-select symbolization based "
-        "on analysis type. Uses QGIS MCP for actual rendering."
+        "Cartography pipeline — render maps natively (PNG/PDF/SVG/HTML): "
+        "symbolize → compose → export. Reads bridge rules from config to "
+        "auto-select symbolization based on analysis type."
     )
     input_model: type[BaseModel] = GeoCartographyInput
 
@@ -129,10 +130,10 @@ class GeoCartographyTool(BaseTool):
         args: GeoCartographyInput,
         bridge_rules: dict[str, Any],
     ) -> ToolResult:
-        """Generate symbolization instructions for QGIS MCP.
+        """Generate the symbolization plan for the layer.
 
-        This tool provides the orchestration plan — actual QGIS rendering
-        is done via qgis MCP tools (set_categorized, set_graduated, etc.).
+        Describes how the native renderer will style the layer based on
+        the analysis type's bridge rule.
         """
         if not args.layer_name:
             return ToolResult(
@@ -163,21 +164,18 @@ class GeoCartographyTool(BaseTool):
         if method == "categorized":
             field = args.field_name or "(auto-detect category field)"
             instructions.append(
-                f"  → Use mcp__qgis__set_categorized with "
-                f"layer='{args.layer_name}', field='{field}', "
-                f"color_ramp='{colors}'"
+                f"  → Categorized rendering: field='{field}', "
+                f"color_scheme='{colors}' (one color per category)"
             )
         elif method == "graduated":
             field = args.field_name or "(auto-detect value field)"
             instructions.append(
-                f"  → Use mcp__qgis__set_graduated with "
-                f"layer='{args.layer_name}', field='{field}', "
-                f"color_ramp='{colors}', n_classes={n_classes}"
+                f"  → Graduated rendering: field='{field}', "
+                f"color_scheme='{colors}', n_classes={n_classes}"
             )
         elif method == "flow":
             instructions.append(
-                f"  → Use mcp__qgis__set_single_symbol with "
-                f"layer='{args.layer_name}' (flow lines)"
+                f"  → Flow-line rendering for '{args.layer_name}'"
             )
         elif method == "none":
             instructions.append(
@@ -205,24 +203,16 @@ class GeoCartographyTool(BaseTool):
 
         instructions: list[str] = []
         instructions.append("Composition plan:")
-        instructions.append(f"  Template: {template_path}")
+        instructions.append(f"  Template/reference: {template_path}")
+        instructions.append("  Layout elements (rendered natively):")
         instructions.append(
-            "  Steps (use QGIS MCP tools):"
+            "  1. map frame — symbolize the layer into the plot area"
         )
+        instructions.append("  2. legend — color/class legend")
+        instructions.append("  3. scale bar — metric scale")
+        instructions.append("  4. north arrow — orientation indicator")
         instructions.append(
-            "  1. mcp__qgis__create_layout — create print layout from template"
-        )
-        instructions.append(
-            "  2. mcp__qgis__add_map_item — add map to layout"
-        )
-        instructions.append(
-            "  3. mcp__qgis__add_legend — add legend"
-        )
-        instructions.append(
-            "  4. mcp__qgis__add_scale_bar — add scale bar"
-        )
-        instructions.append(
-            "  5. mcp__qgis__add_north_arrow — add north arrow"
+            "  5. title — analysis type and data source caption"
         )
 
         return ToolResult(output="\n".join(instructions))
@@ -236,13 +226,11 @@ class GeoCartographyTool(BaseTool):
 
         if args.output_format == "pdf":
             instructions.append(
-                f"  → Use mcp__qgis__export_layout_pdf "
-                f"with output_path='{output_path}.pdf'"
+                f"  → Native renderer writes PDF to '{output_path}.pdf'"
             )
         else:
             instructions.append(
-                f"  → Use mcp__qgis__export_layout_image "
-                f"with output_path='{output_path}.png'"
+                f"  → Native renderer writes image to '{output_path}.png'"
             )
 
         return ToolResult(output="\n".join(instructions))

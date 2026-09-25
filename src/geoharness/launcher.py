@@ -149,6 +149,11 @@ def _setup_config_isolation(config: GeoConfig) -> None:
     settings["active_profile"] = "geoharness"
     # Ensure our --system-prompt CLI arg wins; don't pin one in the file.
     settings["system_prompt"] = None
+    # Drop inherited MCP servers — GeoHarness builds its own MCP set from
+    # ~/.geoharness/config.yaml in build_geo_runtime(). A copied entry (e.g.
+    # a stale upstream MCP server from ~/.openharness/settings.json) must not
+    # leak into the TUI backend process.
+    settings["mcp_servers"] = {}
 
     # Clear ALL credential_slot fields and add a clean "geoharness" profile.
     # Nulling credential_slot is the heart of the root-cause fix: it makes

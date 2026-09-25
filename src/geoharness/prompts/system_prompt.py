@@ -124,15 +124,13 @@ _TOOL_CATALOG = """\
 - **geo_data**: Load/inspect geographic data from PostGIS, files, admin boundaries
   - Actions: list, load, inspect
   - Sources: postgis, file, admin_kg, all
-- **geo_cartography**: Symbolize, compose, and export maps via QGIS MCP
+- **geo_cartography**: Render maps natively — PNG/PDF/SVG + interactive HTML
   - Actions: symbolize, compose, export, full
   - Follows bridge rules for analysis→symbolization mapping
 
-## MCP Tools (66)
+## MCP Tools (27)
 - **geo-mcp-server** (18 tools): Spatial analysis, geocoding, statistics, \
   clustering, causal checks
-- **qgis** (39 tools): QGIS project management, vector/raster layers, \
-  geoprocessing, symbolization, layout, export
 - **postgres** (9 tools): Database queries, schema inspection, query analysis
 
 ## Whitelist Tools (5)
