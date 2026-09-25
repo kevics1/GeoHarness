@@ -39,6 +39,7 @@ from pathlib import Path
 
 from geoharness.config.settings import GeoConfig, load_geo_config
 from geoharness.hooks.cascade import build_cascade_manager
+from geoharness.mcp.connect import activate_mcp
 from geoharness.prompts.system_prompt import build_geo_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -210,24 +211,61 @@ async def _run_react_tui(
     system_prompt: str,
     prompt: str | None,
 ) -> int:
-    """Run the React TUI via OpenHarness's run_repl.
+    """Run the React TUI, backed by the GeoHarness runtime.
 
-    Env vars for config isolation are set by launch_geo_tui() before calling
-    this function. The backend subprocess (spawned by launch_react_tui)
-    inherits them via os.environ.copy().
+    Env vars for config isolation were set by launch_geo_tui() and are
+    inherited by the Node frontend and the backend subprocess it spawns.
+
+    The frontend builds its spawn command via
+    ``openharness.ui.react_launcher.build_backend_command``; we swap that
+    module global for _geo_backend_command so the backend subprocess is
+    ``python -m geoharness.tui_backend`` rather than the upstream host.
+    The system prompt and credentials are rebuilt in-process from
+    ``~/.geoharness/config.yaml``, so they are not passed on the command
+    line.
     """
+    from openharness.ui import react_launcher
     from openharness.ui.app import run_repl
+
+    react_launcher.build_backend_command = _geo_backend_command
 
     await run_repl(
         prompt=prompt,
         cwd=str(cwd),
-        model=config.model,
-        base_url=config.base_url or None,
-        system_prompt=system_prompt,
-        api_key=config.api_key,
-        api_format="openai",
     )
     return 0
+
+
+def _geo_backend_command(
+    *,
+    cwd: str | None = None,
+    model: str | None = None,
+    max_turns: int | None = None,
+    base_url: str | None = None,
+    system_prompt: str | None = None,
+    api_key: str | None = None,
+    api_format: str | None = None,
+    permission_mode: str | None = None,
+) -> list[str]:
+    """Build the backend command the React frontend should spawn.
+
+    Replaces upstream ``openharness.ui.react_launcher.build_backend_command``
+    so the frontend launches the GeoHarness backend host
+    (``python -m geoharness.tui_backend``) instead of upstream
+    ``python -m openharness --backend-only``.
+
+    Credentials/model/api-format arguments are intentionally dropped: the
+    GeoHarness runtime is config-driven from ``~/.geoharness/``, so the TUI
+    backend cannot be hijacked by inherited upstream auth settings.
+
+    Kept signature-compatible with the upstream builder (keyword args).
+    """
+    command = [sys.executable, "-m", "geoharness.tui_backend"]
+    if cwd:
+        command.extend(["--cwd", cwd])
+    if permission_mode:
+        command.extend(["--permission-mode", permission_mode])
+    return command
 
 
 async def _run_print_mode(
@@ -252,14 +290,15 @@ async def _run_print_mode(
         system_prompt=system_prompt,
     )
 
-    # Connect MCP servers (build_geo_runtime constructs but doesn't connect)
+    # Activate MCP: bounded per-server connect + tool registration into the
+    # shared registry (build_geo_runtime constructs but does not connect).
     logging.getLogger("openharness").setLevel(logging.WARNING)
     logging.getLogger("mcp").setLevel(logging.WARNING)
     logging.getLogger().setLevel(logging.WARNING)
     try:
-        await bundle.mcp_manager.connect_all()
+        await activate_mcp(bundle)
     except Exception as e:
-        logger.warning("MCP connection failed: %s", e)
+        logger.warning("MCP activation failed: %s", e)
 
     await start_runtime(bundle)
 

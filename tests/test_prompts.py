@@ -326,9 +326,8 @@ class TestLauncher:
         )
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        # Build a mock bundle with async mcp_manager.connect_all
+        # Mock bundle; MCP activation is stubbed at the launcher level.
         mock_bundle = MagicMock()
-        mock_bundle.mcp_manager.connect_all = AsyncMock()
         mock_bundle.engine = MagicMock()
 
         with patch(
@@ -337,24 +336,28 @@ class TestLauncher:
             return_value=mock_bundle,
         ) as mock_build:
             with patch(
-                "openharness.ui.runtime.start_runtime",
+                "geoharness.launcher.activate_mcp",
                 new_callable=AsyncMock,
-            ):
+            ) as mock_activate:
                 with patch(
-                    "openharness.ui.runtime.close_runtime",
+                    "openharness.ui.runtime.start_runtime",
                     new_callable=AsyncMock,
                 ):
-                    from geoharness.launcher import launch_geo_tui
+                    with patch(
+                        "openharness.ui.runtime.close_runtime",
+                        new_callable=AsyncMock,
+                    ):
+                        from geoharness.launcher import launch_geo_tui
 
-                    # Mock input() to return 'exit' immediately
-                    monkeypatch.setattr("builtins.input", lambda _: "exit")
+                        # Mock input() to return 'exit' immediately
+                        monkeypatch.setattr("builtins.input", lambda _: "exit")
 
-                    exit_code = await launch_geo_tui(
-                        cwd=tmp_path, print_mode=True
-                    )
-                    assert exit_code == 0
-                    mock_build.assert_called_once()
-                    mock_bundle.mcp_manager.connect_all.assert_called_once()
+                        exit_code = await launch_geo_tui(
+                            cwd=tmp_path, print_mode=True
+                        )
+                        assert exit_code == 0
+                        mock_build.assert_called_once()
+                        mock_activate.assert_awaited_once_with(mock_bundle)
 
     @pytest.mark.asyncio
     async def test_launch_tui_mode_default(
@@ -442,17 +445,22 @@ class TestBackend:
             new_callable=AsyncMock,
         ) as mock_build:
             with patch(
-                "openharness.ui.runtime.start_runtime",
+                "geoharness.backend.activate_mcp",
                 new_callable=AsyncMock,
-            ):
-                from geoharness.backend import start_geo_backend
+            ) as mock_activate:
+                with patch(
+                    "openharness.ui.runtime.start_runtime",
+                    new_callable=AsyncMock,
+                ):
+                    from geoharness.backend import start_geo_backend
 
-                mock_bundle = AsyncMock()
-                mock_build.return_value = mock_bundle
+                    mock_bundle = AsyncMock()
+                    mock_build.return_value = mock_bundle
 
-                bundle = await start_geo_backend(cwd=tmp_path)
-                assert bundle is mock_bundle
-                mock_build.assert_called_once()
+                    bundle = await start_geo_backend(cwd=tmp_path)
+                    assert bundle is mock_bundle
+                    mock_build.assert_called_once()
+                    mock_activate.assert_awaited_once_with(mock_bundle)
 
     @pytest.mark.asyncio
     async def test_stop_geo_backend_calls_close(

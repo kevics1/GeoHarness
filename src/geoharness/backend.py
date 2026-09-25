@@ -11,6 +11,7 @@ from pathlib import Path
 
 from openharness.ui.runtime import RuntimeBundle, close_runtime, start_runtime
 
+from geoharness.mcp.connect import activate_mcp
 from geoharness.runtime import build_geo_runtime
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,13 @@ async def start_geo_backend(
         config_path=config_path,
         extra_skill_dirs=extra_skill_dirs,
     )
+
+    # Activate MCP (bounded per-server timeouts; degrade gracefully when a
+    # server is slow or misconfigured — the session must still start).
+    try:
+        await activate_mcp(bundle)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MCP activation failed: %s", e)
 
     await start_runtime(bundle)
     logger.info("GeoHarness backend started successfully")

@@ -13,7 +13,7 @@ from typing import Any
 
 from openharness.api.openai_client import OpenAICompatibleClient
 from openharness.commands.registry import create_default_command_registry
-from openharness.config.settings import PermissionSettings
+from openharness.config.settings import PathRuleConfig, PermissionSettings
 from openharness.engine.query_engine import QueryEngine
 from openharness.hooks.executor import HookExecutionContext, HookExecutor
 from openharness.hooks.loader import HookRegistry
@@ -40,6 +40,8 @@ async def build_geo_runtime(
     config_path: Path | None = None,
     system_prompt: str | None = None,
     extra_skill_dirs: tuple[str, ...] = (),
+    permission_prompt: Any | None = None,
+    ask_user_prompt: Any | None = None,
 ) -> RuntimeBundle:
     """Build GeoHarness runtime by directly constructing RuntimeBundle.
 
@@ -97,6 +99,8 @@ async def build_geo_runtime(
         model=config.model,
         system_prompt=system_prompt,
         max_tokens=4096,
+        permission_prompt=permission_prompt,
+        ask_user_prompt=ask_user_prompt,
         hook_executor=hook_executor,
         tool_metadata={
             "geoharness_config": config,
@@ -177,17 +181,54 @@ def _build_mcp_manager(config: GeoConfig) -> McpClientManager:
 
 
 def _build_tool_registry() -> ToolRegistry:
-    """Build tool registry with GeoHarness whitelist.
+    """Build the GeoHarness tool registry (2 native + 5 whitelisted).
 
-    Phase 1: Empty registry — tools will be added in Phase 3.
+    MCP tools are registered later by geoharness.mcp.connect.activate_mcp()
+    once servers have connected — registration mutates this same registry
+    instance, which the QueryEngine also holds.
     """
-    return ToolRegistry()
+    from geoharness.tools import build_geo_tool_registry
+
+    return build_geo_tool_registry()
 
 
 def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
-    """Build permission checker with domain rules."""
-    perm_settings = PermissionSettings()
+    """Build permission checker with rules derived from GeoConfig.
+
+    deny_paths -> deny rules; allow_write_paths -> allow rules (the
+    checker enforces deny rules and the built-in sensitive-path
+    protection; allow rules are recorded for policy completeness).
+    """
+    path_rules: list[PathRuleConfig] = []
+    for pattern in config.permissions.deny_paths:
+        for variant in _path_pattern_variants(pattern):
+            path_rules.append(PathRuleConfig(pattern=variant, allow=False))
+    for pattern in config.permissions.allow_write_paths:
+        for variant in _path_pattern_variants(pattern):
+            path_rules.append(PathRuleConfig(pattern=variant, allow=True))
+
+    perm_settings = PermissionSettings(path_rules=path_rules)
     return PermissionChecker(settings=perm_settings)
+
+
+def _path_pattern_variants(pattern: str) -> tuple[str, ...]:
+    """Expand ``~`` and produce separator variants for fnmatch matching.
+
+    The checker matches fully-resolved absolute paths with fnmatch. On
+    Windows both ``\\`` and ``/`` can appear in candidate paths depending
+    on the tool, and directory patterns should also match their contents.
+    """
+    expanded = str(Path(pattern).expanduser())
+    base = expanded.rstrip("/\\")
+    slash = base.replace("\\", "/")
+    variants = {
+        base,
+        slash,
+        f"{base}/*",
+        f"{base}\\*",
+        f"{slash}/*",
+    }
+    return tuple(sorted(variants))
 
 
 def _build_hook_executor(

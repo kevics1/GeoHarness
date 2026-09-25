@@ -21,8 +21,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: GIS",
 ]
 dependencies = [
-    "openharness-ai>=0.1.9",
+    "openharness-ai>=0.1.9,<0.2",
     "geopandas>=0.14",
+    "pandas>=2.0",
     "shapely>=2.0",
     "matplotlib>=3.8",
     "mapclassify>=2.6",

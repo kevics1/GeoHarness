@@ -63,7 +63,7 @@ def build_geo_tool_registry(
 
     # 3. Register MCP tools if manager is provided
     if mcp_manager is not None:
-        _register_mcp_tools(registry, mcp_manager)
+        register_mcp_tools(registry, mcp_manager)
 
     total = len(registry.list_tools())
     logger.info("Tool registry built: %d tools", total)
@@ -93,41 +93,38 @@ def _register_whitelist_tools(registry: ToolRegistry) -> None:
     logger.info("Registered %d whitelisted OpenHarness tools", registered)
 
 
-def _register_mcp_tools(
-    registry: ToolRegistry, mcp_manager: Any
-) -> None:
-    """Register all MCP tools from connected servers.
+def register_mcp_tools(registry: ToolRegistry, mcp_manager: Any) -> int:
+    """Register all connected MCP tools from a manager into a registry.
 
-    Uses McpToolAdapter to wrap each MCP tool as a BaseTool.
+    Uses the upstream McpToolAdapter(manager, tool_info) contract. The
+    manager exposes a flat list[McpToolInfo] via list_tools().
+
+    Returns:
+        Number of tools registered.
     """
     try:
-        from openharness.mcp.adapter import McpToolAdapter
-    except ImportError:
-        try:
-            from openharness.mcp.client import McpToolAdapter
-        except ImportError as e:
-            logger.warning("McpToolAdapter not available: %s", e)
-            return
+        from openharness.tools.mcp_tool import McpToolAdapter
+    except ImportError as e:
+        logger.warning("McpToolAdapter not available: %s", e)
+        return 0
+
+    try:
+        tools_info = list(mcp_manager.list_tools())
+    except Exception as e:
+        logger.warning("Failed to list MCP tools: %s", e)
+        return 0
 
     registered = 0
-    try:
-        # Try different methods to get MCP tools
-        if hasattr(mcp_manager, "list_tools"):
-            tools_info = mcp_manager.list_tools()
-            for server_name, tool_info in tools_info:
-                tool = McpToolAdapter(
-                    server_name=server_name,
-                    tool_info=tool_info,
-                    mcp_manager=mcp_manager,
-                )
-                registry.register(tool)
-                registered += 1
-        elif hasattr(mcp_manager, "get_all_tools"):
-            tools = mcp_manager.get_all_tools()
-            for tool in tools:
-                registry.register(tool)
-                registered += 1
-    except Exception as e:
-        logger.warning("Failed to register MCP tools: %s", e)
+    for tool_info in tools_info:
+        try:
+            registry.register(McpToolAdapter(mcp_manager, tool_info))
+            registered += 1
+        except Exception as e:
+            logger.warning(
+                "Failed to register MCP tool %s: %s",
+                getattr(tool_info, "name", "?"),
+                e,
+            )
 
     logger.info("Registered %d MCP tools", registered)
+    return registered
