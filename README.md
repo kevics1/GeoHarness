@@ -19,7 +19,7 @@
 
 | 层级 | 技能 | 核心工具 | 触发条件 |
 |------|------|----------|----------|
-| L1 感知 | geo-perception | geo_data, geo_geocode, geo_spatial_relation | 用户请求空间分析 |
+| L1 感知 | geo-perception | geo_db_data, geo_vector_data, geo_raster_data, geo_geocode, geo_spatial_relation | 用户请求空间分析 |
 | L2 理解 | geo-comprehension | geo_moran_global, geo_moran_local, geo_getis_ord | L1完成 + 实体≥5 + 需判断分布模式 |
 | L3 推理 | geo-reasoning | geo_cluster_detect, geo_od_flow, geo_causal_check | L2发现显著模式 (p<0.05) |
 
@@ -261,7 +261,7 @@ geoh dry-run        # 验证运行时组装
 用户：分析武汉市空气质量监测站的空间分布
 
 GeoHarness：
-1. [L1] 调用 geo_data 加载监测站数据
+1. [L1] 调用 geo_vector_data（或 geo_db_data / geo_raster_data）加载数据
 2. [L1] 调用 geo_spatial_relation 计算空间关系
 3. → 级联建议：L2理解（Moran's I 空间自相关）
 4. [L2] 调用 geo_moran_global 全局空间自相关
@@ -285,10 +285,13 @@ GeoHarness/
 │   ├── data/
 │   │   ├── catalog.py            # 数据目录 (统一接口)
 │   │   ├── postgis.py            # PostGIS 连接器
-│   │   ├── file_loader.py        # 文件数据源 (SHP/GeoJSON/GPKG/CSV)
+│   │   ├── file_loader.py        # 矢量数据源 (SHP/GeoJSON/GPKG/CSV)
+│   │   ├── raster_loader.py      # 栅格数据源 (GeoTIFF/IMG/ASC/VRT)
 │   │   └── admin_kg.py           # 行政区划 (高德 DataV API)
 │   ├── tools/
-│   │   ├── geo_data.py           # 数据加载工具
+│   │   ├── geo_db_data.py        # 数据库数据工具 (PostGIS)
+│   │   ├── geo_vector_data.py    # 矢量数据工具
+│   │   ├── geo_raster_data.py    # 栅格数据工具
 │   │   ├── geo_cartography.py    # 制图工具 (符号化+导出)
 │   │   └── __init__.py           # 工具注册 (白名单+MCP适配)
 │   ├── hooks/cascade.py          # 认知级联钩子 (CascadeManager)
@@ -313,11 +316,13 @@ GeoHarness/
 
 ## 工具清单
 
-**原生工具 (2)**：
+**原生工具 (4)**：
 
 | 工具 | 功能 | 只读 |
 |------|------|------|
-| geo_data | 加载/检视地理数据 (PostGIS/文件/行政区划) | 是 |
+| geo_db_data | 加载/检视数据库数据 (PostGIS 表) | 是 |
+| geo_vector_data | 加载/检视本地矢量数据 (SHP/GeoJSON/GPKG/CSV) | 是 |
+| geo_raster_data | 加载/检视本地栅格数据 (GeoTIFF/IMG/ASC/VRT) | 是 |
 | geo_cartography | 原生渲染地图 PNG/PDF/SVG + 交互 HTML | 视操作 |
 
 **MCP 工具 (27)**：

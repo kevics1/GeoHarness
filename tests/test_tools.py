@@ -1,9 +1,9 @@
-"""Tests for geoharness.tools — geo_data, geo_cartography, registry.
+"""Tests for geoharness.tools — db/vector/raster loaders, cartography, registry.
 
 Tests verify:
 - Native tools have correct name, description, input_model
 - Tools execute correctly with mocked context
-- Tool registry builds with correct tool count (2 native + 5 whitelist)
+- Tool registry builds with correct tool count (4 native + 5 whitelist)
 """
 
 from __future__ import annotations
@@ -19,35 +19,29 @@ from geoharness.config.settings import (
     CartographyConfig,
     GeoConfig,
 )
+from geoharness.data.catalog import DataSource
 from geoharness.tools.geo_cartography import (
     GeoCartographyInput,
     GeoCartographyTool,
 )
-from geoharness.tools.geo_data import GeoDataInput, GeoDataTool
+from geoharness.tools.geo_db_data import GeoDBDataInput, GeoDBDataTool
+from geoharness.tools.geo_raster_data import GeoRasterDataInput, GeoRasterDataTool
+from geoharness.tools.geo_vector_data import GeoVectorDataInput, GeoVectorDataTool
 
-# ─── Mock DataCatalog ─────────────────────────────────────────────────────
+# ─── Mock connectors / catalog ────────────────────────────────────────────
 
 
-class MockDataCatalog:
-    """Mock DataCatalog for testing."""
-
-    def list_sources(self, source_type: str = "all"):
-        from geoharness.data.catalog import DataSource
-
+class _MockPostGIS:
+    def list_sources(self):
         return [
             DataSource(
                 name="wuhan_air",
                 source_type="postgis",
                 metadata={"format": "PostGIS table", "crs": "EPSG:4326"},
-            ),
-            DataSource(
-                name="test_data",
-                source_type="file",
-                metadata={"format": "geojson", "crs": "EPSG:4326"},
-            ),
+            )
         ]
 
-    def get_source_detail(self, name: str, source_type: str = ""):
+    def get_source_detail(self, name: str):
         if name == "wuhan_air":
             return {
                 "name": "wuhan_air",
@@ -58,18 +52,116 @@ class MockDataCatalog:
                 "bbox": [114.0, 30.0, 115.0, 31.0],
                 "schema": {"id": "integer", "pm25": "double", "geom": "geometry"},
             }
-        return None
+        return {}
+
+    def query_geodataframe(self, name: str, limit: int = 5000):
+        import geopandas as gpd
+        from shapely.geometry import Point
+
+        return gpd.GeoDataFrame(
+            {"id": [1, 2], "pm25": [35.0, 42.0]},
+            geometry=[Point(0, 0), Point(1, 1)],
+            crs="EPSG:4326",
+        )
 
 
-# ─── GeoDataTool Tests ────────────────────────────────────────────────────
+class _MockFileLoader:
+    def list_sources(self):
+        return [
+            DataSource(
+                name="test_data",
+                source_type="file",
+                metadata={"format": "geojson", "crs": "EPSG:4326"},
+            )
+        ]
+
+    def get_source_detail(self, name: str):
+        if name == "test_data":
+            return {
+                "name": "test_data",
+                "source_type": "file",
+                "format": "geojson",
+                "path": "/tmp/test_data.geojson",
+                "crs": "EPSG:4326",
+                "geometry_type": "Point",
+                "bbox": [0.0, 0.0, 1.0, 1.0],
+                "schema": {"id": "int64", "name": "object"},
+            }
+        return {}
+
+    def load_geodataframe(self, name: str):
+        import geopandas as gpd
+        from shapely.geometry import Point
+
+        return gpd.GeoDataFrame(
+            {"id": [1]}, geometry=[Point(0, 0)], crs="EPSG:4326"
+        )
 
 
-class TestGeoDataTool:
-    """Test the geo_data tool."""
+class _MockRasterLoader:
+    def list_sources(self):
+        return [
+            DataSource(
+                name="dem",
+                source_type="raster",
+                metadata={"format": "tif"},
+            )
+        ]
 
+    def get_source_detail(self, name: str):
+        if name == "dem":
+            return {
+                "name": "dem",
+                "source_type": "raster",
+                "format": "gtiff",
+                "path": "/tmp/dem.tif",
+                "crs": "EPSG:32647",
+                "width": 100,
+                "height": 80,
+                "band_count": 1,
+                "dtype": "int16",
+                "nodata": -32768.0,
+                "bbox": [0.0, 0.0, 100.0, 80.0],
+                "resolution": [30.0, 30.0],
+            }
+        return {}
+
+    def band_stats(self, name: str, band: int = 1):
+        return {
+            "band": band,
+            "count": 100,
+            "min": 1.0,
+            "max": 4139.0,
+            "mean": 2000.0,
+            "std": 500.0,
+            "p5": 800.0,
+            "p50": 2000.0,
+            "p95": 3500.0,
+        }
+
+
+class MockDataCatalog:
+    """Mock DataCatalog exposing the three type-specific connectors."""
+
+    def __init__(self) -> None:
+        self.postgis = _MockPostGIS()
+        self.file = _MockFileLoader()
+        self.raster = _MockRasterLoader()
+
+    def get_connector(self, name: str):
+        return {"postgis": self.postgis, "file": self.file}.get(name)
+
+    def get_raster_connector(self):
+        return self.raster
+
+
+# ─── GeoDBDataTool Tests ──────────────────────────────────────────────────
+
+
+class TestGeoDBDataTool:
     @pytest.fixture
-    def tool(self) -> GeoDataTool:
-        return GeoDataTool()
+    def tool(self) -> GeoDBDataTool:
+        return GeoDBDataTool()
 
     @pytest.fixture
     def context(self) -> ToolExecutionContext:
@@ -79,68 +171,190 @@ class TestGeoDataTool:
             hook_executor=None,
         )
 
-    def test_tool_name(self, tool: GeoDataTool):
-        assert tool.name == "geo_data"
-
-    def test_tool_description(self, tool: GeoDataTool):
-        assert "geographic data" in tool.description.lower()
-
-    def test_tool_input_model(self, tool: GeoDataTool):
-        assert tool.input_model is GeoDataInput
-
-    def test_tool_is_read_only(self, tool: GeoDataTool):
-        assert tool.is_read_only(GeoDataInput()) is True
+    def test_tool_metadata(self, tool: GeoDBDataTool):
+        assert tool.name == "geo_db_data"
+        assert "postgis" in tool.description.lower()
+        assert tool.input_model is GeoDBDataInput
+        assert tool.is_read_only(GeoDBDataInput()) is True
 
     @pytest.mark.asyncio
-    async def test_list_action(self, tool: GeoDataTool, context: ToolExecutionContext):
-        result = await tool.execute(
-            GeoDataInput(action="list", source="all"), context
-        )
+    async def test_list(self, tool: GeoDBDataTool, context: ToolExecutionContext):
+        result = await tool.execute(GeoDBDataInput(action="list"), context)
         assert not result.is_error
         assert "wuhan_air" in result.output
-        assert "test_data" in result.output
-        assert "2" in result.output
 
     @pytest.mark.asyncio
-    async def test_inspect_action(self, tool: GeoDataTool, context: ToolExecutionContext):
+    async def test_inspect(self, tool: GeoDBDataTool, context: ToolExecutionContext):
         result = await tool.execute(
-            GeoDataInput(action="inspect", name="wuhan_air"), context
+            GeoDBDataInput(action="inspect", name="wuhan_air"), context
         )
         assert not result.is_error
-        assert "wuhan_air" in result.output
         assert "EPSG:4326" in result.output
         assert "pm25" in result.output
 
     @pytest.mark.asyncio
     async def test_inspect_not_found(
-        self, tool: GeoDataTool, context: ToolExecutionContext
+        self, tool: GeoDBDataTool, context: ToolExecutionContext
     ):
         result = await tool.execute(
-            GeoDataInput(action="inspect", name="nonexistent"), context
+            GeoDBDataInput(action="inspect", name="ghost"), context
         )
         assert result.is_error
         assert "not found" in result.output.lower()
 
     @pytest.mark.asyncio
-    async def test_load_action(self, tool: GeoDataTool, context: ToolExecutionContext):
+    async def test_load(self, tool: GeoDBDataTool, context: ToolExecutionContext):
         result = await tool.execute(
-            GeoDataInput(action="load", name="wuhan_air"), context
+            GeoDBDataInput(action="load", name="wuhan_air", limit=2), context
         )
         assert not result.is_error
-        assert "PostGIS" in result.output or "postgres" in result.output.lower()
+        assert "Features: 2" in result.output
 
     @pytest.mark.asyncio
-    async def test_no_catalog_error(
-        self, tool: GeoDataTool
-    ):
-        context = ToolExecutionContext(
-            cwd=Path("/tmp"),
-            metadata={},  # No data_catalog
-            hook_executor=None,
-        )
-        result = await tool.execute(GeoDataInput(action="list"), context)
+    async def test_missing_catalog(self, tool: GeoDBDataTool):
+        ctx = ToolExecutionContext(cwd=Path("/tmp"), metadata={}, hook_executor=None)
+        result = await tool.execute(GeoDBDataInput(action="list"), ctx)
         assert result.is_error
         assert "DataCatalog" in result.output
+
+    @pytest.mark.asyncio
+    async def test_no_postgis_configured(self, tool: GeoDBDataTool):
+        class Empty:
+            def get_connector(self, name: str):
+                return None
+
+        ctx = ToolExecutionContext(
+            cwd=Path("/tmp"),
+            metadata={"data_catalog": Empty()},
+            hook_executor=None,
+        )
+        result = await tool.execute(GeoDBDataInput(action="list"), ctx)
+        assert result.is_error
+        assert "PostGIS is not configured" in result.output
+
+
+# ─── GeoVectorDataTool Tests ──────────────────────────────────────────────
+
+
+class TestGeoVectorDataTool:
+    @pytest.fixture
+    def tool(self) -> GeoVectorDataTool:
+        return GeoVectorDataTool()
+
+    @pytest.fixture
+    def context(self) -> ToolExecutionContext:
+        return ToolExecutionContext(
+            cwd=Path("/tmp"),
+            metadata={"data_catalog": MockDataCatalog()},
+            hook_executor=None,
+        )
+
+    def test_tool_metadata(self, tool: GeoVectorDataTool):
+        assert tool.name == "geo_vector_data"
+        assert "vector" in tool.description.lower()
+        assert tool.input_model is GeoVectorDataInput
+        assert tool.is_read_only(GeoVectorDataInput()) is True
+
+    @pytest.mark.asyncio
+    async def test_list(self, tool: GeoVectorDataTool, context: ToolExecutionContext):
+        result = await tool.execute(GeoVectorDataInput(action="list"), context)
+        assert not result.is_error
+        assert "test_data" in result.output
+
+    @pytest.mark.asyncio
+    async def test_inspect(self, tool: GeoVectorDataTool, context: ToolExecutionContext):
+        result = await tool.execute(
+            GeoVectorDataInput(action="inspect", name="test_data"), context
+        )
+        assert not result.is_error
+        assert "EPSG:4326" in result.output
+        assert "Point" in result.output
+
+    @pytest.mark.asyncio
+    async def test_inspect_not_found(
+        self, tool: GeoVectorDataTool, context: ToolExecutionContext
+    ):
+        result = await tool.execute(
+            GeoVectorDataInput(action="inspect", name="ghost"), context
+        )
+        assert result.is_error
+        assert "not found" in result.output.lower()
+
+    @pytest.mark.asyncio
+    async def test_load(self, tool: GeoVectorDataTool, context: ToolExecutionContext):
+        result = await tool.execute(
+            GeoVectorDataInput(action="load", name="test_data"), context
+        )
+        assert not result.is_error
+        assert "Features: 1" in result.output
+
+    @pytest.mark.asyncio
+    async def test_missing_name_errors(
+        self, tool: GeoVectorDataTool, context: ToolExecutionContext
+    ):
+        result = await tool.execute(GeoVectorDataInput(action="inspect"), context)
+        assert result.is_error
+
+
+# ─── GeoRasterDataTool Tests ──────────────────────────────────────────────
+
+
+class TestGeoRasterDataTool:
+    @pytest.fixture
+    def tool(self) -> GeoRasterDataTool:
+        return GeoRasterDataTool()
+
+    @pytest.fixture
+    def context(self) -> ToolExecutionContext:
+        return ToolExecutionContext(
+            cwd=Path("/tmp"),
+            metadata={"data_catalog": MockDataCatalog()},
+            hook_executor=None,
+        )
+
+    def test_tool_metadata(self, tool: GeoRasterDataTool):
+        assert tool.name == "geo_raster_data"
+        assert "raster" in tool.description.lower()
+        assert tool.input_model is GeoRasterDataInput
+        assert tool.is_read_only(GeoRasterDataInput()) is True
+
+    @pytest.mark.asyncio
+    async def test_list(self, tool: GeoRasterDataTool, context: ToolExecutionContext):
+        result = await tool.execute(GeoRasterDataInput(action="list"), context)
+        assert not result.is_error
+        assert "dem" in result.output
+
+    @pytest.mark.asyncio
+    async def test_inspect(self, tool: GeoRasterDataTool, context: ToolExecutionContext):
+        result = await tool.execute(
+            GeoRasterDataInput(action="inspect", name="dem"), context
+        )
+        assert not result.is_error
+        assert "100 x 80" in result.output
+        assert "EPSG:32647" in result.output
+
+    @pytest.mark.asyncio
+    async def test_stats(self, tool: GeoRasterDataTool, context: ToolExecutionContext):
+        result = await tool.execute(
+            GeoRasterDataInput(action="stats", name="dem", band=1), context
+        )
+        assert not result.is_error
+        assert "4139" in result.output
+
+    @pytest.mark.asyncio
+    async def test_missing_raster_connector(self, tool: GeoRasterDataTool):
+        class NoRaster:
+            def get_raster_connector(self):
+                return None
+
+        ctx = ToolExecutionContext(
+            cwd=Path("/tmp"),
+            metadata={"data_catalog": NoRaster()},
+            hook_executor=None,
+        )
+        result = await tool.execute(GeoRasterDataInput(action="list"), ctx)
+        assert result.is_error
+        assert "raster" in result.output.lower()
 
 
 # ─── GeoCartographyTool Tests ─────────────────────────────────────────────
@@ -329,15 +543,15 @@ class TestBuildGeoToolRegistry:
     """Test build_geo_tool_registry function."""
 
     def test_registry_has_native_tools(self):
-        """Registry should contain geo_data and geo_cartography."""
+        """Registry should contain the four native tools."""
         from geoharness.tools import build_geo_tool_registry
 
         registry = build_geo_tool_registry()
         tools = registry.list_tools()
         tool_names = {t.name for t in tools}
 
-        assert "geo_data" in tool_names
-        assert "geo_cartography" in tool_names
+        assert {"geo_db_data", "geo_vector_data", "geo_raster_data",
+                "geo_cartography"} <= tool_names
 
     def test_registry_has_whitelist_tools(self):
         """Registry should contain whitelisted OpenHarness tools."""
@@ -372,7 +586,7 @@ class TestBuildGeoToolRegistry:
         assert "web_search" not in tool_names
 
     def test_registry_tool_count(self):
-        """Registry should have 2 native + 5 whitelist = 7 tools
+        """Registry should have 4 native + 5 whitelist = 9 tools
         (without MCP).
         """
         from geoharness.tools import build_geo_tool_registry
@@ -380,8 +594,8 @@ class TestBuildGeoToolRegistry:
         registry = build_geo_tool_registry()
         tools = registry.list_tools()
 
-        # 2 native + 5 whitelist = 7 (no MCP connected)
-        assert len(tools) == 7
+        # 4 native + 5 whitelist = 9 (no MCP connected)
+        assert len(tools) == 9
 
     def test_registry_with_mock_mcp(self):
         """Registry with mock MCP manager should register MCP tools."""
@@ -394,5 +608,5 @@ class TestBuildGeoToolRegistry:
         registry = build_geo_tool_registry(mcp_manager=mock_mcp)
         tools = registry.list_tools()
 
-        # Should still have at least the 7 base tools
-        assert len(tools) >= 7
+        # Should still have at least the 9 base tools
+        assert len(tools) >= 9

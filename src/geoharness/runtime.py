@@ -181,7 +181,7 @@ def _build_mcp_manager(config: GeoConfig) -> McpClientManager:
 
 
 def _build_tool_registry() -> ToolRegistry:
-    """Build the GeoHarness tool registry (2 native + 5 whitelisted).
+    """Build the GeoHarness tool registry (4 native + 5 whitelisted).
 
     MCP tools are registered later by geoharness.mcp.connect.activate_mcp()
     once servers have connected — registration mutates this same registry

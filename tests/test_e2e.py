@@ -112,7 +112,7 @@ class TestEndToEndRuntime:
             assert "geo-reasoning" in prompt
 
             # Tool Catalog
-            assert "geo_data" in prompt
+            assert "geo_vector_data" in prompt
             assert "geo_cartography" in prompt
             assert "geo-mcp-server" in prompt
 
@@ -335,7 +335,7 @@ class TestCascadeEndToEnd:
         assert "L0" in section
 
         # After L1 tool: L1
-        manager.record_tool_use("geo_data")
+        manager.record_tool_use("geo_vector_data")
         section = manager.get_prompt_section()
         assert "L1" in section
 

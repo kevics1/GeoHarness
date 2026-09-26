@@ -135,7 +135,7 @@ class TestBuildGeoSystemPrompt:
         """Prompt contains tool catalog."""
         prompt = build_geo_system_prompt(tmp_path, default_config)
         assert "Tool Catalog" in prompt
-        assert "geo_data" in prompt
+        assert "geo_vector_data" in prompt
         assert "geo_cartography" in prompt
         assert "geo-mcp-server" in prompt
         assert "postgres" in prompt
@@ -250,7 +250,7 @@ class TestSectionBuilders:
     def test_cascade_section_with_manager(self) -> None:
         """_build_cascade_section with CascadeManager returns prompt section."""
         manager = CascadeManager()
-        manager.record_tool_use("geo_data")
+        manager.record_tool_use("geo_vector_data")
         section = _build_cascade_section(manager)
         assert "认知级联" in section or "Cascade" in section
         assert "L1" in section
@@ -280,7 +280,7 @@ class TestSectionBuilders:
         assert "L1 Perception Tools" in section
         assert "L2 Comprehension Tools" in section
         assert "L3 Reasoning Tools" in section
-        assert "geo_data" in section
+        assert "geo_vector_data" in section
         assert "geo_moran_local" in section
         assert "geo_cluster_detect" in section
 

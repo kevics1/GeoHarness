@@ -202,24 +202,28 @@ class TestDataCatalog:
         assert len(admin_sources) == 3
         assert all(s.source_type == "admin_kg" for s in admin_sources)
 
-    def test_get_source_detail(self, mock_config: GeoConfig):
-        """Get detail for a specific source."""
+    def test_get_source_detail_via_connector(self, mock_config: GeoConfig):
+        """Detail lookups go through the type-specific connector directly."""
         catalog = DataCatalog(mock_config)
         catalog.register_connector("postgis", MockPostGISConnector())
 
-        detail = catalog.get_source_detail("wuhan_air_quality")
+        detail = catalog.get_connector("postgis").get_source_detail(
+            "wuhan_air_quality"
+        )
         assert detail is not None
         assert detail["name"] == "wuhan_air_quality"
         assert detail["source_type"] == "postgis"
         assert "schema" in detail
 
     def test_get_source_detail_not_found(self, mock_config: GeoConfig):
-        """Get detail for non-existent source returns None."""
+        """Detail for a non-existent source is an empty dict."""
         catalog = DataCatalog(mock_config)
         catalog.register_connector("postgis", MockPostGISConnector())
 
-        detail = catalog.get_source_detail("nonexistent_table")
-        assert detail is None
+        detail = catalog.get_connector("postgis").get_source_detail(
+            "nonexistent_table"
+        )
+        assert detail == {}
 
     def test_connector_names(self, mock_config: GeoConfig):
         """Test connector_names property."""

@@ -98,10 +98,11 @@ class TestFileSourceDiscovery:
         assert loader._find_file("nope") is None
 
     def test_inspect_resolves_nested_file_detail(self, tmp_path: Path) -> None:
-        """get_source_detail must work for nested files via the catalog."""
+        """The file connector resolves nested files via the catalog."""
         _write_geojson(tmp_path / "数据" / "roads.geojson")
         catalog = DataCatalog(GeoConfig(), workspace_dir=str(tmp_path))
-        detail = catalog.get_source_detail("roads")
+        loader = catalog.get_connector("file")
+        detail = loader.get_source_detail("roads")
         assert detail, "nested file detail should resolve"
         assert detail.get("format") == "geojson"
 
@@ -219,16 +220,20 @@ class TestSystemTableFiltering:
 
 class TestNonBlockingTools:
     @pytest.mark.asyncio
-    async def test_geo_data_does_not_block_event_loop(self) -> None:
-        """A slow catalog call must not freeze the loop (it runs in a thread)."""
+    async def test_geo_db_data_does_not_block_event_loop(self) -> None:
+        """A slow connector call must not freeze the loop (it runs in a thread)."""
         from openharness.tools.base import ToolExecutionContext
 
-        from geoharness.tools.geo_data import GeoDataInput, GeoDataTool
+        from geoharness.tools.geo_db_data import GeoDBDataInput, GeoDBDataTool
 
-        class SlowCatalog:
-            def list_sources(self, source_type: str = "all") -> list[Any]:
+        class SlowConnector:
+            def list_sources(self) -> list[Any]:
                 time.sleep(2.0)
                 return []
+
+        class SlowCatalog:
+            def get_connector(self, name: str) -> Any:
+                return SlowConnector()
 
         ctx = ToolExecutionContext(
             cwd=Path.cwd(),
@@ -246,36 +251,42 @@ class TestNonBlockingTools:
 
         beat = asyncio.create_task(heartbeat())
         try:
-            await GeoDataTool().execute(GeoDataInput(action="list"), ctx)
+            await GeoDBDataTool().execute(GeoDBDataInput(action="list"), ctx)
         finally:
             beat.cancel()
         # Loop stayed alive during the 2s blocking call.
         assert ticks >= 5, f"event loop was blocked (ticks={ticks})"
 
     @pytest.mark.asyncio
-    async def test_geo_data_timeout_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An over-long catalog call yields an error, not a hang."""
+    async def test_geo_db_data_timeout_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An over-long connector call yields an error, not a hang."""
         from openharness.tools.base import ToolExecutionContext
 
-        from geoharness.tools import geo_data as mod
+        from geoharness.tools import geo_db_data as mod
 
-        monkeypatch.setattr(mod, "_CATALOG_TIMEOUT_SECONDS", 0.3)
+        monkeypatch.setattr(mod, "_DB_TIMEOUT_SECONDS", 0.3)
 
-        class HangingCatalog:
-            def list_sources(self, source_type: str = "all") -> list[Any]:
+        class HangingConnector:
+            def list_sources(self) -> list[Any]:
                 time.sleep(5.0)
                 return []
+
+        class HangingCatalog:
+            def get_connector(self, name: str) -> Any:
+                return HangingConnector()
 
         ctx = ToolExecutionContext(
             cwd=Path.cwd(),
             metadata={"data_catalog": HangingCatalog()},
             hook_executor=None,
         )
-        res = await mod.GeoDataTool().execute(
-            mod.GeoDataInput(action="list"), ctx
+        res = await mod.GeoDBDataTool().execute(
+            mod.GeoDBDataInput(action="list"), ctx
         )
         assert res.is_error
-        assert "timed out" in res.output
+        assert "did not respond" in res.output
 
     @pytest.mark.asyncio
     async def test_cartography_render_runs_off_loop(self, tmp_path: Path) -> None:

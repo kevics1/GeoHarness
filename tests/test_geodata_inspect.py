@@ -1,16 +1,16 @@
-"""Regression tests for the geo_data inspect timeout defect.
+"""Regression tests for the data-source lookup defects.
 
-Root cause (regression from the previous fix round): `admin_kg` performs a
-network request inside `get_source_detail`, and `DataCatalog.get_source_detail`
-consulted EVERY connector, so inspecting a purely-local source still triggered
-a DataV fetch. Combined with 3 attempts x 2 TLS contexts x 30s timeout, the
-worst case far exceeded the tool's 60s budget -> every inspect timed out.
+History: the old unified ``geo_data`` tool consulted EVERY connector for a
+single name, so inspecting a purely-local source could trigger a DataV fetch
+or a PostGIS query — and one blocked connector produced "connector did not
+respond within 15s". The fix abandoned that design entirely: each data type now
+has its own connector *and* its own tool.
 
-Fixes verified here:
-1. `DataCatalog.get_source_detail(name, source_type)` honours a connector filter.
-2. `geo_data` forwards `args.source` for inspect/load.
-3. `admin_kg.get_source_detail` is offline-first (region-name heuristic).
-4. `admin_kg._http_get_json` obeys a hard total deadline.
+Verified here:
+1. `DataCatalog` does NOT fan out across connectors (no cross-source lookup).
+2. `admin_kg.get_source_detail` is offline-first (region-name heuristic).
+3. `admin_kg._http_get_json` obeys a hard total deadline.
+4. A local vector inspect never touches an unreachable network backend.
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ class TestFetchDeadline:
         )
 
 
-# ── catalog source filtering ──────────────────────────────────────────────
+# ── type isolation: each tool uses exactly one connector ──────────────────
 
 
 class _RecordingConnector:
@@ -148,71 +148,50 @@ class _RecordingConnector:
         return []
 
 
-class TestCatalogSourceFilter:
-    def _catalog(self) -> tuple[DataCatalog, dict[str, _RecordingConnector]]:
+class TestConnectorIsolation:
+    """The catalog no longer fans out across connectors — that coupling was
+    the old design's root defect."""
+
+    def test_catalog_has_no_cross_source_lookup(self) -> None:
         catalog = DataCatalog(GeoConfig(), workspace_dir=".")
-        file_conn = _RecordingConnector({})
-        pg_conn = _RecordingConnector({"source_type": "postgis"})
-        admin_conn = _RecordingConnector({"source_type": "admin_kg"})
+        assert not hasattr(catalog, "get_source_detail")
+        assert not hasattr(catalog, "resolve_source_detail")
+
+    def test_get_connector_returns_only_the_named_one(self) -> None:
+        catalog = DataCatalog(GeoConfig(), workspace_dir=".")
+        pg = _RecordingConnector({"source_type": "postgis"})
+        file_conn = _RecordingConnector({"source_type": "file"})
+        catalog.register_connector("postgis", pg)  # type: ignore[arg-type]
         catalog.register_connector("file", file_conn)  # type: ignore[arg-type]
-        catalog.register_connector("postgis", pg_conn)  # type: ignore[arg-type]
-        catalog.register_connector("admin_kg", admin_conn)  # type: ignore[arg-type]
-        return catalog, {"file": file_conn, "postgis": pg_conn, "admin_kg": admin_conn}
 
-    def test_filtered_lookup_peeks_local_first(self) -> None:
-        """A local file is always checked first; the filter is a fallback."""
-        catalog, conns = self._catalog()
-        detail = catalog.get_source_detail("province", "postgis")
+        assert catalog.get_connector("postgis") is pg
+        detail = catalog.get_connector("postgis").get_source_detail("province")
         assert detail == {"source_type": "postgis"}
-        # The (empty) file connector is peeked first, then the filter applies.
-        assert conns["file"].calls == 1
-        assert conns["postgis"].calls == 1
-        assert conns["admin_kg"].calls == 0, "network connector must not be queried"
+        assert pg.calls == 1
+        assert file_conn.calls == 0, "the file connector must not be touched"
 
-    def test_local_file_short_circuits_requested_backend(self) -> None:
-        """If a local file exists, the requested backend is never consulted."""
-        catalog, conns = self._catalog()
-        conns["file"]._detail = {"source_type": "file", "path": "x.shp"}
-        detail = catalog.get_source_detail("西昌市行政区划", "postgis")
-        assert detail == {"source_type": "file", "path": "x.shp"}
-        assert conns["postgis"].calls == 0, "backend must be skipped on local hit"
-
-    def test_filtered_lookup_unknown_connector(self) -> None:
-        catalog, _ = self._catalog()
-        assert catalog.get_source_detail("x", "oracle") is None
-
-    def test_broad_lookup_prefers_local_connectors(self) -> None:
-        """With no filter, a local hit must short-circuit before admin_kg."""
-        catalog, conns = self._catalog()
-        conns["postgis"]._detail = {"source_type": "postgis"}
-        detail = catalog.get_source_detail("province")
-        assert detail == {"source_type": "postgis"}
-        assert conns["admin_kg"].calls == 0
-
-    def test_broad_lookup_falls_through_when_local_miss(self) -> None:
-        catalog, conns = self._catalog()
-        # local connectors return nothing -> admin_kg is consulted
-        conns["file"]._detail = {}
-        conns["postgis"]._detail = {}
-        detail = catalog.get_source_detail("湖北省")
-        assert detail == {"source_type": "admin_kg"}
-        assert conns["file"].calls == 1
-        assert conns["postgis"].calls == 1
-        assert conns["admin_kg"].calls == 1
+    def test_unknown_connector_returns_none(self) -> None:
+        catalog = DataCatalog(GeoConfig(), workspace_dir=".")
+        assert catalog.get_connector("oracle") is None
 
 
-# ── end-to-end: inspect must not return a timeout ─────────────────────────
+# ── end-to-end: each data tool is fast and isolated ───────────────────────
 
 
-class TestInspectIsFast:
+class TestDataToolsAreIsolated:
     @pytest.mark.asyncio
-    async def test_local_inspect_with_black_hole_network(self, tmp_path) -> None:
-        """A local inspect must succeed fast even if admin_kg is unreachable."""
+    async def test_vector_inspect_ignores_black_hole_admin_kg(
+        self, tmp_path
+    ) -> None:
+        """A local vector inspect must be fast even if admin_kg is unreachable."""
         import json
 
         from openharness.tools.base import ToolExecutionContext
 
-        from geoharness.tools.geo_data import GeoDataInput, GeoDataTool
+        from geoharness.tools.geo_vector_data import (
+            GeoVectorDataInput,
+            GeoVectorDataTool,
+        )
 
         data_dir = tmp_path / "数据"
         data_dir.mkdir()
@@ -236,35 +215,38 @@ class TestInspectIsFast:
 
         ctx = ToolExecutionContext(
             cwd=tmp_path,
-            metadata={"geoharness_config": GeoConfig(), "data_catalog": catalog},
+            metadata={"data_catalog": catalog},
             hook_executor=None,
         )
 
         t = time.time()
-        res = await GeoDataTool().execute(
-            GeoDataInput(action="inspect", name="roads", source="file"), ctx
+        res = await GeoVectorDataTool().execute(
+            GeoVectorDataInput(action="inspect", name="roads"), ctx
         )
         elapsed = time.time() - t
 
         assert not res.is_error, res.output
         assert "timed out" not in res.output
-        assert elapsed < 15, f"inspect took {elapsed:.1f}s"
+        assert elapsed < 10, f"inspect took {elapsed:.1f}s"
 
     @pytest.mark.asyncio
-    async def test_missing_local_source_returns_not_found(self, tmp_path) -> None:
+    async def test_vector_missing_source_returns_not_found(self, tmp_path) -> None:
         from openharness.tools.base import ToolExecutionContext
 
-        from geoharness.tools.geo_data import GeoDataInput, GeoDataTool
+        from geoharness.tools.geo_vector_data import (
+            GeoVectorDataInput,
+            GeoVectorDataTool,
+        )
 
         catalog = DataCatalog(GeoConfig(), workspace_dir=str(tmp_path))
         ctx = ToolExecutionContext(
             cwd=tmp_path,
-            metadata={"geoharness_config": GeoConfig(), "data_catalog": catalog},
+            metadata={"data_catalog": catalog},
             hook_executor=None,
         )
         t = time.time()
-        res = await GeoDataTool().execute(
-            GeoDataInput(action="inspect", name="nope", source="file"), ctx
+        res = await GeoVectorDataTool().execute(
+            GeoVectorDataInput(action="inspect", name="nope"), ctx
         )
         assert res.is_error
         assert "not found" in res.output.lower()

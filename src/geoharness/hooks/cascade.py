@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 
 # L1 perception tools (from geo-perception skill + geo-mcp-server)
 L1_TOOLS: set[str] = {
-    "geo_data",
+    "geo_db_data",
+    "geo_vector_data",
+    "geo_raster_data",
     "geo_geocode",
     "geo_reverse_geocode",
     "geo_bbox",

@@ -1,7 +1,19 @@
-"""DataCatalog — unified data catalog with pluggable connectors.
+"""DataCatalog — connector registry for the type-specific data tools.
 
-Injected into tool_metadata["data_catalog"] for geo_data tool access.
-Connectors are lazily initialized to avoid TCP connections during construction.
+Each data type owns its connector *and* its tool:
+
+- ``postgis``  → ``geo_db_data``      (database tables)
+- ``file``     → ``geo_vector_data``  (local vector files)
+- ``raster``   → ``geo_raster_data``  (local raster files)
+- ``admin_kg`` → administrative-boundary helper used by cartography
+
+A tool talks to exactly one connector, so a slow database can never delay a
+local file lookup. That cross-source coupling was precisely what made the old
+unified ``geo_data`` tool report "connector did not respond within 15s" for a
+plain workspace shapefile.
+
+Connectors are lazily initialized — ``__init__`` does NOT make TCP
+connections. This is critical for test safety (real connections hang tests).
 """
 
 from __future__ import annotations
@@ -14,17 +26,9 @@ from geoharness.config.settings import GeoConfig
 
 logger = logging.getLogger(__name__)
 
-# Per-connector wall-clock budget for a broad lookup. One blocked backend
-# (DNS/connect/TLS) must not consume the caller's whole action budget.
-_PER_CONNECTOR_SECONDS = 15.0
-
 
 class ConnectorTimeout(Exception):
-    """Raised when a connector exceeds its per-call budget."""
-
-
-# Backwards-compatible private alias.
-_ConnectorTimeout = ConnectorTimeout
+    """Raised when a connector exceeds its own per-call budget."""
 
 
 @dataclass(frozen=True)
@@ -32,7 +36,7 @@ class DataSource:
     """Description of an available data source."""
 
     name: str
-    source_type: str  # "postgis", "file", "admin_kg"
+    source_type: str  # "postgis", "file", "raster", "admin_kg"
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -45,11 +49,7 @@ class DataConnector(Protocol):
 
 
 class DataCatalog:
-    """Unified data catalog aggregating multiple connectors.
-
-    Connectors are lazily initialized — __init__ does NOT make TCP connections.
-    This is critical for test safety (known pitfall: real connections hang tests).
-    """
+    """Registry of type-specific data connectors."""
 
     def __init__(self, config: GeoConfig, workspace_dir: str = "") -> None:
         self._config = config
@@ -66,6 +66,7 @@ class DataCatalog:
         from geoharness.data.admin_kg import AdminKGConnector
         from geoharness.data.file_loader import FileLoader
         from geoharness.data.postgis import PostGISConnector
+        from geoharness.data.raster_loader import RasterLoader
 
         if self._config.data.postgis_dsn:
             try:
@@ -75,11 +76,13 @@ class DataCatalog:
             except Exception as e:
                 logger.warning("PostGIS connector init failed: %s", e)
 
-        # The file connector is ALWAYS registered: when data.file_dir is unset
-        # it falls back to the working directory, so files sitting in the
-        # workspace (e.g. 数据/*.shp) are discoverable without extra config.
+        # The file and raster connectors are ALWAYS registered: when
+        # data.file_dir is unset they fall back to the working directory, so
+        # data sitting in the workspace (e.g. 数据/*.shp) is discoverable
+        # without extra config.
         file_dir = self._config.data.file_dir or self._workspace_dir or "."
         self._connectors["file"] = FileLoader(file_dir=file_dir)
+        self._connectors["raster"] = RasterLoader(file_dir=file_dir)
 
         self._connectors["admin_kg"] = AdminKGConnector(
             api_url=self._config.data.admin_kg_api_url,
@@ -91,13 +94,12 @@ class DataCatalog:
             "DataCatalog initialized with: %s", list(self._connectors.keys())
         )
 
-    def list_sources(
-        self, source_type: str = "all"
-    ) -> list[DataSource]:
+    def list_sources(self, source_type: str = "all") -> list[DataSource]:
         """List available data sources.
 
         Args:
-            source_type: Filter by type ("postgis", "file", "admin_kg", or "all").
+            source_type: Filter by type ("postgis", "file", "raster",
+                "admin_kg", or "all").
 
         Returns:
             List of DataSource descriptors.
@@ -123,169 +125,30 @@ class DataCatalog:
 
         return results
 
-    def get_source_detail(
-        self, name: str, source_type: str = ""
-    ) -> dict[str, Any] | None:
-        """Get detailed information about a specific data source.
-
-        Args:
-            name: Source name (e.g., table name, file name).
-            source_type: Optional connector filter ("postgis", "file",
-                "admin_kg"). When given, ONLY that connector is consulted —
-                essential because a network-backed connector (admin_kg) can
-                take seconds to fail, and querying it for a local file is
-                both unnecessary and slow.
-
-        Returns:
-            Dictionary with source details, or None if not found.
-        """
-        self._ensure_initialized()
-
-        if source_type and source_type != "all":
-            # A local file is authoritative: if it exists, never even attempt
-            # a network backend, regardless of the requested source type. This
-            # is what keeps `inspect` fast when the LLM guesses source='postgis'
-            # for a workspace shapefile.
-            if source_type != "file":
-                local = self._local_file_detail(name)
-                if local:
-                    return local
-
-            connector = self._connectors.get(source_type)
-            if connector is None:
-                return None
-            try:
-                return self._call_with_budget(connector, name) or None
-            except ConnectorTimeout:
-                # Propagate: callers distinguish "backend slow" from "absent".
-                raise
-            except Exception as e:
-                logger.warning(
-                    "get_source_detail(%s) on %s failed: %s", name, source_type, e
-                )
-                return None
-
-        # Broad lookup: the local file connector is consulted first and, on a
-        # hit, short-circuits the rest. It is a pure filesystem walk — no
-        # network — so it must never be starved or made to wait on a backend.
-        order = [n for n in ("file", "postgis") if n in self._connectors]
-        order += [n for n in self._connectors if n not in order]
-
-        last_error: Exception | None = None
-        slow: list[str] = []
-        for name_ in order:
-            connector = self._connectors[name_]
-            try:
-                detail = self._call_with_budget(connector, name)
-                if detail:
-                    return detail
-            except _ConnectorTimeout:
-                slow.append(name_)
-                logger.warning("get_source_detail(%s) via %s timed out", name, name_)
-            except Exception as e:
-                last_error = e
-                logger.warning("get_source_detail(%s) via %s failed: %s", name, name_, e)
-
-        # A slow backend is a different problem from a missing source: say so
-        # rather than silently reporting "not found".
-        if slow:
-            raise _ConnectorTimeout(
-                "connector(s) did not respond in time: " + ", ".join(slow)
-            )
-        if last_error is not None:
-            raise last_error
-        return None
-
-    def _local_file_detail(self, name: str) -> dict[str, Any] | None:
-        """Return the local file detail for ``name``, or ``None``.
-
-        Best-effort and silent: any failure (no file connector, unreadable
-        file) simply means "not a local file", so the caller proceeds.
-        """
-        connector = self._connectors.get("file")
-        if connector is None:
-            return None
-        try:
-            return self._call_with_budget(connector, name) or None
-        except Exception:  # noqa: BLE001 — a local miss must not mask a backend
-            return None
-
-    def _call_with_budget(
-        self, connector: DataConnector, name: str, budget: float | None = None
-    ) -> dict[str, Any] | None:
-        """Call ``connector.get_source_detail`` under a hard wall-clock budget.
-
-        Connectors are synchronous and may block on DNS/connect/TLS. A daemon
-        thread plus ``join(timeout)`` lets the caller move on without ever
-        waiting for a hung worker — and without the process being kept alive
-        by a stuck thread at interpreter shutdown.
-        """
-        import threading
-
-        # Resolve the budget at call time (not as a default argument) so the
-        # module constant stays tunable, including in tests.
-        limit = _PER_CONNECTOR_SECONDS if budget is None else budget
-
-        box: dict[str, Any] = {}
-
-        def _run() -> None:
-            try:
-                box["detail"] = connector.get_source_detail(name)
-            except BaseException as exc:  # noqa: BLE001 — re-raised in caller
-                box["error"] = exc
-
-        worker = threading.Thread(
-            target=_run, name=f"geoh-detail-{name}", daemon=True
-        )
-        worker.start()
-        worker.join(timeout=limit)
-
-        if worker.is_alive():
-            # The worker is wedged inside the connector (a hung socket query).
-            # Drop any cached connection so the *next* call reconnects rather
-            # than reusing a poisoned handle and hanging again.
-            self._reset_connector(connector)
-            raise ConnectorTimeout(
-                f"connector did not respond within {limit:.0f}s"
-            )
-        if "error" in box:
-            raise box["error"]
-        return box.get("detail")
-
-    @staticmethod
-    def _reset_connector(connector: DataConnector) -> None:
-        """Ask a connector to drop a possibly-wedged cached connection."""
-        reset = getattr(connector, "reset", None)
-        if callable(reset):
-            try:
-                reset()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("connector reset failed: %s", exc)
-
-    def resolve_source_detail(
-        self, name: str, source_type: str = ""
-    ) -> tuple[dict[str, Any] | None, str]:
-        """Resolve a source for the tools, returning ``(detail, warning)``.
-
-        Local files are authoritative for every lookup (see
-        ``get_source_detail``), so a workspace shapefile resolves instantly
-        even when the caller asked for ``source='postgis'`` — no warning is
-        needed because nothing went wrong. The second element exists so tool
-        code can surface a soft note in future without a signature change.
-        """
-        return self.get_source_detail(name, source_type), ""
-
     def get_connector(self, name: str) -> DataConnector | None:
         """Get a specific connector by name.
 
         Args:
-            name: Connector name ("postgis", "file", "admin_kg").
+            name: Connector name ("postgis", "file", "raster", "admin_kg").
 
         Returns:
             The connector instance, or None if not configured.
         """
         self._ensure_initialized()
         return self._connectors.get(name)
+
+    def get_raster_connector(self) -> Any | None:
+        """Return the raster connector, or ``None`` if unavailable.
+
+        Raster support is optional (needs ``rasterio``); an import failure is
+        reported as "no raster source" rather than crashing the tool.
+        """
+        try:
+            self._ensure_initialized()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Raster connector unavailable: %s", exc)
+            return None
+        return self._connectors.get("raster")
 
     @property
     def connector_names(self) -> list[str]:
@@ -307,10 +170,11 @@ def build_data_catalog(config: GeoConfig, workspace_dir: str = "") -> DataCatalo
 
     Args:
         config: GeoHarness configuration.
-        workspace_dir: Working directory used as the file-source fallback when
-            ``config.data.file_dir`` is unset.
+        workspace_dir: Working directory used as the file/raster-source
+            fallback when ``config.data.file_dir`` is unset.
 
-    This does NOT initialize connectors — they are lazily created on first access.
-    Safe to call in tests without mocking (as long as no connection is opened).
+    This does NOT initialize connectors — they are lazily created on first
+    access. Safe to call in tests without mocking (as long as no connection
+    is opened).
     """
     return DataCatalog(config, workspace_dir=workspace_dir)

@@ -89,9 +89,9 @@ class TestCascadeManagerBasic:
     def test_record_tool_use_adds_to_history(self) -> None:
         """record_tool_use adds tool name to history."""
         manager = CascadeManager()
-        manager.record_tool_use("geo_data")
+        manager.record_tool_use("geo_vector_data")
         manager.record_tool_use("geo_geocode")
-        assert manager.tool_history == ["geo_data", "geo_geocode"]
+        assert manager.tool_history == ["geo_vector_data", "geo_geocode"]
 
     def test_clear_resets_state(self) -> None:
         """clear() resets all state."""
@@ -105,7 +105,7 @@ class TestCascadeManagerBasic:
     def test_tool_history_is_copy(self) -> None:
         """tool_history property returns a copy, not internal list."""
         manager = CascadeManager()
-        manager.record_tool_use("geo_data")
+        manager.record_tool_use("geo_vector_data")
         history = manager.tool_history
         history.append("injected")
         assert "injected" not in manager.tool_history
@@ -142,8 +142,8 @@ class TestL1ToL2Suggestion:
     def test_any_l1_tool_triggers(self) -> None:
         """Any L1 tool (from L1_TOOLS set) triggers L2 suggestion."""
         manager = CascadeManager()
-        # geo_data is in L1_TOOLS
-        manager.record_tool_use("geo_data")
+        # geo_vector_data is in L1_TOOLS
+        manager.record_tool_use("geo_vector_data")
 
         suggestions = manager.get_pending_suggestions()
         assert len(suggestions) == 1
@@ -264,14 +264,14 @@ class TestNoFalseTriggers:
             l2_to_l3_tools=[],
         )
         manager = CascadeManager(config)
-        # geo_data is in L1_TOOLS, so it should still trigger
-        manager.record_tool_use("geo_data")
+        # geo_vector_data is in L1_TOOLS, so it should still trigger
+        manager.record_tool_use("geo_vector_data")
         assert len(manager.get_pending_suggestions()) == 1
 
     def test_multiple_l1_tools_one_suggestion(self) -> None:
         """Multiple L1 tools only generate one L2 suggestion."""
         manager = CascadeManager()
-        manager.record_tool_use("geo_data")
+        manager.record_tool_use("geo_vector_data")
         manager.record_tool_use("geo_geocode")
         manager.record_tool_use("geo_spatial_relation")
         # Should have only 3 suggestions (one per L1 tool)
@@ -304,7 +304,7 @@ class TestConsumeAndPrompt:
     def test_get_prompt_section_contains_level(self) -> None:
         """get_prompt_section contains current cognitive level."""
         manager = CascadeManager()
-        manager.record_tool_use("geo_data")
+        manager.record_tool_use("geo_vector_data")
         section = manager.get_prompt_section()
         assert "L1" in section
         assert "认知级联" in section
@@ -336,7 +336,7 @@ class TestConsumeAndPrompt:
         manager = CascadeManager()
         assert manager.get_current_level() == "L0"
 
-        manager.record_tool_use("geo_data")
+        manager.record_tool_use("geo_vector_data")
         assert manager.get_current_level() == "L1"
 
         manager.record_tool_use("geo_moran_local")
@@ -491,7 +491,7 @@ class TestCascadeSuggestion:
     def test_default_consumed_false(self) -> None:
         """New suggestion has consumed=False."""
         s = CascadeSuggestion(
-            trigger_tool="geo_data",
+            trigger_tool="geo_vector_data",
             target_level="L2",
             target_tools=["geo_moran_local"],
             message="test message",
@@ -501,7 +501,7 @@ class TestCascadeSuggestion:
     def test_consumed_can_be_set_true(self) -> None:
         """consumed field can be set to True."""
         s = CascadeSuggestion(
-            trigger_tool="geo_data",
+            trigger_tool="geo_vector_data",
             target_level="L2",
             target_tools=["geo_moran_local"],
             message="test",
@@ -549,7 +549,7 @@ class TestToolClassification:
 
     def test_known_l1_tools_present(self) -> None:
         """Known L1 tools are in L1_TOOLS."""
-        assert "geo_data" in L1_TOOLS
+        assert "geo_vector_data" in L1_TOOLS
         assert "geo_spatial_relation" in L1_TOOLS
         assert "geo_geocode" in L1_TOOLS
 

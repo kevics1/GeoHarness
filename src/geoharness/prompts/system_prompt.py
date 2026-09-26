@@ -95,7 +95,7 @@ Three skills provide structured workflows for each cognitive level:
 | geo-comprehension | L2 | 6-step comprehension flow |
 | geo-reasoning | L3 | 6-step reasoning flow |
 
-L1 tools: geo_data, geo_geocode, geo_bbox, geo_spatial_relation
+L1 tools: geo_db_data, geo_vector_data, geo_raster_data, geo_geocode, geo_bbox, geo_spatial_relation
 L2 tools: geo_moran_global, geo_moran_local, geo_getis_ord
 L3 tools: geo_cluster_detect, geo_od_flow, geo_causal_check
 
@@ -120,15 +120,19 @@ MCP timeout on large datasets.
 _TOOL_CATALOG = """\
 # Tool Catalog
 
-## Native Tools (2)
-- **geo_data**: Load/inspect geographic data from PostGIS, files, admin boundaries
-  - Actions: list, load, inspect
-  - Sources: postgis, file, admin_kg, all
+## Native Tools (4)
+- **geo_db_data**: Load/inspect data from the PostGIS database (tables)
+  - Actions: list, inspect, load
+- **geo_vector_data**: Load/inspect local vector files (Shapefile/GeoJSON/GPKG/CSV)
+  - Actions: list, inspect, load
+- **geo_raster_data**: Load/inspect local raster files (GeoTIFF/IMG/ASC/VRT)
+  - Actions: list, inspect, stats
 - **geo_cartography**: Render maps natively — PNG/PDF/SVG + interactive HTML
   - Actions: symbolize, compose, export, full
   - Follows bridge rules for analysis→symbolization mapping
   - Provide a data source (file_path, source_type+source_name, or geojson) to
     render; omit it for a symbolization plan. Outputs go to `outputs_dir`.
+  - For vector sources use source_type='file' (or 'postgis' for a table).
 
 ## MCP Tools (27)
 - **geo-mcp-server** (18 tools): Spatial analysis, geocoding, statistics, \
