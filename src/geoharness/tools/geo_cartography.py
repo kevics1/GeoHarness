@@ -503,6 +503,33 @@ class GeoCartographyTool(BaseTool):
             },
         )
 
+    async def _run_off_loop(
+        self, work: Any, *, what: str
+    ) -> ToolResult:
+        """Run blocking render work in a worker thread under a hard timeout.
+
+        Keeps the async event loop (and therefore the TUI) responsive while
+        geopandas/psycopg/matplotlib work happens. ``what`` names the job in
+        user-facing timeout/error messages.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(work), timeout=_RENDER_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            return ToolResult(
+                output=(
+                    f"Error: {what} timed out after "
+                    f"{_RENDER_TIMEOUT_SECONDS:.0f}s. The source may be very "
+                    "large — reduce the row/layer count, narrow the extent, "
+                    "or choose a faster format."
+                ),
+                is_error=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s failed", what)
+            return ToolResult(output=f"Error: {what} failed — {exc}", is_error=True)
+
     async def _render(
         self,
         args: GeoCartographyInput,
@@ -510,12 +537,7 @@ class GeoCartographyTool(BaseTool):
         outputs_dir: str,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """Run the blocking render pipeline in a worker thread.
-
-        Keeps the async event loop (and therefore the TUI) responsive while
-        geopandas/psycopg/matplotlib work happens. A hard timeout guarantees
-        the tool can never hang a session indefinitely.
-        """
+        """Render a single layer off the event loop."""
         try:
             from geoharness.cartography import render_map  # noqa: F401
         except ImportError as exc:  # pragma: no cover - dependency guard
@@ -524,23 +546,10 @@ class GeoCartographyTool(BaseTool):
                 is_error=True,
             )
 
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._render_blocking, args, rule, outputs_dir, context
-                ),
-                timeout=_RENDER_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            return ToolResult(
-                output=(
-                    f"Error: map rendering timed out after "
-                    f"{_RENDER_TIMEOUT_SECONDS:.0f}s. The source may be very "
-                    "large — reduce the row count, narrow the extent, or "
-                    "choose a faster format."
-                ),
-                is_error=True,
-            )
+        return await self._run_off_loop(
+            lambda: self._render_blocking(args, rule, outputs_dir, context),
+            what="map rendering",
+        )
 
     async def _export(
         self,
@@ -589,29 +598,12 @@ class GeoCartographyTool(BaseTool):
         layer_specs = self._parse_layers(args.layers)
         if layer_specs:
             catalog = context.metadata.get("data_catalog")
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._render_layers_blocking,
-                        args, layer_specs, catalog, outputs_dir,
-                    ),
-                    timeout=_RENDER_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                return ToolResult(
-                    output=(
-                        f"Error: multi-layer rendering timed out after "
-                        f"{_RENDER_TIMEOUT_SECONDS:.0f}s. Reduce layers or "
-                        "feature counts."
-                    ),
-                    is_error=True,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Multi-layer full pipeline failed")
-                return ToolResult(
-                    output=f"Error: multi-layer rendering failed — {exc}",
-                    is_error=True,
-                )
+            return await self._run_off_loop(
+                lambda: self._render_layers_blocking(
+                    args, layer_specs, catalog, outputs_dir
+                ),
+                what="multi-layer rendering",
+            )
 
         sym_result = self._symbolize(args, bridge_rules)
         if sym_result.is_error:
