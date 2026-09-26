@@ -10,9 +10,9 @@
 用户输入
   → GeoHarness 系统提示词（6地理原则 + 技能目录 + 工具目录 + 级联状态）
   → LLM 调用（OpenAI 兼容 API）
-  → 工具调度（2 原生 + 66 MCP + 5 白名单 = 73 工具）
+  → 工具调度（2 原生 + 27 MCP + 5 白名单 = 34 工具）
   → 认知级联（L1感知 → L2理解 → L3推理，建议制，模型可跳过）
-  → 制图输出（符号化 → QPT模板 → 导出）
+  → 制图输出（桥接规则 → 原生渲染 → PNG/PDF/SVG/HTML）
 ```
 
 **认知三级联**：
@@ -31,7 +31,7 @@
 
 - Python 3.10+
 - OpenHarness AI (`pip install openharness-ai>=0.1.9`)
-- QGIS 3.40+（提供 qgis_mcp_server 和 PROJ 数据库）
+- Python 3.10+（原生制图渲染，无需安装 QGIS / PROJ / GDAL 桌面套件）
 - PostgreSQL 15+ with PostGIS 3.3+（空间数据存储）
 
 **可选但推荐**：
@@ -94,10 +94,9 @@ GEOH_POSTGRES_DB=geodata
 GEOH_POSTGRES_USER=postgres
 GEOH_POSTGRES_PASSWORD=your-password
 
-# ── 制图模板 ──────────────────────────────────
-# QPT 模板文件路径，用于地图制图导出
-# 可用默认模板，也可自定义
-GEOH_DEFAULT_TEMPLATE=F:/Desktop/OpenHarness/mapping_knowledge/mapping_resources/07_制图模板库/BASE/BASE-REF_A3H.qpt
+# ── 制图输出 ──────────────────────────────────
+# 原生渲染（matplotlib/folium）的 PNG/PDF/SVG/HTML 落盘目录
+GEOH_OUTPUTS_DIR=~/.geoharness/exports
 ```
 
 ### 第三步：编辑 config.yaml
@@ -112,7 +111,7 @@ api_key: ${GEOH_API_KEY}
 base_url: ${GEOH_BASE_URL}
 
 # ── MCP 服务器 ────────────────────────────────
-# 3 个领域 MCP 服务器，提供 66 个工具
+# 2 个领域 MCP 服务器，提供 27 个工具
 mcp:
   geo-mcp-server:
     # 空间分析核心：地理编码、空间统计、聚类、因果检验
@@ -121,13 +120,6 @@ mcp:
     env:
       PYTHONUTF8: "1"              # 必须！修复 Windows 中文路径 .pth 问题
       AMAP_API_KEY: your-amap-key  # 高德 API Key，用于地理编码
-
-  qgis:
-    # QGIS 制图：项目管理、图层、符号化、布局、导出
-    command: python
-    args: ["-m", "qgis_mcp_server"]
-    env:
-      PROJ_LIB: "E:/Program Files/QGIS 3.40.8/share/proj"  # QGIS PROJ 数据库路径
 
   postgres:
     # PostgreSQL 查询：schema 检查、查询分析
@@ -142,7 +134,7 @@ mcp:
 
 # ── 制图配置 ──────────────────────────────────
 cartography:
-  default_template: ${GEOH_DEFAULT_TEMPLATE}
+  outputs_dir: ${GEOH_OUTPUTS_DIR}   # 渲染结果落盘目录
   # 桥接规则：分析类型 → 符号化映射
   bridge_rules:
     moran_local:
@@ -206,7 +198,7 @@ geo-mcp-server:
   args: ["E:/Administrator/hermes/geo-mcp-server/run.py"]
 ```
 
-**PROJ_LIB**：QGIS 安装目录下的 `share/proj` 文件夹。不设会导致 CRS 转换失败。
+**PROJ / GDAL 数据**：原生渲染由 `geopandas`/`pyproj` 自带数据文件管理，无需再手工设置 `PROJ_LIB`。如果确实需要指定，可设置环境变量 `PROJ_DATA`（pyproj ≥ 3.4 的推荐做法）。
 
 **坐标系说明**：
 - `default_crs` (EPSG:4326)：WGS84，GPS 数据和国际标准
@@ -326,14 +318,13 @@ GeoHarness/
 | 工具 | 功能 | 只读 |
 |------|------|------|
 | geo_data | 加载/检视地理数据 (PostGIS/文件/行政区划) | 是 |
-| geo_cartography | 符号化/排版/导出地图 (通过 QGIS MCP) | 视操作 |
+| geo_cartography | 原生渲染地图 PNG/PDF/SVG + 交互 HTML | 视操作 |
 
-**MCP 工具 (66)**：
+**MCP 工具 (27)**：
 
 | 服务器 | 工具数 | 核心功能 |
 |--------|--------|----------|
 | geo-mcp-server | 18 | 地理编码、空间统计、聚类、因果检验 |
-| qgis | 39 | 项目管理、图层操作、地理处理、符号化、布局导出 |
 | postgres | 9 | 数据库查询、schema 检查、查询分析 |
 
 **白名单工具 (5)**：ask_user_question, skill, todo_write, tool_search, brief
@@ -365,9 +356,13 @@ A: 检查 `config.yaml` 中 MCP 服务器的 `command` 和 `args` 路径是否�
 
 A: Windows 上 Python 读取 `.pth` 文件时用 GBK 解码，遇到 UTF-8 中文路径会 crash。设 `PYTHONUTF8=1` 强制 UTF-8 模式。
 
-**Q: PROJ_LIB 报错 / CRS 转换失败**
+**Q: 中文字符变成方框 / 乱码**
 
-A: 在 qgis MCP 服务器的 env 中设置 `PROJ_LIB` 指向 QGIS 安装目录下的 `share/proj`。
+A: 静态渲染需要一个中文字体。安装任意一款即可（如 `Noto Sans CJK SC`、`SimHei`、`Microsoft YaHei`）。GeoHarness 会自动挑选可用字体，找不到时会在日志中给出警告。
+
+**Q: 想调整输出目录 / 地图尺寸**
+
+A: 输出目录由 `.env` 的 `GEOH_OUTPUTS_DIR`（或 config.yaml 的 `cartography.outputs_dir`）控制，默认 `~/.geoharness/exports`。
 
 **Q: 没有 PostGIS 数据库怎么办？**
 

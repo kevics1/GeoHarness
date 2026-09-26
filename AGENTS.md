@@ -9,7 +9,8 @@ GeoHarness 是基于 OpenHarness 二次开发的地理方向原生 Agent 系统�
 - OpenHarness v0.1.9 (pip 依赖，不修改源码)
 - Pydantic v2, Typer CLI, Rich TUI
 - PostGIS, GeoPandas, Shapely
-- QGIS MCP (制图), geo-mcp-server (空间分析), postgres MCP (数据库)
+- 原生制图渲染: matplotlib (Agg) + folium (Leaflet) + mapclassify（无需 QGIS）
+- geo-mcp-server (空间分析), postgres MCP (数据库)
 
 ## 项目独立性
 GeoHarness 是独立项目，位于 `F:\Desktop\GeoHarness\`，不在 OpenHarness 子目录中。
