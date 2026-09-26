@@ -272,21 +272,23 @@ class ResettableConnector(HungConnector):
 
 
 class TestLocalFallbackOnBackendTimeout:
-    def test_specific_backend_timeout_falls_back_to_file(
+    def test_local_file_wins_and_backend_never_called(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """source='postgis' + local file present => file wins, with a warning."""
+        """source='postgis' + local file present => file wins, fast, no timeout."""
         from geoharness.data import catalog as mod
 
         monkeypatch.setattr(mod, "_PER_CONNECTOR_SECONDS", 0.4)
         file_conn = InstantConnector({"source_type": "file", "path": "x.shp"})
-        catalog = _catalog(file=file_conn, postgis=HungConnector())
+        hung = HungConnector()
+        catalog = _catalog(file=file_conn, postgis=hung)
 
         t = time.time()
         detail, warning = catalog.resolve_source_detail("x", "postgis")
         assert detail == {"source_type": "file", "path": "x.shp"}
-        assert "resolved from local files" in warning
-        assert time.time() - t < 5
+        assert warning == ""
+        assert hung.calls == 0, "a local hit must skip the slow backend entirely"
+        assert time.time() - t < 1
 
     def test_specific_backend_timeout_without_local_match_raises(
         self, monkeypatch: pytest.MonkeyPatch
@@ -337,10 +339,10 @@ class TestLocalFallbackOnBackendTimeout:
         assert hung.resets >= 1, "catalog must reset the wedged connector"
 
     @pytest.mark.asyncio
-    async def test_inspect_through_tool_recovers_local_file(
+    async def test_inspect_local_file_even_when_postgis_requested(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """End-to-end: LLM asks source='postgis', local file still inspected."""
+        """End-to-end: LLM asks source='postgis', local file is inspected fast."""
         import json
 
         from openharness.tools.base import ToolExecutionContext
@@ -365,8 +367,9 @@ class TestLocalFallbackOnBackendTimeout:
             encoding="utf-8",
         )
 
+        hung = HungConnector()
         catalog = DataCatalog(GeoConfig(), workspace_dir=str(tmp_path))
-        catalog.register_connector("postgis", HungConnector())  # type: ignore[arg-type]
+        catalog.register_connector("postgis", hung)  # type: ignore[arg-type]
         catalog.register_connector(  # type: ignore[arg-type]
             "file", FileLoader(file_dir=str(tmp_path))
         )
@@ -376,9 +379,12 @@ class TestLocalFallbackOnBackendTimeout:
             metadata={"data_catalog": catalog},
             hook_executor=None,
         )
+        t = time.time()
         res = await GeoDataTool().execute(
             GeoDataInput(action="inspect", name="roads", source="postgis"), ctx
         )
         assert not res.is_error, res.output
         assert "Source: roads" in res.output
-        assert "resolved from local files" in res.output
+        assert "timed out" not in res.output
+        assert time.time() - t < 2
+        assert hung.calls == 0, "local file must be found without touching PostGIS"

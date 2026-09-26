@@ -10,7 +10,9 @@ Write operations (INSERT/UPDATE/DELETE) are blocked at the query level.
 from __future__ import annotations
 
 import logging
-from typing import Any
+import threading
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from geoharness.data.catalog import DataSource
 
@@ -38,6 +40,32 @@ class PostGISConnector:
         self._statement_timeout_ms = 8000
         self._conn: Any = None  # psycopg.Connection, lazily connected
         self._resolved_dsn: str | None = None
+        # psycopg connections are NOT thread-safe, yet tool calls arrive on
+        # worker threads and may run concurrently (the TUI fires several
+        # `inspect` calls at once). Serialise every use of the shared handle —
+        # otherwise interleaved queries corrupt the protocol and wedge the
+        # socket until the caller's budget expires. RLock so a method that
+        # nests another locked helper does not self-deadlock.
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def _use_connection(self) -> Iterator[Any]:
+        """Yield the shared connection, serialised against other callers.
+
+        The lock is acquired with a timeout: if a previous query is wedged
+        (its worker thread still holds the lock after the caller gave up), a
+        fresh call must fail fast rather than queue up behind it forever.
+        """
+        from geoharness.data.catalog import ConnectorTimeout
+
+        if not self._lock.acquire(timeout=20.0):
+            raise ConnectorTimeout(
+                "another PostGIS query is still holding the connection"
+            )
+        try:
+            yield self._ensure_connection()
+        finally:
+            self._lock.release()
 
     def _resolve_dsn(self) -> str:
         """Return a DSN that avoids the IPv6-first ``localhost`` stall.
@@ -106,7 +134,8 @@ class PostGISConnector:
 
         Called by the catalog when a query exceeds its budget: the worker
         thread may be wedged on a dead socket, and reusing that handle would
-        simply hang again.
+        simply hang again. Must not block on the query lock — the wedged
+        query is exactly what holds it — so this only nils the handle.
         """
         conn, self._conn = self._conn, None
         if conn is not None:
@@ -134,8 +163,7 @@ class PostGISConnector:
         PostGIS bookkeeping tables (``spatial_ref_sys`` and friends) are
         excluded — they are not user data and only add noise to discovery.
         """
-        conn = self._ensure_connection()
-        with conn.cursor() as cur:
+        with self._use_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' "
@@ -150,8 +178,7 @@ class PostGISConnector:
 
     def get_table_schema(self, table_name: str) -> dict[str, str]:
         """Get column names and types for a table."""
-        conn = self._ensure_connection()
-        with conn.cursor() as cur:
+        with self._use_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT column_name, data_type "
                 "FROM information_schema.columns "
@@ -166,8 +193,7 @@ class PostGISConnector:
 
         Returns [xmin, ymin, xmax, ymax] or None if no geometry column.
         """
-        conn = self._ensure_connection()
-        with conn.cursor() as cur:
+        with self._use_connection() as conn, conn.cursor() as cur:
             # Find geometry column
             cur.execute(
                 "SELECT column_name FROM information_schema.columns "
@@ -203,8 +229,7 @@ class PostGISConnector:
         Returns:
             List of row dicts.
         """
-        conn = self._ensure_connection()
-        with conn.cursor() as cur:
+        with self._use_connection() as conn, conn.cursor() as cur:
             # Find geometry column
             cur.execute(
                 "SELECT column_name FROM information_schema.columns "
@@ -247,8 +272,7 @@ class PostGISConnector:
         import geopandas as gpd
         from shapely import wkb as shapely_wkb
 
-        conn = self._ensure_connection()
-        with conn.cursor() as cur:
+        with self._use_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_name = %s AND udt_name = 'geometry'",
@@ -317,8 +341,7 @@ class PostGISConnector:
         """Return ``{table: geometry_column}`` for the given tables."""
         if not tables:
             return {}
-        conn = self._ensure_connection()
-        with conn.cursor() as cur:
+        with self._use_connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT table_name, column_name FROM information_schema.columns "
                 "WHERE table_schema = 'public' AND udt_name = 'geometry'"

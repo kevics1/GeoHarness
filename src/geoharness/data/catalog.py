@@ -142,6 +142,15 @@ class DataCatalog:
         self._ensure_initialized()
 
         if source_type and source_type != "all":
+            # A local file is authoritative: if it exists, never even attempt
+            # a network backend, regardless of the requested source type. This
+            # is what keeps `inspect` fast when the LLM guesses source='postgis'
+            # for a workspace shapefile.
+            if source_type != "file":
+                local = self._local_file_detail(name)
+                if local:
+                    return local
+
             connector = self._connectors.get(source_type)
             if connector is None:
                 return None
@@ -156,8 +165,9 @@ class DataCatalog:
                 )
                 return None
 
-        # Broad lookup: try local connectors first so a slow/network-backed
-        # connector (admin_kg) is only reached when nothing local matches.
+        # Broad lookup: the local file connector is consulted first and, on a
+        # hit, short-circuits the rest. It is a pure filesystem walk — no
+        # network — so it must never be starved or made to wait on a backend.
         order = [n for n in ("file", "postgis") if n in self._connectors]
         order += [n for n in self._connectors if n not in order]
 
@@ -185,6 +195,20 @@ class DataCatalog:
         if last_error is not None:
             raise last_error
         return None
+
+    def _local_file_detail(self, name: str) -> dict[str, Any] | None:
+        """Return the local file detail for ``name``, or ``None``.
+
+        Best-effort and silent: any failure (no file connector, unreadable
+        file) simply means "not a local file", so the caller proceeds.
+        """
+        connector = self._connectors.get("file")
+        if connector is None:
+            return None
+        try:
+            return self._call_with_budget(connector, name) or None
+        except Exception:  # noqa: BLE001 — a local miss must not mask a backend
+            return None
 
     def _call_with_budget(
         self, connector: DataConnector, name: str, budget: float | None = None
@@ -241,38 +265,15 @@ class DataCatalog:
     def resolve_source_detail(
         self, name: str, source_type: str = ""
     ) -> tuple[dict[str, Any] | None, str]:
-        """Resolve a source, falling back to local files on backend timeout.
+        """Resolve a source for the tools, returning ``(detail, warning)``.
 
-        Returns ``(detail, warning)``. Exactly one of the two is meaningful:
-        a hit gives ``(detail, "")``; a miss gives ``(None, "")``; a backend
-        timeout that was covered by a local fallback gives
-        ``(detail, "warning text")``.
-
-        Rationale: a network backend (PostGIS/DAV) being unreachable must not
-        hide a perfectly good local file — and must never cost the user more
-        than the per-connector budget.
+        Local files are authoritative for every lookup (see
+        ``get_source_detail``), so a workspace shapefile resolves instantly
+        even when the caller asked for ``source='postgis'`` — no warning is
+        needed because nothing went wrong. The second element exists so tool
+        code can surface a soft note in future without a signature change.
         """
-        try:
-            return self.get_source_detail(name, source_type), ""
-        except ConnectorTimeout as exc:
-            if source_type == "file":
-                raise
-            if source_type in ("", "all"):
-                # Broad lookup raises only after the local file connector was
-                # already consulted; do not query it a second time.
-                raise
-            # A specific network backend timed out: try local files before
-            # giving up, since the source may simply be a workspace shapefile.
-            try:
-                detail = self.get_source_detail(name, "file")
-            except Exception:
-                detail = None
-            if detail:
-                return detail, (
-                    f"Backend '{source_type}' timed out ({exc}); "
-                    "resolved from local files instead."
-                )
-            raise
+        return self.get_source_detail(name, source_type), ""
 
     def get_connector(self, name: str) -> DataConnector | None:
         """Get a specific connector by name.

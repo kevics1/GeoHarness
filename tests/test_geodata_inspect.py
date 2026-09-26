@@ -159,13 +159,23 @@ class TestCatalogSourceFilter:
         catalog.register_connector("admin_kg", admin_conn)  # type: ignore[arg-type]
         return catalog, {"file": file_conn, "postgis": pg_conn, "admin_kg": admin_conn}
 
-    def test_filtered_lookup_touches_one_connector_only(self) -> None:
+    def test_filtered_lookup_peeks_local_first(self) -> None:
+        """A local file is always checked first; the filter is a fallback."""
         catalog, conns = self._catalog()
         detail = catalog.get_source_detail("province", "postgis")
         assert detail == {"source_type": "postgis"}
+        # The (empty) file connector is peeked first, then the filter applies.
+        assert conns["file"].calls == 1
         assert conns["postgis"].calls == 1
         assert conns["admin_kg"].calls == 0, "network connector must not be queried"
-        assert conns["file"].calls == 0
+
+    def test_local_file_short_circuits_requested_backend(self) -> None:
+        """If a local file exists, the requested backend is never consulted."""
+        catalog, conns = self._catalog()
+        conns["file"]._detail = {"source_type": "file", "path": "x.shp"}
+        detail = catalog.get_source_detail("西昌市行政区划", "postgis")
+        assert detail == {"source_type": "file", "path": "x.shp"}
+        assert conns["postgis"].calls == 0, "backend must be skipped on local hit"
 
     def test_filtered_lookup_unknown_connector(self) -> None:
         catalog, _ = self._catalog()
