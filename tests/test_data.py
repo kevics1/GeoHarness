@@ -249,8 +249,10 @@ class TestPostGISConnector:
         """Test list_sources with mocked DB connection."""
         with patch("geoharness.data.postgis.PostGISConnector._ensure_connection") as mock_conn:
             mock_cursor = MagicMock()
+            # list_sources now issues a single information_schema query that
+            # returns (table_name, column_name) pairs for geometry columns.
             mock_cursor.fetchall.return_value = [
-                ("wuhan_air",), ("china_rivers",),
+                ("wuhan_air", "geom"), ("china_rivers", "geom"),
             ]
             mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
             mock_cursor.__exit__ = MagicMock(return_value=False)

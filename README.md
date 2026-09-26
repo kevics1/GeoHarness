@@ -167,7 +167,7 @@ data:
   analysis_crs: EPSG:3857            # Web Mercator（面积/距离计算用）
   postgis_dsn: ${GEOH_POSTGIS_DSN}
   # 行政区划 API（高德 DataV，免费）
-  admin_kg_api_url: https://geo.datav.aliyun.com/v2/district
+  admin_kg_api_url: https://geo.datav.aliyun.com/areas_v3/bound
   admin_kg_cache_dir: ~/.geoharness/workspaces/admin_kg_cache
 
 # ── 权限配置 ──────────────────────────────────

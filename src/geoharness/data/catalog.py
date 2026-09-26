@@ -39,8 +39,9 @@ class DataCatalog:
     This is critical for test safety (known pitfall: real connections hang tests).
     """
 
-    def __init__(self, config: GeoConfig) -> None:
+    def __init__(self, config: GeoConfig, workspace_dir: str = "") -> None:
         self._config = config
+        self._workspace_dir = workspace_dir
         self._connectors: dict[str, DataConnector] = {}
         self._initialized = False
 
@@ -62,10 +63,11 @@ class DataCatalog:
             except Exception as e:
                 logger.warning("PostGIS connector init failed: %s", e)
 
-        if self._config.data.file_dir:
-            self._connectors["file"] = FileLoader(
-                file_dir=self._config.data.file_dir
-            )
+        # The file connector is ALWAYS registered: when data.file_dir is unset
+        # it falls back to the working directory, so files sitting in the
+        # workspace (e.g. 数据/*.shp) are discoverable without extra config.
+        file_dir = self._config.data.file_dir or self._workspace_dir or "."
+        self._connectors["file"] = FileLoader(file_dir=file_dir)
 
         self._connectors["admin_kg"] = AdminKGConnector(
             api_url=self._config.data.admin_kg_api_url,
@@ -155,10 +157,15 @@ class DataCatalog:
         self._initialized = True
 
 
-def build_data_catalog(config: GeoConfig) -> DataCatalog:
+def build_data_catalog(config: GeoConfig, workspace_dir: str = "") -> DataCatalog:
     """Factory function to create a DataCatalog from config.
 
+    Args:
+        config: GeoHarness configuration.
+        workspace_dir: Working directory used as the file-source fallback when
+            ``config.data.file_dir`` is unset.
+
     This does NOT initialize connectors — they are lazily created on first access.
-    Safe to call in tests without mocking.
+    Safe to call in tests without mocking (as long as no connection is opened).
     """
-    return DataCatalog(config)
+    return DataCatalog(config, workspace_dir=workspace_dir)

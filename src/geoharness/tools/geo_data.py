@@ -11,10 +11,19 @@ This tool orchestrates DataCatalog to fill that gap.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from functools import partial
 from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+# Ceiling for a single discovery action. Bounds an unreachable backend so the
+# tool reports an error instead of hanging the session.
+_CATALOG_TIMEOUT_SECONDS = 60.0
 
 
 class GeoDataInput(BaseModel):
@@ -59,7 +68,13 @@ class GeoDataTool(BaseTool):
     async def execute(
         self, arguments: BaseModel, context: ToolExecutionContext
     ) -> ToolResult:
-        """Execute the geo_data tool."""
+        """Execute the geo_data tool.
+
+        All catalog work (TCP connects, filesystem walks, network calls) runs
+        in a worker thread so the async event loop — and therefore the TUI —
+        stays responsive. A blocking connect here used to freeze the whole
+        session for minutes.
+        """
         assert isinstance(arguments, GeoDataInput)
         args: GeoDataInput = arguments
 
@@ -73,15 +88,36 @@ class GeoDataTool(BaseTool):
             )
 
         if args.action == "list":
-            return self._list_sources(catalog, args.source)
+            work = partial(self._list_sources, catalog, args.source)
         elif args.action == "load":
-            return self._load_source(catalog, args)
+            work = partial(self._load_source, catalog, args)
         elif args.action == "inspect":
-            return self._inspect_source(catalog, args.name)
+            work = partial(self._inspect_source, catalog, args.name)
         else:
             return ToolResult(
                 output=f"Unknown action: {args.action}",
                 is_error=True,
+            )
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(work),
+                timeout=_CATALOG_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return ToolResult(
+                output=(
+                    f"Error: data source discovery timed out after "
+                    f"{_CATALOG_TIMEOUT_SECONDS:.0f}s (action={args.action}). "
+                    "A configured backend (PostGIS/DAV API) may be "
+                    "unreachable — check its DSN or network access."
+                ),
+                is_error=True,
+            )
+        except Exception as exc:
+            logger.exception("geo_data action failed")
+            return ToolResult(
+                output=f"Error: {args.action} failed — {exc}", is_error=True
             )
 
     def _list_sources(

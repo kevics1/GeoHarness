@@ -84,7 +84,7 @@ async def build_geo_runtime(
     # 7. Build DataCatalog and CascadeManager (needed for system prompt)
     from geoharness.data.catalog import build_data_catalog
 
-    data_catalog = build_data_catalog(config)
+    data_catalog = build_data_catalog(config, workspace_dir=str(cwd))
     cascade_manager = build_cascade_manager(config)
 
     # 8. Build system prompt (uses cascade_manager for cascade state section)

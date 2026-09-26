@@ -3,7 +3,7 @@
 Fetches province/city/county three-level hierarchy from Aliyun DataV API.
 Includes file cache to avoid repeated API calls.
 
-API: https://geo.datav.aliyun.com/v2/district
+API: https://geo.datav.aliyun.com/areas_v3/bound
 """
 
 from __future__ import annotations
@@ -31,17 +31,69 @@ class AdminKGConnector:
 
     def __init__(
         self,
-        api_url: str = "https://geo.datav.aliyun.com/v2/district",
+        api_url: str = "https://geo.datav.aliyun.com/areas_v3/bound",
         cache_dir: str = "",
     ) -> None:
         self._api_url = api_url.rstrip("/")
-        self._cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".geoharness" / "cache"
+        if cache_dir:
+            self._cache_dir = Path(cache_dir).expanduser()
+        else:
+            self._cache_dir = Path.home() / ".geoharness" / "cache"
 
         if not self._cache_dir.exists():
             try:
                 self._cache_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 logger.warning("Failed to create cache dir: %s", e)
+
+    @staticmethod
+    def _ssl_contexts() -> list[Any]:
+        """Return candidate SSL contexts, most capable first.
+
+        Some servers (the DataV API included) close the connection during a
+        TLS 1.3 handshake. Pinning TLS 1.2 makes the request succeed where the
+        default context fails with ``UNEXPECTED_EOF_WHILE_READING``. The
+        default context stays first so healthy servers are unaffected.
+        """
+        import ssl
+
+        contexts: list[Any] = [ssl.create_default_context()]
+        try:
+            legacy = ssl.create_default_context()
+            legacy.maximum_version = ssl.TLSVersion.TLSv1_2
+            contexts.append(legacy)
+        except Exception as exc:  # pragma: no cover - very old Python
+            logger.debug("Could not build a TLS1.2 context: %s", exc)
+        return contexts
+
+    # The DataV endpoint intermittently resets connections mid-handshake
+    # ("UNEXPECTED_EOF_WHILE_READING"). A few short retries plus a TLS1.2
+    # fallback make the fetch reliable without a real HTTP dependency.
+    _FETCH_ATTEMPTS = 3
+
+    def _http_get_json(self, url: str, timeout: int = 30) -> dict[str, Any]:
+        """GET ``url`` and decode JSON, retrying through TLS hiccups.
+
+        Raises:
+            Exception: the last transport error, if every attempt fails.
+        """
+        last_error: Exception | None = None
+        for attempt in range(self._FETCH_ATTEMPTS):
+            for context in self._ssl_contexts():
+                try:
+                    with urlopen(  # noqa: S310
+                        url, timeout=timeout, context=context
+                    ) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+                except Exception as exc:
+                    last_error = exc
+                    logger.debug(
+                        "Fetch attempt %d failed for %s (%s)",
+                        attempt + 1,
+                        url,
+                        exc,
+                    )
+        raise last_error if last_error else RuntimeError("No SSL context available")
 
     def _fetch_boundary(self, adcode: str, level: str = "full") -> dict[str, Any]:
         """Fetch boundary GeoJSON from DataV API with file cache.
@@ -52,7 +104,7 @@ class AdminKGConnector:
                 ("full"=complete, "parent"=parent only, "children"=children only).
 
         Returns:
-            GeoJSON FeatureCollection dict.
+            GeoJSON FeatureCollection dict (empty FeatureCollection on failure).
         """
         cache_file = self._cache_dir / f"{adcode}_{level}.geojson"
 
@@ -66,8 +118,7 @@ class AdminKGConnector:
         # Fetch from API
         url = f"{self._api_url}/{adcode}_{level}.json"
         try:
-            with urlopen(url, timeout=30) as resp:  # noqa: S310
-                data = json.loads(resp.read().decode("utf-8"))
+            data = self._http_get_json(url)
 
             # Cache the result
             try:

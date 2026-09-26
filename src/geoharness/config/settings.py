@@ -75,7 +75,7 @@ class DataConfig:
     analysis_crs: str = "EPSG:3857"
     postgis_dsn: str = ""
     file_dir: str = ""
-    admin_kg_api_url: str = "https://geo.datav.aliyun.com/v2/district"
+    admin_kg_api_url: str = "https://geo.datav.aliyun.com/areas_v3/bound"
     admin_kg_cache_dir: str = ""
 
 
@@ -217,12 +217,12 @@ def _parse_data(raw: dict[str, Any] | None) -> DataConfig:
     if "admin_kg" in raw and isinstance(raw["admin_kg"], dict):
         admin_kg_raw = raw["admin_kg"]
         admin_kg_api_url = admin_kg_raw.get(
-            "api_url", "https://geo.datav.aliyun.com/v2/district"
+            "api_url", "https://geo.datav.aliyun.com/areas_v3/bound"
         )
         admin_kg_cache_dir = _expand_vars(admin_kg_raw.get("cache_dir", ""))
     else:
         admin_kg_api_url = raw.get(
-            "admin_kg_api_url", "https://geo.datav.aliyun.com/v2/district"
+            "admin_kg_api_url", "https://geo.datav.aliyun.com/areas_v3/bound"
         )
         admin_kg_cache_dir = _expand_vars(raw.get("admin_kg_cache_dir", ""))
 

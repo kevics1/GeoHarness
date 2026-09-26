@@ -26,20 +26,29 @@ class FileLoader:
     CRS is auto-detected via geopandas.
     """
 
-    def __init__(self, file_dir: str) -> None:
-        self._file_dir = Path(file_dir)
+    def __init__(self, file_dir: str, recursive: bool = True) -> None:
+        self._file_dir = Path(file_dir).expanduser()
+        self._recursive = recursive
         if not self._file_dir.exists():
             logger.warning("File directory does not exist: %s", self._file_dir)
 
     def _scan_files(self) -> list[Path]:
-        """Scan directory for supported spatial files."""
+        """Scan the directory for supported spatial files.
+
+        Searches subdirectories too (e.g. a workspace ``数据/`` folder), since
+        spatial data is rarely kept flat.
+        """
         if not self._file_dir.exists():
             return []
 
+        patterns = [f"*{ext}" for ext in _SPATIAL_EXTS | {_CSV_EXT}]
         files: list[Path] = []
-        for ext in _SPATIAL_EXTS | {_CSV_EXT}:
-            files.extend(self._file_dir.glob(f"*{ext}"))
-            files.extend(self._file_dir.glob(f"*{ext.upper()}"))
+        for pattern in patterns:
+            files.extend(self._file_dir.rglob(pattern) if self._recursive
+                         else self._file_dir.glob(pattern))
+            upper = pattern.upper()
+            files.extend(self._file_dir.rglob(upper) if self._recursive
+                         else self._file_dir.glob(upper))
 
         # Deduplicate (Windows is case-insensitive, so *.geojson and *.GEOJSON
         # match the same files). Use lowercased str(path) as dedup key.
@@ -193,9 +202,13 @@ class FileLoader:
         return gdf
 
     def _find_file(self, name: str) -> Path | None:
-        """Find a file by name (with or without extension)."""
+        """Find a file by name (with or without extension).
+
+        Searches the working directory recursively as well, so files kept in
+        a subfolder (e.g. ``数据/城际公路.shp``) resolve by bare name.
+        """
         # Try as full path
-        p = Path(name)
+        p = Path(name).expanduser()
         if p.exists() and p.is_file():
             return p
 
@@ -209,5 +222,12 @@ class FileLoader:
             p = self._file_dir / f"{name}{ext}"
             if p.exists():
                 return p
+
+        # Recursive search by stem (name may or may not carry an extension)
+        if self._recursive and self._file_dir.exists():
+            stem = Path(name).stem
+            for path in self._scan_files():
+                if path.stem == stem or path.name == name:
+                    return path
 
         return None

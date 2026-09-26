@@ -30,9 +30,36 @@ class PostGISConnector:
     DSN is read from config.data.postgis_dsn.
     """
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, connect_timeout: int = 10) -> None:
         self._dsn = dsn
+        self._connect_timeout = connect_timeout
         self._conn: Any = None  # psycopg.Connection, lazily connected
+        self._resolved_dsn: str | None = None
+
+    def _resolve_dsn(self) -> str:
+        """Return a DSN that avoids the IPv6-first ``localhost`` stall.
+
+        On Windows ``localhost`` resolves to ``::1`` before ``127.0.0.1``. If
+        PostgreSQL only listens on IPv4, the IPv6 attempt must fail before
+        falling back — which blocks startup for over two minutes. Preferring
+        the IPv4 loopback when it is reachable removes that stall entirely.
+        """
+        if self._resolved_dsn is not None:
+            return self._resolved_dsn
+
+        dsn = self._dsn
+        if "localhost" in dsn:
+            import socket
+
+            try:
+                with socket.create_connection(("127.0.0.1", 5432), timeout=2):
+                    dsn = dsn.replace("localhost", "127.0.0.1")
+                    logger.debug("Rewrote localhost -> 127.0.0.1 in PostGIS DSN")
+            except OSError:
+                logger.debug("127.0.0.1:5432 unreachable; keeping original DSN")
+
+        self._resolved_dsn = dsn
+        return dsn
 
     def _ensure_connection(self) -> Any:
         """Establish connection lazily on first use."""
@@ -47,7 +74,11 @@ class PostGISConnector:
                 "Install with: pip install psycopg[binary]"
             ) from e
 
-        self._conn = psycopg.connect(self._dsn, autocommit=True)
+        self._conn = psycopg.connect(
+            self._resolve_dsn(),
+            autocommit=True,
+            connect_timeout=self._connect_timeout,
+        )
         logger.info("PostGIS connection established")
         return self._conn
 
@@ -61,8 +92,15 @@ class PostGISConnector:
                     f"detected '{keyword}' in query"
                 )
 
+    # PostGIS/system tables that are not user data
+    _SYSTEM_TABLES = {"spatial_ref_sys", "geography_columns", "geometry_columns"}
+
     def list_tables(self) -> list[str]:
-        """List all spatial tables in the database."""
+        """List all user spatial tables in the database.
+
+        PostGIS bookkeeping tables (``spatial_ref_sys`` and friends) are
+        excluded — they are not user data and only add noise to discovery.
+        """
         conn = self._ensure_connection()
         with conn.cursor() as cur:
             cur.execute(
@@ -71,7 +109,11 @@ class PostGISConnector:
                 "AND table_type = 'BASE TABLE' "
                 "ORDER BY table_name"
             )
-            return [row[0] for row in cur.fetchall()]
+            return [
+                row[0]
+                for row in cur.fetchall()
+                if row[0].lower() not in self._SYSTEM_TABLES
+            ]
 
     def get_table_schema(self, table_name: str) -> dict[str, str]:
         """Get column names and types for a table."""
@@ -205,32 +247,50 @@ class PostGISConnector:
         return gdf
 
     def list_sources(self) -> list[DataSource]:
-        """List all spatial tables as DataSource objects."""
+        """List all spatial tables as DataSource objects.
+
+        Deliberately cheap: a single ``information_schema`` query. Schema and
+        extent are resolved on demand by ``get_source_detail`` — computing
+        them here made discovery issue two extra round-trips per table
+        (including ``ST_Extent`` over multi-hundred-MB tables).
+        """
         try:
             tables = self.list_tables()
         except Exception as e:
             logger.warning("Failed to list PostGIS tables: %s", e)
             return []
 
+        if not tables:
+            return []
+
+        geom_columns = self._geometry_columns(tables)
         sources: list[DataSource] = []
         for table in tables:
-            metadata: dict[str, Any] = {"format": "PostGIS table", "path": table}
-            try:
-                schema = self.get_table_schema(table)
-                extent = self.get_table_extent(table)
-                has_geom = any(v == "geometry" for v in schema.values())
-                metadata["crs"] = "EPSG:4326" if has_geom else ""
-                metadata["bbox"] = extent
-                metadata["schema"] = schema
-            except Exception as e:
-                logger.warning("Failed to get schema for %s: %s", table, e)
-
+            has_geom = table in geom_columns
+            metadata: dict[str, Any] = {
+                "format": "PostGIS table",
+                "path": table,
+                "geometry_column": geom_columns.get(table, ""),
+                "crs": "EPSG:4326" if has_geom else "",
+            }
             sources.append(DataSource(
                 name=table,
                 source_type="postgis",
                 metadata=metadata,
             ))
         return sources
+
+    def _geometry_columns(self, tables: list[str]) -> dict[str, str]:
+        """Return ``{table: geometry_column}`` for the given tables."""
+        if not tables:
+            return {}
+        conn = self._ensure_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND udt_name = 'geometry'"
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
 
     def get_source_detail(self, name: str) -> dict[str, Any]:
         """Get details of a specific table.

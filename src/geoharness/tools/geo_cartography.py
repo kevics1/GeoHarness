@@ -18,6 +18,7 @@ no ``.qgs``/``.qpt`` dependency — rendering is pure Python.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Literal
@@ -28,6 +29,10 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 _DEFAULT_OUTPUTS_DIR = "~/.geoharness/exports"
+
+# Hard ceiling for a single render. Prevents a pathological source (huge
+# table, unreachable DB) from hanging the tool forever.
+_RENDER_TIMEOUT_SECONDS = 300.0
 
 # Bridge-rule render methods understood by the native renderer.
 _RENDER_METHODS = ("categorized", "graduated", "flow", "none")
@@ -141,9 +146,9 @@ class GeoCartographyTool(BaseTool):
         if args.action == "compose":
             return self._compose(args, template_path)
         if args.action == "export":
-            return self._export(args, bridge_rules, outputs_dir, context)
+            return await self._export(args, bridge_rules, outputs_dir, context)
         if args.action == "full":
-            return self._full_pipeline(
+            return await self._full_pipeline(
                 args, bridge_rules, template_path, outputs_dir, context
             )
         return ToolResult(output=f"Unknown action: {args.action}", is_error=True)
@@ -267,22 +272,21 @@ class GeoCartographyTool(BaseTool):
         directory = Path(outputs_dir).expanduser()
         return directory / f"{stem}{suffix}"
 
-    def _render(
+    def _render_blocking(
         self,
         args: GeoCartographyInput,
         rule: dict[str, Any],
         outputs_dir: str,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """Resolve the source, render the map, and report the written path."""
-        try:
-            from geoharness.cartography import render_map
-            from geoharness.cartography.sources import resolve_geodataframe
-        except ImportError as exc:  # pragma: no cover - dependency guard
-            return ToolResult(
-                output=f"Error: rendering dependencies unavailable ({exc}).",
-                is_error=True,
-            )
+        """Resolve the source, render the map, and report the written path.
+
+        Blocking by design (geopandas/psycopg/matplotlib). Callers must run it
+        off the event loop via ``asyncio.to_thread`` — a synchronous DB or
+        render call would otherwise freeze the whole TUI.
+        """
+        from geoharness.cartography import render_map
+        from geoharness.cartography.sources import resolve_geodataframe
 
         catalog = context.metadata.get("data_catalog")
         try:
@@ -348,7 +352,46 @@ class GeoCartographyTool(BaseTool):
             },
         )
 
-    def _export(
+    async def _render(
+        self,
+        args: GeoCartographyInput,
+        rule: dict[str, Any],
+        outputs_dir: str,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """Run the blocking render pipeline in a worker thread.
+
+        Keeps the async event loop (and therefore the TUI) responsive while
+        geopandas/psycopg/matplotlib work happens. A hard timeout guarantees
+        the tool can never hang a session indefinitely.
+        """
+        try:
+            from geoharness.cartography import render_map  # noqa: F401
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            return ToolResult(
+                output=f"Error: rendering dependencies unavailable ({exc}).",
+                is_error=True,
+            )
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._render_blocking, args, rule, outputs_dir, context
+                ),
+                timeout=_RENDER_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return ToolResult(
+                output=(
+                    f"Error: map rendering timed out after "
+                    f"{_RENDER_TIMEOUT_SECONDS:.0f}s. The source may be very "
+                    "large — reduce the row count, narrow the extent, or "
+                    "choose a faster format."
+                ),
+                is_error=True,
+            )
+
+    async def _export(
         self,
         args: GeoCartographyInput,
         bridge_rules: dict[str, Any],
@@ -358,7 +401,7 @@ class GeoCartographyTool(BaseTool):
         """Render the map when data is available, else return the export plan."""
         if self._has_source(args):
             rule = self._get_bridge_rule(args.analysis_type, bridge_rules)
-            return self._render(args, rule, outputs_dir, context)
+            return await self._render(args, rule, outputs_dir, context)
 
         output_path = self._resolve_output_path(args, outputs_dir)
         method = self._get_bridge_rule(args.analysis_type, bridge_rules).get(
@@ -378,7 +421,7 @@ class GeoCartographyTool(BaseTool):
             lines.append("  → static map (matplotlib, headless Agg backend)")
         return ToolResult(output="\n".join(lines))
 
-    def _full_pipeline(
+    async def _full_pipeline(
         self,
         args: GeoCartographyInput,
         bridge_rules: dict[str, Any],
@@ -397,9 +440,9 @@ class GeoCartographyTool(BaseTool):
 
         rule = sym_result.metadata.get("bridge_rule", {})
         if self._has_source(args):
-            exp_result = self._render(args, rule, outputs_dir, context)
+            exp_result = await self._render(args, rule, outputs_dir, context)
         else:
-            exp_result = self._export(args, bridge_rules, outputs_dir, context)
+            exp_result = await self._export(args, bridge_rules, outputs_dir, context)
 
         combined = "\n\n".join(
             [sym_result.output, comp_result.output, exp_result.output]
