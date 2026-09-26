@@ -8,6 +8,8 @@ MCP servers, model settings, and permissions into GeoHarness.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,11 @@ from geoharness.hooks.cascade import (
 from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
 
 logger = logging.getLogger(__name__)
+
+# Agent turn limit. The upstream default (8) aborts multi-layer cartography
+# ("Stopped after 8 turns") well before the workflow finishes; 40 comfortably
+# covers a 9-layer fire-incident map (inspect + load + render per layer).
+_DEFAULT_MAX_TURNS = 40
 
 
 async def build_geo_runtime(
@@ -99,6 +106,11 @@ async def build_geo_runtime(
         model=config.model,
         system_prompt=system_prompt,
         max_tokens=4096,
+        # Multi-layer cartography routinely needs 20+ tool calls (inspect every
+        # layer, load, symbolize, export). The upstream default of 8 turns
+        # aborts mid-workflow ("Stopped after 8 turns"); default to 40, still
+        # overridable via GEOH_MAX_TURNS.
+        max_turns=_resolve_max_turns(config),
         permission_prompt=permission_prompt,
         ask_user_prompt=ask_user_prompt,
         hook_executor=hook_executor,
@@ -108,6 +120,12 @@ async def build_geo_runtime(
             "cascade_manager": cascade_manager,
         },
     )
+
+    # 8b. Warm up in the background: geopandas/rasterio imports plus the first
+    # directory scans take a second or two (longer on cold AV caches). Doing
+    # it here — once — means the model's first batch of parallel inspects hits
+    # warm imports/caches instead of stampeding cold ones.
+    _warm_data_layer(data_catalog)
 
     # 9. Build AppState
     app_state = AppState(
@@ -153,6 +171,57 @@ async def build_geo_runtime(
 
     logger.info("GeoHarness runtime assembled successfully")
     return bundle
+
+
+def _warm_data_layer(data_catalog: Any) -> None:
+    """Pre-import the geo stack and warm the scans in a daemon thread.
+
+    Everything that the model's first tool batch would otherwise do
+    concurrently (heavy C-extension imports, directory walks) runs once here,
+    while the session is still starting up. Failures are logged and ignored —
+    warm-up is best-effort; real tool calls still work without it.
+    """
+
+    def _warm() -> None:
+        try:
+            import geopandas  # noqa: F401
+            import matplotlib  # noqa: F401
+            import rasterio  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Geo library warm-up failed: %s", exc)
+        try:
+            for name in ("file", "raster"):
+                connector = data_catalog.get_connector(name)
+                if connector is not None:
+                    connector.list_sources()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Scan warm-up failed: %s", exc)
+
+    threading.Thread(target=_warm, name="geoh-warmup", daemon=True).start()
+
+
+def _resolve_max_turns(config: GeoConfig) -> int:
+    """Resolve the agent turn limit: env override, else a generous default.
+
+    The upstream ``QueryEngine`` default is 8, which aborts multi-layer
+    cartography workflows long before the model can inspect, load, symbolize
+    and export every layer. GeoHarness defaults to 40; set ``GEOH_MAX_TURNS``
+    to override (0 or a negative value disables the limit upstream).
+
+    Returns:
+        The turn limit to pass to ``QueryEngine``.
+    """
+    raw = os.environ.get("GEOH_MAX_TURNS", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning("GEOH_MAX_TURNS=%r is not an integer; ignoring", raw)
+        else:
+            if value >= 1:
+                return value
+            logger.warning("GEOH_MAX_TURNS=%d is < 1; ignoring", value)
+    return _DEFAULT_MAX_TURNS
 
 
 def _build_api_client(config: GeoConfig) -> OpenAICompatibleClient:

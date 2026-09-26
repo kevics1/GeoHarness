@@ -130,9 +130,15 @@ _TOOL_CATALOG = """\
 - **geo_cartography**: Render maps natively — PNG/PDF/SVG + interactive HTML
   - Actions: symbolize, compose, export, full
   - Follows bridge rules for analysis→symbolization mapping
-  - Provide a data source (file_path, source_type+source_name, or geojson) to
-    render; omit it for a symbolization plan. Outputs go to `outputs_dir`.
-  - For vector sources use source_type='file' (or 'postgis' for a table).
+  - Single layer: provide file_path, source_type+source_name, or geojson.
+  - **MULTI-LAYER (thematic maps like 火灾态势总图)**: pass `layers` as a JSON
+    array — e.g. layers='[{"source_type":"file","source_name":"西昌市行政区划"},
+    {"source_type":"file","source_name":"当前火场范围","color":"#d7301f"},
+    {"source_type":"file","source_name":"受威胁居民点","label":"居民点"}]' —
+    plus optional basemap_raster='<高程.tif路径>'. This renders ONE combined
+    map with a layer legend in a single call. Do NOT call export once per
+    layer, and do NOT pass a directory path or wildcard as file_path —
+    those render nothing.
 
 ## MCP Tools (27)
 - **geo-mcp-server** (18 tools): Spatial analysis, geocoding, statistics, \

@@ -7,93 +7,19 @@ and vice versa: each loader answers for exactly one data type.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
-import os
-import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+from geoharness._proj_fix import ensure_proj_data
 from geoharness.data.catalog import DataSource
 
 logger = logging.getLogger(__name__)
 
-# PROJ requires its SQLite database to use layout version >= 6. Older ones
-# (PostgreSQL's PostGIS bundle = 2, pyproj's wheel = 4) make every EPSG lookup
-# fail. rasterio ships a current copy of its own.
-_PROJ_DB_MIN_LAYOUT_MINOR = 6
-
-
-def _proj_db_layout_minor(directory: str | None) -> int | None:
-    """Read ``DATABASE.LAYOUT.VERSION.MINOR`` from a proj.db, or None.
-
-    Deliberately uses ``sqlite3`` only — consulting rasterio here would
-    initialise PROJ with the very value we are trying to correct.
-    """
-    if not directory:
-        return None
-    db = Path(directory) / "proj.db"
-    if not db.exists():
-        return None
-    try:
-        con = sqlite3.connect(str(db))
-        try:
-            row = con.execute(
-                "SELECT value FROM metadata "
-                "WHERE key = 'DATABASE.LAYOUT.VERSION.MINOR'"
-            ).fetchone()
-        finally:
-            con.close()
-    except Exception:  # noqa: BLE001 — unreadable db == unusable
-        return None
-    if not row:
-        return None
-    try:
-        return int(row[0])
-    except (TypeError, ValueError):
-        return None
-
-
-def _rasterio_proj_dir() -> str | None:
-    """Locate rasterio's bundled PROJ data without importing rasterio."""
-    spec = importlib.util.find_spec("rasterio")
-    if not spec or not spec.origin:
-        return None
-    candidate = Path(spec.origin).parent / "proj_data"
-    return str(candidate) if candidate.exists() else None
-
-
-def ensure_proj_data() -> None:
-    """Point ``PROJ_LIB`` at a usable ``proj.db``.
-
-    A system-wide ``PROJ_LIB`` aimed at a stale installation (commonly the copy
-    inside ``PostgreSQL\\..\\postgis-3.6\\proj``) makes every EPSG lookup fail
-    with "DATABASE.LAYOUT.VERSION.MINOR = 2 whereas a number >= 6 is expected".
-    Rasters are usually projected (UTM), so this breaks practically every real
-    file. When the configured database is unusable, fall back to rasterio's.
-    """
-    current = os.environ.get("PROJ_LIB")
-    current_minor = _proj_db_layout_minor(current)
-    if current_minor is not None and current_minor >= _PROJ_DB_MIN_LAYOUT_MINOR:
-        return  # already usable
-
-    bundled = _rasterio_proj_dir()
-    if not bundled:
-        return
-    if (_proj_db_layout_minor(bundled) or 0) < _PROJ_DB_MIN_LAYOUT_MINOR:
-        return  # nothing better to fall back to
-
-    logger.warning(
-        "PROJ_LIB (%s) uses proj.db layout %s (< %d); using rasterio's data at %s",
-        current or "<unset>",
-        current_minor,
-        _PROJ_DB_MIN_LAYOUT_MINOR,
-        bundled,
-    )
-    os.environ["PROJ_LIB"] = bundled
-    os.environ["PROJ_DATA"] = bundled
-
-
+# Repair a stale system PROJ_LIB (e.g. PostgreSQL's old proj.db) BEFORE any
+# geopandas/rasterio call initialises PROJ — afterwards it is too late.
 ensure_proj_data()
 
 # Raster formats rasterio/GDAL can open. Kept deliberately narrow so a stray
@@ -112,6 +38,10 @@ _PRUNE_DIRS = frozenset({
 
 _SCAN_TTL_SECONDS = 5.0
 
+# Raster descriptions are cheap-ish (header only) but still I/O; dedupe
+# concurrent inspects of the same file with a short-lived cache.
+_DETAIL_TTL_SECONDS = 30.0
+
 
 class RasterLoader:
     """Discover and describe local raster files."""
@@ -127,6 +57,11 @@ class RasterLoader:
         self._max_depth = max_depth
         self._cache: list[Path] | None = None
         self._cache_time: float = 0.0
+        # Single-flight scanning + per-file detail cache, mirroring the
+        # vector loader: the TUI inspects several rasters at once.
+        self._scan_lock = threading.Lock()
+        self._detail_cache: dict[str, dict[str, Any]] = {}
+        self._detail_lock = threading.Lock()
         if not self._file_dir.exists():
             logger.warning("Raster directory does not exist: %s", self._file_dir)
 
@@ -158,31 +93,37 @@ class RasterLoader:
         return results
 
     def _scan_files(self) -> list[Path]:
-        """Scan for raster files (pruned, depth-bounded, briefly cached)."""
+        """Scan for raster files (pruned, depth-bounded, single-flight cache)."""
         if not self._file_dir.exists():
             return []
 
-        import time as _time
-
-        now = _time.monotonic()
+        now = time.monotonic()
         if self._cache is not None and (now - self._cache_time) < _SCAN_TTL_SECONDS:
             return self._cache
 
-        if self._recursive:
-            candidates = self._iter_candidates()
-        else:
-            candidates = []
-            try:
-                for entry in self._file_dir.iterdir():
-                    if entry.is_file() and entry.suffix.lower() in _RASTER_EXTS:
-                        candidates.append(entry)
-            except OSError:
-                pass
+        with self._scan_lock:
+            # Double-check: another thread may have refreshed while we waited.
+            now = time.monotonic()
+            if self._cache is not None and (
+                now - self._cache_time
+            ) < _SCAN_TTL_SECONDS:
+                return self._cache
 
-        candidates.sort(key=lambda p: str(p).lower())
-        self._cache = candidates
-        self._cache_time = now
-        return candidates
+            if self._recursive:
+                candidates = self._iter_candidates()
+            else:
+                candidates = []
+                try:
+                    for entry in self._file_dir.iterdir():
+                        if entry.is_file() and entry.suffix.lower() in _RASTER_EXTS:
+                            candidates.append(entry)
+                except OSError:
+                    pass
+
+            candidates.sort(key=lambda p: str(p).lower())
+            self._cache = candidates
+            self._cache_time = now
+            return candidates
 
     def list_sources(self) -> list[DataSource]:
         """List raster files as DataSource descriptors (no file opening)."""
@@ -222,15 +163,36 @@ class RasterLoader:
         return None
 
     def get_source_detail(self, name: str) -> dict[str, Any]:
-        """Describe a raster: size, bands, CRS, bounds, resolution, nodata."""
+        """Describe a raster: size, bands, CRS, bounds, resolution, nodata.
+
+        Descriptions are cached per resolved path so concurrent inspects of
+        the same file share one open.
+        """
         path = self.resolve_path(name)
         if path is None:
             return {}
+
+        key = str(path).lower()
+        with self._detail_lock:
+            cached = self._detail_cache.get(key)
+        if cached is not None:
+            cached_at = cached.get("_cached_at", 0.0)
+            if (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS:
+                detail = dict(cached)
+                detail.pop("_cached_at", None)
+                return detail
+
         try:
-            return self._describe(path)
+            detail = self._describe(path)
         except Exception as exc:  # noqa: BLE001 — unopenable file == no detail
             logger.warning("Cannot describe raster %s: %s", path, exc)
             return {}
+
+        with self._detail_lock:
+            stored = dict(detail)
+            stored["_cached_at"] = time.monotonic()
+            self._detail_cache[key] = stored
+        return detail
 
     def _describe(self, path: Path) -> dict[str, Any]:
         import rasterio

@@ -7,10 +7,17 @@ Uses geopandas for CRS detection and bbox clipping.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+from geoharness._proj_fix import ensure_proj_data
 from geoharness.data.catalog import DataSource
+
+# Repair a stale system PROJ_LIB before geopandas initialises PROJ (first
+# to_crs with a poisoned database permanently breaks CRS handling).
+ensure_proj_data()
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,10 @@ _PRUNE_DIRS = frozenset({
 # while still noticing files created seconds ago.
 _SCAN_TTL_SECONDS = 5.0
 
+# File details (schema/bbox) are expensive geopandas reads; cache them a bit
+# longer so concurrent or repeated inspects of the same layer read once.
+_DETAIL_TTL_SECONDS = 30.0
+
 
 class FileLoader:
     """Load spatial data from local files.
@@ -51,6 +62,15 @@ class FileLoader:
         self._max_depth = max_depth
         self._cache: list[Path] | None = None
         self._cache_time: float = 0.0
+        # The TUI fires several inspects at once; without a single-flight lock
+        # each thread re-walks the tree and (on cold caches) re-reads every
+        # shapefile header simultaneously, which on a cold disk/AV setup can
+        # convoy past any tool budget. One thread scans, the rest reuse.
+        self._scan_lock = threading.Lock()
+        # Detail lookups are expensive (geopandas header reads); cache them
+        # per resolved path so concurrent inspect of the same file runs once.
+        self._detail_cache: dict[str, dict[str, Any]] = {}
+        self._detail_lock = threading.Lock()
         if not self._file_dir.exists():
             logger.warning("File directory does not exist: %s", self._file_dir)
 
@@ -84,11 +104,12 @@ class FileLoader:
         return results
 
     def _scan_files(self) -> list[Path]:
-        """Scan for supported spatial files (pruned, cached, depth-bounded).
+        """Scan for supported spatial files (pruned, cached, single-flight).
 
         Searches subdirectories too (e.g. a workspace ``数据/`` folder), since
         spatial data is rarely kept flat. Directories such as ``.venv`` and
-        ``.git`` are pruned, and results are cached briefly.
+        ``.git`` are pruned, results are cached briefly, and concurrent
+        callers share one walk instead of stampeding the directory tree.
         """
         if not self._file_dir.exists():
             return []
@@ -99,33 +120,42 @@ class FileLoader:
         if self._cache is not None and (now - self._cache_time) < _SCAN_TTL_SECONDS:
             return self._cache
 
-        if self._recursive:
-            candidates = self._iter_candidates()
-        else:
-            candidates = []
-            for ext in _SPATIAL_EXTS | {_CSV_EXT}:
-                try:
-                    candidates.extend(self._file_dir.glob(f"*{ext}"))
-                    candidates.extend(self._file_dir.glob(f"*{ext.upper()}"))
-                except OSError:
+        with self._scan_lock:
+            # Double-check: another thread may have refreshed the cache while
+            # we were waiting for the lock.
+            now = _time.monotonic()
+            if self._cache is not None and (
+                now - self._cache_time
+            ) < _SCAN_TTL_SECONDS:
+                return self._cache
+
+            if self._recursive:
+                candidates = self._iter_candidates()
+            else:
+                candidates = []
+                for ext in _SPATIAL_EXTS | {_CSV_EXT}:
+                    try:
+                        candidates.extend(self._file_dir.glob(f"*{ext}"))
+                        candidates.extend(self._file_dir.glob(f"*{ext.upper()}"))
+                    except OSError:
+                        continue
+
+            # Deduplicate (Windows is case-insensitive, so *.geojson and
+            # *.GEOJSON match the same files).
+            seen: set[str] = set()
+            unique: list[Path] = []
+            for f in candidates:
+                if f.suffix.lower() in {".shx", ".dbf", ".prj", ".cpg"}:
                     continue
+                key = str(f).lower()
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(f)
 
-        # Deduplicate (Windows is case-insensitive, so *.geojson and *.GEOJSON
-        # match the same files). Use lowercased str(path) as dedup key.
-        seen: set[str] = set()
-        unique: list[Path] = []
-        for f in candidates:
-            if f.suffix.lower() in {".shx", ".dbf", ".prj", ".cpg"}:
-                continue
-            key = str(f).lower()
-            if key not in seen:
-                seen.add(key)
-                unique.append(f)
-
-        result = sorted(unique)
-        self._cache = result
-        self._cache_time = now
-        return result
+            result = sorted(unique)
+            self._cache = result
+            self._cache_time = now
+            return result
 
     def _read_file_info(self, path: Path) -> dict[str, Any]:
         """Read file metadata using geopandas."""
@@ -219,6 +249,9 @@ class FileLoader:
     def get_source_detail(self, name: str) -> dict[str, Any]:
         """Get detailed information about a specific file.
 
+        Results are cached per resolved path — concurrent inspects of the
+        same file (the TUI issues several at once) share one read.
+
         Args:
             name: File name (with or without extension) or full path.
 
@@ -229,7 +262,23 @@ class FileLoader:
         if path is None:
             return {}
 
-        return self._read_file_info(path)
+        key = str(path).lower()
+        with self._detail_lock:
+            cached = self._detail_cache.get(key)
+        if cached is not None:
+            cached_at = cached.get("_cached_at", 0.0)
+            if (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS:
+                info = dict(cached)
+                info.pop("_cached_at", None)
+                return info
+
+        info = self._read_file_info(path)
+        if not info.get("error"):
+            with self._detail_lock:
+                stored = dict(info)
+                stored["_cached_at"] = time.monotonic()
+                self._detail_cache[key] = stored
+        return info
 
     def resolve_path(self, name: str) -> Path | None:
         """Resolve a file name to an existing path, or ``None``.

@@ -104,6 +104,27 @@ class GeoCartographyInput(BaseModel):
         default="",
         description="Inline GeoJSON FeatureCollection to render instead of a source.",
     )
+    layers: str = Field(
+        default="",
+        description=(
+            "MULTI-LAYER composition (recommended for thematic maps): a JSON "
+            "array of layer specs, e.g. "
+            '[{"source_type":"file","source_name":"西昌市行政区划"},'
+            '{"source_type":"file","source_name":"当前火场范围","color":"#d7301f"}]. '
+            "Each spec: source_type (file/postgis/admin_kg) + source_name or "
+            "file_path, optional label (legend text, defaults to source_name), "
+            "color, and optional geojson inline data. Layers draw in array "
+            "order; output shows ONE combined map with a layer legend. Use "
+            "this instead of calling export once per layer."
+        ),
+    )
+    basemap_raster: str = Field(
+        default="",
+        description=(
+            "Optional raster file path (e.g. elevation GeoTIFF) drawn as the "
+            "static-map backdrop beneath all layers."
+        ),
+    )
     title: str = Field(
         default="",
         description="Map title. Defaults to layer_name when empty.",
@@ -140,6 +161,14 @@ class GeoCartographyTool(BaseTool):
         bridge_rules = config.cartography.bridge_rules
         template_path = config.cartography.default_template
         outputs_dir = getattr(config.cartography, "outputs_dir", "") or _DEFAULT_OUTPUTS_DIR
+
+        # Validate the layers JSON up front so a malformed payload is a clean
+        # tool error instead of an exception inside the worker thread.
+        if args.layers.strip():
+            try:
+                self._parse_layers(args.layers)
+            except ValueError as exc:
+                return ToolResult(output=f"Error: {exc}", is_error=True)
 
         if args.action == "symbolize":
             return self._symbolize(args, bridge_rules)
@@ -253,7 +282,36 @@ class GeoCartographyTool(BaseTool):
 
     def _has_source(self, args: GeoCartographyInput) -> bool:
         """True when the request carries renderable data."""
-        return bool(args.geojson.strip() or args.file_path or args.source_name)
+        return bool(
+            args.geojson.strip() or args.file_path or args.source_name
+            or args.layers.strip()
+        )
+
+    def _parse_layers(self, raw: str) -> list[dict[str, Any]]:
+        """Parse the ``layers`` JSON array into plain dicts."""
+        import json
+
+        text = (raw or "").strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"layers must be a JSON array of layer objects: {exc}"
+            ) from exc
+        if not isinstance(parsed, list) or not parsed:
+            raise ValueError(
+                "layers must be a non-empty JSON array of layer objects."
+            )
+        out: list[dict[str, Any]] = []
+        for i, item in enumerate(parsed):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"layers[{i}] must be an object with source_type/source_name."
+                )
+            out.append(item)
+        return out
 
     def _resolve_output_path(
         self, args: GeoCartographyInput, outputs_dir: str
@@ -285,10 +343,18 @@ class GeoCartographyTool(BaseTool):
         off the event loop via ``asyncio.to_thread`` — a synchronous DB or
         render call would otherwise freeze the whole TUI.
         """
+        catalog = context.metadata.get("data_catalog")
+
+        # ── Multi-layer composition ───────────────────────────────────
+        layer_specs = self._parse_layers(args.layers)
+        if layer_specs:
+            return self._render_layers_blocking(
+                args, layer_specs, catalog, outputs_dir
+            )
+
         from geoharness.cartography import render_map
         from geoharness.cartography.sources import resolve_geodataframe
 
-        catalog = context.metadata.get("data_catalog")
         try:
             gdf = resolve_geodataframe(
                 source_type=args.source_type,
@@ -349,6 +415,87 @@ class GeoCartographyTool(BaseTool):
                 "bridge_rule": rule,
                 "output_path": str(written),
                 "feature_count": len(gdf),
+            },
+        )
+
+    def _render_layers_blocking(
+        self,
+        args: GeoCartographyInput,
+        layer_specs: list[dict[str, Any]],
+        catalog: Any,
+        outputs_dir: str,
+    ) -> ToolResult:
+        """Resolve every layer spec and compose ONE multi-layer map."""
+        from geoharness.cartography import render_layers
+        from geoharness.cartography.sources import resolve_geodataframe
+
+        layers: list[dict[str, Any]] = []
+        total_features = 0
+        for i, spec in enumerate(layer_specs):
+            source_type = str(spec.get("source_type", "") or "file")
+            name = str(
+                spec.get("source_name") or spec.get("file_path") or ""
+            ).strip()
+            try:
+                gdf = resolve_geodataframe(
+                    source_type=source_type,
+                    file_path=str(spec.get("file_path", "") or ""),
+                    source_name=name,
+                    geojson_text=str(spec.get("geojson", "") or ""),
+                    catalog=catalog,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Layer %d (%s) failed to resolve", i, name)
+                return ToolResult(
+                    output=(
+                        f"Error: layer {i + 1} ({name or 'unnamed'}) could not "
+                        f"be loaded — {exc}"
+                    ),
+                    is_error=True,
+                )
+            total_features += len(gdf)
+            layers.append({
+                "gdf": gdf,
+                "label": str(spec.get("label") or name or f"layer_{i + 1}"),
+                "color": str(spec.get("color", "") or ""),
+            })
+
+        output_path = self._resolve_output_path(args, outputs_dir)
+        title = args.title or args.layer_name
+        try:
+            written = render_layers(
+                layers,
+                title=title,
+                output_path=output_path,
+                basemap_raster=str(args.basemap_raster or ""),
+            )
+        except ValueError as exc:
+            return ToolResult(output=f"Error: {exc}", is_error=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Multi-layer rendering failed")
+            return ToolResult(
+                output=f"Error: multi-layer rendering failed — {exc}",
+                is_error=True,
+            )
+
+        size_kb = written.stat().st_size / 1024.0
+        lines = [
+            f"Rendered multi-layer map: {written}",
+            f"  Layers ({len(layers)}): " + ", ".join(
+                str(item["label"]) for item in layers
+            ),
+            f"  Total features: {total_features}",
+            f"  Format: {args.output_format}",
+        ]
+        if args.basemap_raster:
+            lines.append(f"  Basemap raster: {args.basemap_raster}")
+        lines.append(f"  Size: {size_kb:.1f} KB")
+        return ToolResult(
+            output="\n".join(lines),
+            metadata={
+                "output_path": str(written),
+                "feature_count": total_features,
+                "layer_count": len(layers),
             },
         )
 
