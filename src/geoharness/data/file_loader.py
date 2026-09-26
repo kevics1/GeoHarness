@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 _SPATIAL_EXTS = {".shp", ".geojson", ".gpkg", ".json"}
 _CSV_EXT = ".csv"
 
+# Directories that never contain user data. Pruning them keeps a recursive
+# scan of a project root (which may hold .venv/.git) from walking tens of
+# thousands of irrelevant files.
+_PRUNE_DIRS = frozenset({
+    ".git", ".hg", ".svn", ".venv", "venv", "env", ".env",
+    "node_modules", "__pycache__", ".mypy_cache", ".ruff_cache",
+    ".pytest_cache", ".idea", ".vscode", "site-packages",
+    "dist", "build", ".tox", ".nox", ".eggs",
+})
+
+# Re-scanning on every call is wasteful; a short TTL keeps discovery snappy
+# while still noticing files created seconds ago.
+_SCAN_TTL_SECONDS = 5.0
+
 
 class FileLoader:
     """Load spatial data from local files.
@@ -26,45 +40,92 @@ class FileLoader:
     CRS is auto-detected via geopandas.
     """
 
-    def __init__(self, file_dir: str, recursive: bool = True) -> None:
+    def __init__(
+        self,
+        file_dir: str,
+        recursive: bool = True,
+        max_depth: int = 6,
+    ) -> None:
         self._file_dir = Path(file_dir).expanduser()
         self._recursive = recursive
+        self._max_depth = max_depth
+        self._cache: list[Path] | None = None
+        self._cache_time: float = 0.0
         if not self._file_dir.exists():
             logger.warning("File directory does not exist: %s", self._file_dir)
 
+    def _iter_candidates(self) -> list[Path]:
+        """Walk the tree, pruning noise directories, bounded by depth."""
+        results: list[Path] = []
+        root = self._file_dir
+        base_depth = len(root.parts)
+
+        def walk(directory: Path, depth: int) -> None:
+            if depth > self._max_depth:
+                return
+            try:
+                entries = list(directory.iterdir())
+            except OSError as exc:
+                logger.debug("Cannot list %s: %s", directory, exc)
+                return
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        if entry.name in _PRUNE_DIRS or entry.name.startswith("."):
+                            continue
+                        walk(entry, depth + 1)
+                    elif entry.suffix.lower() in _SPATIAL_EXTS | {_CSV_EXT}:
+                        results.append(entry)
+                except OSError:
+                    continue
+
+        walk(root, 1)
+        _ = base_depth
+        return results
+
     def _scan_files(self) -> list[Path]:
-        """Scan the directory for supported spatial files.
+        """Scan for supported spatial files (pruned, cached, depth-bounded).
 
         Searches subdirectories too (e.g. a workspace ``数据/`` folder), since
-        spatial data is rarely kept flat.
+        spatial data is rarely kept flat. Directories such as ``.venv`` and
+        ``.git`` are pruned, and results are cached briefly.
         """
         if not self._file_dir.exists():
             return []
 
-        patterns = [f"*{ext}" for ext in _SPATIAL_EXTS | {_CSV_EXT}]
-        files: list[Path] = []
-        for pattern in patterns:
-            files.extend(self._file_dir.rglob(pattern) if self._recursive
-                         else self._file_dir.glob(pattern))
-            upper = pattern.upper()
-            files.extend(self._file_dir.rglob(upper) if self._recursive
-                         else self._file_dir.glob(upper))
+        import time as _time
+
+        now = _time.monotonic()
+        if self._cache is not None and (now - self._cache_time) < _SCAN_TTL_SECONDS:
+            return self._cache
+
+        if self._recursive:
+            candidates = self._iter_candidates()
+        else:
+            candidates = []
+            for ext in _SPATIAL_EXTS | {_CSV_EXT}:
+                try:
+                    candidates.extend(self._file_dir.glob(f"*{ext}"))
+                    candidates.extend(self._file_dir.glob(f"*{ext.upper()}"))
+                except OSError:
+                    continue
 
         # Deduplicate (Windows is case-insensitive, so *.geojson and *.GEOJSON
         # match the same files). Use lowercased str(path) as dedup key.
         seen: set[str] = set()
         unique: list[Path] = []
-        for f in files:
+        for f in candidates:
+            if f.suffix.lower() in {".shx", ".dbf", ".prj", ".cpg"}:
+                continue
             key = str(f).lower()
             if key not in seen:
                 seen.add(key)
                 unique.append(f)
 
-        # For .shp, don't include .shx, .dbf, .prj sidecar files
-        return sorted(
-            f for f in unique
-            if f.suffix.lower() not in {".shx", ".dbf", ".prj", ".cpg"}
-        )
+        result = sorted(unique)
+        self._cache = result
+        self._cache_time = now
+        return result
 
     def _read_file_info(self, path: Path) -> dict[str, Any]:
         """Read file metadata using geopandas."""
