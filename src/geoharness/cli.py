@@ -160,6 +160,7 @@ mcp:
 # 制图配置
 cartography:
   default_template: ${GEOH_DEFAULT_TEMPLATE}
+  outputs_dir: ${GEOH_OUTPUTS_DIR}
   bridge_rules:
     moran_local:
       render_method: categorized
@@ -217,6 +218,9 @@ GEOH_POSTGRES_PASSWORD=postgres
 
 # 制图模板
 GEOH_DEFAULT_TEMPLATE=F:/Desktop/OpenHarness/mapping_knowledge/mapping_resources/07_制图模板库/BASE/BASE-REF_A3H.qpt
+
+# 制图输出目录（原生渲染的 PNG/PDF/SVG/HTML 落盘位置）
+GEOH_OUTPUTS_DIR=~/.geoharness/exports
 """
 
 

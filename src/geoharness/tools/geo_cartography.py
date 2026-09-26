@@ -1,21 +1,44 @@
-"""GeoCartographyTool — cartography pipeline orchestration tool.
+"""GeoCartographyTool — native cartography pipeline.
 
-Coordinates a complete cartography pipeline:
-1. Reads analysis type from context
-2. Looks up bridge rules in config (analysis_type → symbolization)
-3. Plans symbolize → compose → export for the native renderer
+Pipeline: ``symbolize → compose → export``.
 
-Bridge rules are config-driven — adding new analysis types = YAML edit.
-Rendering is performed natively (PNG/PDF/SVG/HTML), not via an external
-desktop GIS application.
+Two modes:
+
+* **Plan mode (no data source given)** — returns a human-readable plan
+  describing how the layer *would* be symbolized/composed/exported. Used by
+  the agent to reason about styling before loading data.
+* **Render mode (a data source is given)** — resolves the source to a
+  ``GeoDataFrame`` and renders it natively via
+  :mod:`geoharness.cartography` (matplotlib → PNG/PDF/SVG, folium → HTML).
+
+Bridge rules (analysis type → symbolization) stay config-driven: adding a new
+analysis type is a YAML edit, not a code change. No external desktop GIS and
+no ``.qgs``/``.qpt`` dependency — rendering is pure Python.
 """
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_OUTPUTS_DIR = "~/.geoharness/exports"
+
+# Bridge-rule render methods understood by the native renderer.
+_RENDER_METHODS = ("categorized", "graduated", "flow", "none")
+
+_FORMAT_SUFFIXES = {
+    "pdf": ".pdf",
+    "svg": ".svg",
+    "png": ".png",
+    "image": ".png",
+    "html": ".html",
+}
 
 
 class GeoCartographyInput(BaseModel):
@@ -24,45 +47,74 @@ class GeoCartographyInput(BaseModel):
     action: Literal["symbolize", "compose", "export", "full"] = Field(
         default="full",
         description=(
-            "symbolize: apply symbolization to a layer; "
-            "compose: load template + add map elements; "
-            "export: export as PDF/image; "
+            "symbolize: plan symbolization for a layer (no rendering); "
+            "compose: describe map composition elements; "
+            "export: arrange elements and write the map file; "
             "full: symbolize + compose + export in one step"
         ),
     )
     layer_name: str = Field(
         default="",
-        description="Data layer name to symbolize (for symbolize/full).",
+        description="Label for the layer being symbolized (for symbolize/full).",
     )
     analysis_type: str = Field(
         default="",
         description=(
             "Analysis type for bridge rule lookup (e.g., 'moran_local', "
-            "'getis_ord', 'cluster_detect'). Determines symbolization strategy."
+            "'getis_ord', 'cluster_detect', 'od_flow'). Determines symbolization."
         ),
     )
     field_name: str = Field(
         default="",
-        description="Field name for symbolization (categorized/graduated).",
+        description="Attribute field to symbolize (categorized/graduated/flow).",
     )
-    output_format: Literal["pdf", "image"] = Field(
+    output_format: Literal["pdf", "image", "png", "svg", "html"] = Field(
         default="pdf",
-        description="Export format.",
+        description="Output format: pdf/png/svg (static) or html (interactive Leaflet).",
     )
     output_path: str = Field(
         default="",
-        description="Output file path. If empty, saves to ~/.geoharness/exports/.",
+        description=(
+            "Output file path. If empty, writes to the configured outputs "
+            "directory (~/.geoharness/exports) using layer_name as file stem."
+        ),
+    )
+    # ── Data source (required for actual rendering) ──
+    source_type: Literal["", "file", "postgis", "admin_kg"] = Field(
+        default="",
+        description="Data source kind for rendering. Empty = plan mode only.",
+    )
+    file_path: str = Field(
+        default="",
+        description="Path to a local spatial file (.shp/.geojson/.gpkg) to render.",
+    )
+    source_name: str = Field(
+        default="",
+        description=(
+            "Source name for rendering: file name, PostGIS table, or "
+            "administrative region name/adcode (depends on source_type)."
+        ),
+    )
+    geojson: str = Field(
+        default="",
+        description="Inline GeoJSON FeatureCollection to render instead of a source.",
+    )
+    title: str = Field(
+        default="",
+        description="Map title. Defaults to layer_name when empty.",
     )
 
 
 class GeoCartographyTool(BaseTool):
-    """Cartography pipeline orchestration tool."""
+    """Cartography pipeline orchestration + native rendering tool."""
 
     name: str = "geo_cartography"
     description: str = (
-        "Cartography pipeline — render maps natively (PNG/PDF/SVG/HTML): "
-        "symbolize → compose → export. Reads bridge rules from config to "
-        "auto-select symbolization based on analysis type."
+        "Cartography pipeline — render maps natively (PNG/PDF/SVG + interactive "
+        "HTML) via matplotlib/geopandas/folium: symbolize → compose → export. "
+        "Reads bridge rules from config to auto-select symbolization by analysis "
+        "type. Provide a data source (file_path/source_type+source_name/geojson) "
+        "to actually render; omit it to get a symbolization plan only."
     )
     input_model: type[BaseModel] = GeoCartographyInput
 
@@ -73,7 +125,6 @@ class GeoCartographyTool(BaseTool):
         assert isinstance(arguments, GeoCartographyInput)
         args: GeoCartographyInput = arguments
 
-        # Get config from tool_metadata
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(
@@ -83,40 +134,35 @@ class GeoCartographyTool(BaseTool):
 
         bridge_rules = config.cartography.bridge_rules
         template_path = config.cartography.default_template
+        outputs_dir = getattr(config.cartography, "outputs_dir", "") or _DEFAULT_OUTPUTS_DIR
 
         if args.action == "symbolize":
             return self._symbolize(args, bridge_rules)
-        elif args.action == "compose":
+        if args.action == "compose":
             return self._compose(args, template_path)
-        elif args.action == "export":
-            return self._export(args)
-        elif args.action == "full":
-            return self._full_pipeline(args, bridge_rules, template_path)
-        else:
-            return ToolResult(
-                output=f"Unknown action: {args.action}",
-                is_error=True,
+        if args.action == "export":
+            return self._export(args, bridge_rules, outputs_dir, context)
+        if args.action == "full":
+            return self._full_pipeline(
+                args, bridge_rules, template_path, outputs_dir, context
             )
+        return ToolResult(output=f"Unknown action: {args.action}", is_error=True)
+
+    # ── Bridge rules ──────────────────────────────────────────────────
 
     def _get_bridge_rule(
         self,
         analysis_type: str,
         bridge_rules: dict[str, Any],
     ) -> dict[str, Any]:
-        """Look up bridge rule for an analysis type.
-
-        Falls back to default rule if analysis type not found.
-        """
+        """Look up the bridge rule for an analysis type (with fallback)."""
         rule = bridge_rules.get(analysis_type)
         if rule is None:
-            # Default: simple categorized symbolization
             return {
                 "render_method": "categorized",
                 "color_scheme": "Set1",
-                "n_classes": 0,
+                "n_classes": 5,
             }
-
-        # Convert BridgeRule dataclass to dict if needed
         if hasattr(rule, "render_method"):
             return {
                 "render_method": rule.render_method,
@@ -125,22 +171,19 @@ class GeoCartographyTool(BaseTool):
             }
         return rule if isinstance(rule, dict) else dict(rule)
 
+    # ── Plan mode ─────────────────────────────────────────────────────
+
     def _symbolize(
         self,
         args: GeoCartographyInput,
         bridge_rules: dict[str, Any],
     ) -> ToolResult:
-        """Generate the symbolization plan for the layer.
-
-        Describes how the native renderer will style the layer based on
-        the analysis type's bridge rule.
-        """
+        """Describe how the layer will be symbolized (no rendering)."""
         if not args.layer_name:
             return ToolResult(
                 output="Error: 'layer_name' is required for symbolize action.",
                 is_error=True,
             )
-
         if not args.analysis_type:
             return ToolResult(
                 output="Error: 'analysis_type' is required for symbolize. "
@@ -153,95 +196,197 @@ class GeoCartographyTool(BaseTool):
         colors = rule.get("color_scheme", "Set1")
         n_classes = rule.get("n_classes", 5)
 
-        instructions: list[str] = []
-        instructions.append(
-            f"Symbolization plan for layer '{args.layer_name}':"
-        )
-        instructions.append(f"  Analysis type: {args.analysis_type}")
-        instructions.append(f"  Render method: {method}")
-        instructions.append(f"  Color scheme: {colors}")
+        lines = [
+            f"Symbolization plan for layer '{args.layer_name}':",
+            f"  Analysis type: {args.analysis_type}",
+            f"  Render method: {method}",
+            f"  Color scheme: {colors}",
+        ]
 
         if method == "categorized":
             field = args.field_name or "(auto-detect category field)"
-            instructions.append(
+            lines.append(
                 f"  → Categorized rendering: field='{field}', "
                 f"color_scheme='{colors}' (one color per category)"
             )
         elif method == "graduated":
             field = args.field_name or "(auto-detect value field)"
-            instructions.append(
+            lines.append(
                 f"  → Graduated rendering: field='{field}', "
                 f"color_scheme='{colors}', n_classes={n_classes}"
             )
         elif method == "flow":
-            instructions.append(
-                f"  → Flow-line rendering for '{args.layer_name}'"
+            lines.append(
+                f"  → Flow-line rendering for '{args.layer_name}' "
+                f"(line width scales with field='{args.field_name or 'value'}')"
             )
         elif method == "none":
-            instructions.append(
+            lines.append(
                 "  → No map symbolization needed for this analysis type "
                 "(e.g., global statistic)."
             )
 
-        return ToolResult(
-            output="\n".join(instructions),
-            metadata={"bridge_rule": rule},
-        )
+        return ToolResult(output="\n".join(lines), metadata={"bridge_rule": rule})
 
     def _compose(
         self,
         args: GeoCartographyInput,
         template_path: str,
     ) -> ToolResult:
-        """Generate composition instructions using QPT template."""
-        if not template_path:
+        """Describe the composition (map elements) stage."""
+        lines = [
+            f"Composition plan (template: {template_path or '(none — native layout)'}):",
+        ]
+        lines.append("  1. map frame — symbolize the layer into the plot area")
+        lines.append("  2. legend — color/class legend")
+        lines.append("  3. scale bar — metric scale")
+        lines.append("  4. north arrow — orientation indicator")
+        lines.append("  5. title — analysis type and data source caption")
+        return ToolResult(output="\n".join(lines))
+
+    # ── Render helpers ────────────────────────────────────────────────
+
+    def _has_source(self, args: GeoCartographyInput) -> bool:
+        """True when the request carries renderable data."""
+        return bool(args.geojson.strip() or args.file_path or args.source_name)
+
+    def _resolve_output_path(
+        self, args: GeoCartographyInput, outputs_dir: str
+    ) -> Path:
+        """Resolve the output path (explicit, or outputs_dir/layer_name.*)."""
+        suffix = _FORMAT_SUFFIXES.get(args.output_format, ".png")
+        if args.output_path:
+            path = Path(args.output_path).expanduser()
+            if not path.suffix:
+                path = path.with_suffix(suffix)
+            return path
+
+        stem = args.layer_name or args.source_name or "map"
+        # Avoid path separators sneaking in from a layer label.
+        stem = Path(str(stem).replace("/", "_").replace("\\", "_")).name
+        directory = Path(outputs_dir).expanduser()
+        return directory / f"{stem}{suffix}"
+
+    def _render(
+        self,
+        args: GeoCartographyInput,
+        rule: dict[str, Any],
+        outputs_dir: str,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """Resolve the source, render the map, and report the written path."""
+        try:
+            from geoharness.cartography import render_map
+            from geoharness.cartography.sources import resolve_geodataframe
+        except ImportError as exc:  # pragma: no cover - dependency guard
             return ToolResult(
-                output="Error: No default template configured. "
-                "Set cartography.default_template in config.yaml.",
+                output=f"Error: rendering dependencies unavailable ({exc}).",
                 is_error=True,
             )
 
-        instructions: list[str] = []
-        instructions.append("Composition plan:")
-        instructions.append(f"  Template/reference: {template_path}")
-        instructions.append("  Layout elements (rendered natively):")
-        instructions.append(
-            "  1. map frame — symbolize the layer into the plot area"
-        )
-        instructions.append("  2. legend — color/class legend")
-        instructions.append("  3. scale bar — metric scale")
-        instructions.append("  4. north arrow — orientation indicator")
-        instructions.append(
-            "  5. title — analysis type and data source caption"
-        )
-
-        return ToolResult(output="\n".join(instructions))
-
-    def _export(self, args: GeoCartographyInput) -> ToolResult:
-        """Generate export instructions."""
-        output_path = args.output_path or "~/.geoharness/exports/map_output"
-
-        instructions: list[str] = []
-        instructions.append(f"Export plan ({args.output_format}):")
-
-        if args.output_format == "pdf":
-            instructions.append(
-                f"  → Native renderer writes PDF to '{output_path}.pdf'"
+        catalog = context.metadata.get("data_catalog")
+        try:
+            gdf = resolve_geodataframe(
+                source_type=args.source_type,
+                file_path=args.file_path,
+                source_name=args.source_name,
+                geojson_text=args.geojson,
+                catalog=catalog,
             )
+        except ValueError as exc:
+            return ToolResult(output=f"Error: {exc}", is_error=True)
+        except Exception as exc:  # network / driver failures
+            logger.exception("Data source resolution failed")
+            return ToolResult(
+                output=f"Error: failed to load source — {exc}", is_error=True
+            )
+
+        method = rule.get("render_method", "categorized")
+        scheme = rule.get("color_scheme", "Set1")
+        n_classes = rule.get("n_classes", 5) or 5
+        output_path = self._resolve_output_path(args, outputs_dir)
+        title = args.title or args.layer_name
+
+        try:
+            written = render_map(
+                gdf,
+                output_path=output_path,
+                column=args.field_name,
+                render_method=method,
+                color_scheme=scheme,
+                n_classes=n_classes,
+                title=title,
+            )
+        except ValueError as exc:
+            return ToolResult(output=f"Error: {exc}", is_error=True)
+        except Exception as exc:
+            logger.exception("Rendering failed")
+            return ToolResult(
+                output=f"Error: map rendering failed — {exc}", is_error=True
+            )
+
+        size_kb = written.stat().st_size / 1024.0
+        lines = [
+            f"Rendered map: {written}",
+            f"  Format: {args.output_format}",
+            f"  Features: {len(gdf)}",
+            f"  Render method: {method}",
+            f"  Color scheme: {scheme}",
+        ]
+        if args.field_name:
+            lines.append(f"  Symbolized field: {args.field_name}")
+        if method == "flow":
+            lines.append("  Line width scales with the symbolized field")
+        lines.append(f"  Size: {size_kb:.1f} KB")
+
+        return ToolResult(
+            output="\n".join(lines),
+            metadata={
+                "bridge_rule": rule,
+                "output_path": str(written),
+                "feature_count": len(gdf),
+            },
+        )
+
+    def _export(
+        self,
+        args: GeoCartographyInput,
+        bridge_rules: dict[str, Any],
+        outputs_dir: str,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """Render the map when data is available, else return the export plan."""
+        if self._has_source(args):
+            rule = self._get_bridge_rule(args.analysis_type, bridge_rules)
+            return self._render(args, rule, outputs_dir, context)
+
+        output_path = self._resolve_output_path(args, outputs_dir)
+        method = self._get_bridge_rule(args.analysis_type, bridge_rules).get(
+            "render_method", "categorized"
+        )
+        suffix = output_path.suffix
+        lines = [
+            f"Export plan ({args.output_format}) — Native renderer:",
+            f"  Render method: {method}",
+            f"  Target file: {output_path}",
+            "  No data source supplied — provide file_path / source_type + "
+            "source_name / geojson to render.",
+        ]
+        if suffix == ".html":
+            lines.append("  → interactive Leaflet map (folium)")
         else:
-            instructions.append(
-                f"  → Native renderer writes image to '{output_path}.png'"
-            )
-
-        return ToolResult(output="\n".join(instructions))
+            lines.append("  → static map (matplotlib, headless Agg backend)")
+        return ToolResult(output="\n".join(lines))
 
     def _full_pipeline(
         self,
         args: GeoCartographyInput,
         bridge_rules: dict[str, Any],
         template_path: str,
+        outputs_dir: str,
+        context: ToolExecutionContext,
     ) -> ToolResult:
-        """Execute full pipeline: symbolize → compose → export."""
+        """Full pipeline: symbolize → compose → export."""
         sym_result = self._symbolize(args, bridge_rules)
         if sym_result.is_error:
             return sym_result
@@ -250,23 +395,29 @@ class GeoCartographyTool(BaseTool):
         if comp_result.is_error:
             return comp_result
 
-        exp_result = self._export(args)
+        rule = sym_result.metadata.get("bridge_rule", {})
+        if self._has_source(args):
+            exp_result = self._render(args, rule, outputs_dir, context)
+        else:
+            exp_result = self._export(args, bridge_rules, outputs_dir, context)
 
-        # Combine all results
-        combined = "\n\n".join([
-            sym_result.output,
-            comp_result.output,
-            exp_result.output,
-        ])
-
+        combined = "\n\n".join(
+            [sym_result.output, comp_result.output, exp_result.output]
+        )
         return ToolResult(
             output=f"Full cartography pipeline:\n\n{combined}",
+            is_error=exp_result.is_error,
             metadata={
-                "bridge_rule": sym_result.metadata.get("bridge_rule", {}),
+                "bridge_rule": rule,
+                **(
+                    {"output_path": exp_result.metadata["output_path"]}
+                    if exp_result.metadata.get("output_path")
+                    else {}
+                ),
             },
         )
 
     def is_read_only(self, arguments: BaseModel) -> bool:
-        """geo_cartography writes files (exports) — not read-only."""
+        """symbolize/compose only plan; export/full write files."""
         assert isinstance(arguments, GeoCartographyInput)
-        return arguments.action == "symbolize"
+        return arguments.action in ("symbolize", "compose")

@@ -161,6 +161,37 @@ class FileLoader:
 
         return self._read_file_info(path)
 
+    def resolve_path(self, name: str) -> Path | None:
+        """Resolve a file name to an existing path, or ``None``.
+
+        Public counterpart of ``_find_file`` for the cartography pipeline.
+        """
+        return self._find_file(name)
+
+    def load_geodataframe(self, name: str) -> Any:
+        """Load a spatial file as a GeoDataFrame.
+
+        Args:
+            name: File name (with/without extension) or full path.
+
+        Returns:
+            GeoDataFrame; CRS defaults to EPSG:4326 when the file has none.
+
+        Raises:
+            ValueError: If the file cannot be found or contains no features.
+        """
+        import geopandas as gpd  # type: ignore[import-untyped]
+
+        path = self._find_file(name)
+        if path is None:
+            raise ValueError(f"File not found: {name!r}")
+        gdf = gpd.read_file(path)
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326")
+        if gdf.empty:
+            raise ValueError(f"File contains no features: {path}")
+        return gdf
+
     def _find_file(self, name: str) -> Path | None:
         """Find a file by name (with or without extension)."""
         # Try as full path

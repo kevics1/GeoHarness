@@ -127,6 +127,8 @@ _TOOL_CATALOG = """\
 - **geo_cartography**: Render maps natively — PNG/PDF/SVG + interactive HTML
   - Actions: symbolize, compose, export, full
   - Follows bridge rules for analysis→symbolization mapping
+  - Provide a data source (file_path, source_type+source_name, or geojson) to
+    render; omit it for a symbolization plan. Outputs go to `outputs_dir`.
 
 ## MCP Tools (27)
 - **geo-mcp-server** (18 tools): Spatial analysis, geocoding, statistics, \

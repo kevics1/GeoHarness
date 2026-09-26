@@ -153,6 +153,57 @@ class PostGISConnector:
             col_names = [desc[0] for desc in cur.description]
             return [dict(zip(col_names, row)) for row in cur.fetchall()]
 
+    def query_geodataframe(self, table_name: str, limit: int = 5000) -> Any:
+        """Load a spatial table into a GeoDataFrame.
+
+        Read-only: uses ``SELECT *`` on the named table with a row cap.
+        Geometry is returned as WKB and converted via ``shapely``.
+
+        Args:
+            table_name: Name of the spatial table.
+            limit: Maximum number of rows to load.
+
+        Returns:
+            GeoDataFrame in EPSG:4326.
+
+        Raises:
+            ValueError: If the table has no geometry column or no rows.
+        """
+        import geopandas as gpd
+        from shapely import wkb as shapely_wkb
+
+        conn = self._ensure_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s AND udt_name = 'geometry'",
+                (table_name,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(
+                    f"Table '{table_name}' has no geometry column"
+                )
+            geom_col = row[0]
+
+            # Table/column names cannot be parameterised; they come from
+            # information_schema lookups above, not raw user text.
+            cur.execute(
+                f'SELECT *, ST_AsBinary("{geom_col}") AS __geoh_wkb '
+                f'FROM "{table_name}" LIMIT %s',
+                (int(limit),),
+            )
+            col_names = [d[0] for d in cur.description]
+            records = [dict(zip(col_names, r)) for r in cur.fetchall()]
+
+        if not records:
+            raise ValueError(f"Table '{table_name}' contains no rows")
+
+        wkb_values = [rec.pop("__geoh_wkb") for rec in records]
+        geometry = [shapely_wkb.loads(v) if v is not None else None for v in wkb_values]
+        gdf = gpd.GeoDataFrame(records, geometry=geometry, crs="EPSG:4326")
+        return gdf
+
     def list_sources(self) -> list[DataSource]:
         """List all spatial tables as DataSource objects."""
         try:

@@ -130,6 +130,46 @@ class AdminKGConnector:
         """Get boundary GeoJSON for an adcode."""
         return self._fetch_boundary(adcode, "full")
 
+    def load_geodataframe(self, region: str) -> Any:
+        """Load an administrative boundary as a GeoDataFrame.
+
+        Args:
+            region: Region name (e.g., "湖北省") or a 6-digit adcode.
+
+        Returns:
+            GeoDataFrame in EPSG:4326, one row per returned boundary feature.
+
+        Raises:
+            ValueError: If the region cannot be resolved to a boundary.
+        """
+        import geopandas as gpd
+
+        name = (region or "").strip()
+        if not name:
+            raise ValueError("Region name or adcode is required.")
+
+        # Direct adcode (all digits) → fetch straight away.
+        if name.isdigit():
+            data = self._fetch_boundary(name, "full")
+        else:
+            detail = self.get_source_detail(name)
+            adcode = str(detail.get("adcode", "")) if detail else ""
+            if not adcode:
+                raise ValueError(
+                    f"Administrative region not found: {region!r}. "
+                    "Only province-level names are resolvable offline; "
+                    "pass an adcode for city/district boundaries."
+                )
+            data = self._fetch_boundary(adcode, "full")
+
+        features = data.get("features", [])
+        if not features:
+            raise ValueError(
+                f"No boundary features returned for {region!r} "
+                "(network failure or unknown adcode)."
+            )
+        return gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
+
     def list_sources(self) -> list[DataSource]:
         """List all province-level boundaries as data sources."""
         try:

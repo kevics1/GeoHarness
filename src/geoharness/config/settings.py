@@ -39,6 +39,7 @@ class CartographyConfig:
     """Cartography configuration."""
 
     default_template: str = ""
+    outputs_dir: str = ""
     bridge_rules: dict[str, BridgeRule] = field(default_factory=dict)
 
 
@@ -164,8 +165,13 @@ def _parse_cartography(raw: dict[str, Any] | None) -> CartographyConfig:
     if not raw:
         return CartographyConfig()
     template = _expand_vars(raw.get("default_template", ""))
+    outputs_dir = _expand_vars(raw.get("outputs_dir", ""))
     rules = _parse_bridge_rules(raw.get("bridge_rules"))
-    return CartographyConfig(default_template=template, bridge_rules=rules)
+    return CartographyConfig(
+        default_template=template,
+        outputs_dir=outputs_dir,
+        bridge_rules=rules,
+    )
 
 
 def _parse_cascade(raw: dict[str, Any] | None) -> CascadeConfig:
