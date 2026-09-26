@@ -37,6 +37,10 @@ _RENDER_TIMEOUT_SECONDS = 300.0
 # Bridge-rule render methods understood by the native renderer.
 _RENDER_METHODS = ("categorized", "graduated", "flow", "none")
 
+# Bridge rule used when a cartography request has no spatial-analysis stage
+# (thematic maps: administrative boundaries, fire perimeters, POIs...).
+_THEMATIC_RULE_KEY = "thematic"
+
 _FORMAT_SUFFIXES = {
     "pdf": ".pdf",
     "svg": ".svg",
@@ -212,27 +216,27 @@ class GeoCartographyTool(BaseTool):
         args: GeoCartographyInput,
         bridge_rules: dict[str, Any],
     ) -> ToolResult:
-        """Describe how the layer will be symbolized (no rendering)."""
+        """Describe how the layer will be symbolized (no rendering).
+
+        ``analysis_type`` is OPTIONAL: thematic cartography (火灾态势图等)
+        has no spatial-analysis stage, so an empty value falls back to the
+        plain "thematic" bridge rule instead of aborting the whole pipeline.
+        """
         if not args.layer_name:
             return ToolResult(
                 output="Error: 'layer_name' is required for symbolize action.",
                 is_error=True,
             )
-        if not args.analysis_type:
-            return ToolResult(
-                output="Error: 'analysis_type' is required for symbolize. "
-                "Specify the analysis type (e.g., 'moran_local', 'getis_ord').",
-                is_error=True,
-            )
 
-        rule = self._get_bridge_rule(args.analysis_type, bridge_rules)
+        analysis_type = args.analysis_type.strip() or _THEMATIC_RULE_KEY
+        rule = self._get_bridge_rule(analysis_type, bridge_rules)
         method = rule.get("render_method", "categorized")
         colors = rule.get("color_scheme", "Set1")
         n_classes = rule.get("n_classes", 5)
 
         lines = [
             f"Symbolization plan for layer '{args.layer_name}':",
-            f"  Analysis type: {args.analysis_type}",
+            f"  Analysis type: {analysis_type}",
             f"  Render method: {method}",
             f"  Color scheme: {colors}",
         ]
@@ -576,7 +580,39 @@ class GeoCartographyTool(BaseTool):
         outputs_dir: str,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """Full pipeline: symbolize → compose → export."""
+        """Full pipeline: symbolize → compose → export.
+
+        With a ``layers`` payload each spec already carries its own styling,
+        so the per-layer symbolize step (which needs ``layer_name``) is
+        skipped and the request goes straight to multi-layer rendering.
+        """
+        layer_specs = self._parse_layers(args.layers)
+        if layer_specs:
+            catalog = context.metadata.get("data_catalog")
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._render_layers_blocking,
+                        args, layer_specs, catalog, outputs_dir,
+                    ),
+                    timeout=_RENDER_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                return ToolResult(
+                    output=(
+                        f"Error: multi-layer rendering timed out after "
+                        f"{_RENDER_TIMEOUT_SECONDS:.0f}s. Reduce layers or "
+                        "feature counts."
+                    ),
+                    is_error=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Multi-layer full pipeline failed")
+                return ToolResult(
+                    output=f"Error: multi-layer rendering failed — {exc}",
+                    is_error=True,
+                )
+
         sym_result = self._symbolize(args, bridge_rules)
         if sym_result.is_error:
             return sym_result

@@ -277,6 +277,13 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
             path_rules.append(PathRuleConfig(pattern=variant, allow=True))
 
     perm_settings = PermissionSettings(path_rules=path_rules)
+    # geo_cartography writes ONLY into the configured outputs directory
+    # (~/.geoharness/exports); asking the user to confirm every map export
+    # adds friction without protecting anything. Built-in sensitive-path
+    # protection and explicit denied_tools still outrank this allow-list;
+    # config deny_paths also keep applying to generic file tools, while the
+    # cartography tool never targets anything but the exports directory.
+    perm_settings.allowed_tools.append("geo_cartography")
     return PermissionChecker(settings=perm_settings)
 
 
