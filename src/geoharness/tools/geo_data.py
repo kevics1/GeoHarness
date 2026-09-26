@@ -25,6 +25,35 @@ logger = logging.getLogger(__name__)
 # tool reports an error instead of hanging the session.
 _CATALOG_TIMEOUT_SECONDS = 60.0
 
+# Per-connector budget. A single slow/blocked backend must not consume the
+# whole action budget and starve the others.
+_PER_CONNECTOR_SECONDS = 15.0
+
+
+def _connector_timings(catalog: Any, args: Any) -> str:
+    """Probe each connector once and report elapsed ms, for diagnosis.
+
+    Called only on the timeout path, so its own cost is acceptable.
+    """
+    import time as _time
+
+    parts: list[str] = []
+    target = getattr(args, "name", "") or getattr(args, "file_path", "")
+    for name in getattr(catalog, "connector_names", []):
+        connector = catalog.get_connector(name)
+        if connector is None:
+            continue
+        t0 = _time.monotonic()
+        try:
+            connector.get_source_detail(target)
+            parts.append(f"{name}={(_time.monotonic()-t0)*1000:.0f}ms")
+        except Exception as exc:  # noqa: BLE001
+            parts.append(
+                f"{name}={(_time.monotonic()-t0)*1000:.0f}ms({type(exc).__name__})"
+            )
+    return ", ".join(parts) if parts else "(no connectors)"
+
+
 
 class GeoDataInput(BaseModel):
     """Input model for geo_data tool."""
@@ -105,12 +134,21 @@ class GeoDataTool(BaseTool):
                 timeout=_CATALOG_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
+            breakdown = _connector_timings(catalog, args)
+            logger.error(
+                "geo_data %s timed out after %.0fs; per-connector timing: %s",
+                args.action,
+                _CATALOG_TIMEOUT_SECONDS,
+                breakdown,
+            )
             return ToolResult(
                 output=(
                     f"Error: data source discovery timed out after "
                     f"{_CATALOG_TIMEOUT_SECONDS:.0f}s (action={args.action}). "
                     "A configured backend (PostGIS/DAV API) may be "
-                    "unreachable — check its DSN or network access."
+                    "unreachable — check its DSN or network access.\n"
+                    f"  Where time went: {breakdown}\n"
+                    f"  Tip: pass source='file' to skip network backends entirely."
                 ),
                 is_error=True,
             )
@@ -119,6 +157,32 @@ class GeoDataTool(BaseTool):
             return ToolResult(
                 output=f"Error: {args.action} failed — {exc}", is_error=True
             )
+
+    def _lookup_detail(
+        self, catalog: Any, name: str, source_type: str
+    ) -> tuple[Any, str, str]:
+        """Resolve a source detail, converting a slow backend into a message.
+
+        Returns ``(detail, error_message, warning)`` — on success ``detail``
+        is set and ``warning`` may carry a soft note (e.g. a backend timed out
+        but the source was found in local files instead).
+        """
+        from geoharness.data.catalog import ConnectorTimeout
+
+        try:
+            resolve = getattr(catalog, "resolve_source_detail", None)
+            if callable(resolve):
+                detail, warning = resolve(name, source_type)
+                return detail, "", warning
+            return catalog.get_source_detail(name, source_type), "", ""
+        except ConnectorTimeout as exc:
+            return None, (
+                f"Backend timed out while looking up '{name}': {exc}. "
+                "The source was not searched exhaustively — retry with "
+                "source='file' (or 'postgis') to avoid network backends."
+            ), ""
+        except Exception as exc:  # noqa: BLE001
+            return None, f"Lookup failed for '{name}': {exc}", ""
 
     def _list_sources(
         self, catalog: Any, source_type: str
@@ -158,7 +222,14 @@ class GeoDataTool(BaseTool):
                 is_error=True,
             )
 
-        detail = catalog.get_source_detail(args.name or args.file_path, args.source)
+        detail, lookup_error, warning = self._lookup_detail(
+            catalog, args.name or args.file_path, args.source
+        )
+        if lookup_error:
+            return ToolResult(
+                output=f"Error: {lookup_error}",
+                is_error=True,
+            )
         if not detail:
             return ToolResult(
                 output=f"Source '{args.name or args.file_path}' not found.",
@@ -200,7 +271,9 @@ class GeoDataTool(BaseTool):
             )
 
         return ToolResult(
-            output="\n".join(instructions),
+            output="\n".join(
+                ([f"⚠ {warning}"] if warning else []) + instructions
+            ),
             metadata={"source_detail": detail},
         )
 
@@ -221,7 +294,11 @@ class GeoDataTool(BaseTool):
                 is_error=True,
             )
 
-        detail = catalog.get_source_detail(name, source_type)
+        detail, lookup_error, warning = self._lookup_detail(
+            catalog, name, source_type
+        )
+        if lookup_error:
+            return ToolResult(output=f"Error: {lookup_error}", is_error=True)
         if not detail:
             return ToolResult(
                 output=(
@@ -232,7 +309,10 @@ class GeoDataTool(BaseTool):
                 is_error=True,
             )
 
-        lines: list[str] = [f"Source: {name}"]
+        lines: list[str] = []
+        if warning:
+            lines.append(f"⚠ {warning}")
+        lines.append(f"Source: {name}")
         lines.append(f"  Type: {detail.get('source_type', 'unknown')}")
         lines.append(f"  Format: {detail.get('format', 'unknown')}")
 

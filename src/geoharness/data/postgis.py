@@ -33,6 +33,9 @@ class PostGISConnector:
     def __init__(self, dsn: str, connect_timeout: int = 10) -> None:
         self._dsn = dsn
         self._connect_timeout = connect_timeout
+        # Server-side cap for any single statement. Discovery only needs cheap
+        # catalog queries; a multi-hundred-MB table must not stall `inspect`.
+        self._statement_timeout_ms = 8000
         self._conn: Any = None  # psycopg.Connection, lazily connected
         self._resolved_dsn: str | None = None
 
@@ -64,7 +67,14 @@ class PostGISConnector:
     def _ensure_connection(self) -> Any:
         """Establish connection lazily on first use."""
         if self._conn is not None:
-            return self._conn
+            # A connection the server closed (idle timeout, restart, NAT reset)
+            # must be replaced, not reused: reusing it blocks on the first
+            # query until the OS gives up on the dead socket.
+            if getattr(self._conn, "closed", False):
+                logger.info("PostGIS connection was closed; reconnecting")
+                self._conn = None
+            else:
+                return self._conn
 
         try:
             import psycopg  # type: ignore[import-untyped]
@@ -78,9 +88,32 @@ class PostGISConnector:
             self._resolve_dsn(),
             autocommit=True,
             connect_timeout=self._connect_timeout,
+            # Bound server-side execution so a slow query raises instead of
+            # blocking a metadata lookup past the UI's budget.
+            options=f"-c statement_timeout={self._statement_timeout_ms}",
+            # Detect a dropped connection (NAT/firewall idle-reset) instead of
+            # blocking forever on the next query.
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=5,
+            keepalives_count=3,
         )
         logger.info("PostGIS connection established")
         return self._conn
+
+    def reset(self) -> None:
+        """Drop the cached connection so the next call reconnects.
+
+        Called by the catalog when a query exceeds its budget: the worker
+        thread may be wedged on a dead socket, and reusing that handle would
+        simply hang again.
+        """
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Ignoring error closing stale connection: %s", exc)
 
     def _check_read_only(self, sql: str) -> None:
         """Block write operations."""
