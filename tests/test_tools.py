@@ -47,7 +47,7 @@ class MockDataCatalog:
             ),
         ]
 
-    def get_source_detail(self, name: str):
+    def get_source_detail(self, name: str, source_type: str = ""):
         if name == "wuhan_air":
             return {
                 "name": "wuhan_air",

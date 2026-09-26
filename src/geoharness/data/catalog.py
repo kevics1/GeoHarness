@@ -111,23 +111,56 @@ class DataCatalog:
 
         return results
 
-    def get_source_detail(self, name: str) -> dict[str, Any] | None:
+    def get_source_detail(
+        self, name: str, source_type: str = ""
+    ) -> dict[str, Any] | None:
         """Get detailed information about a specific data source.
 
         Args:
             name: Source name (e.g., table name, file name).
+            source_type: Optional connector filter ("postgis", "file",
+                "admin_kg"). When given, ONLY that connector is consulted —
+                essential because a network-backed connector (admin_kg) can
+                take seconds to fail, and querying it for a local file is
+                both unnecessary and slow.
 
         Returns:
             Dictionary with source details, or None if not found.
         """
         self._ensure_initialized()
-        for connector in self._connectors.values():
+
+        if source_type and source_type != "all":
+            connector = self._connectors.get(source_type)
+            if connector is None:
+                return None
+            try:
+                return connector.get_source_detail(name) or None
+            except Exception as e:
+                logger.warning(
+                    "get_source_detail(%s) on %s failed: %s", name, source_type, e
+                )
+                return None
+
+        # Broad lookup: try local connectors first so a slow/network-backed
+        # connector (admin_kg) is only reached when nothing local matches.
+        order = [n for n in ("file", "postgis") if n in self._connectors]
+        order += [n for n in self._connectors if n not in order]
+
+        last_error: Exception | None = None
+        for name_ in order:
+            connector = self._connectors[name_]
             try:
                 detail = connector.get_source_detail(name)
                 if detail:
                     return detail
             except Exception as e:
-                logger.warning("get_source_detail(%s) failed: %s", name, e)
+                last_error = e
+                logger.warning("get_source_detail(%s) via %s failed: %s", name, name_, e)
+
+        # Surface the failure instead of a misleading "not found" — an
+        # unreachable backend is a different problem from a missing source.
+        if last_error is not None:
+            raise last_error
         return None
 
     def get_connector(self, name: str) -> DataConnector | None:

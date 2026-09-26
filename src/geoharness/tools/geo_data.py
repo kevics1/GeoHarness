@@ -92,7 +92,7 @@ class GeoDataTool(BaseTool):
         elif args.action == "load":
             work = partial(self._load_source, catalog, args)
         elif args.action == "inspect":
-            work = partial(self._inspect_source, catalog, args.name)
+            work = partial(self._inspect_source, catalog, args.name, args.source)
         else:
             return ToolResult(
                 output=f"Unknown action: {args.action}",
@@ -158,7 +158,7 @@ class GeoDataTool(BaseTool):
                 is_error=True,
             )
 
-        detail = catalog.get_source_detail(args.name or args.file_path)
+        detail = catalog.get_source_detail(args.name or args.file_path, args.source)
         if not detail:
             return ToolResult(
                 output=f"Source '{args.name or args.file_path}' not found.",
@@ -205,19 +205,30 @@ class GeoDataTool(BaseTool):
         )
 
     def _inspect_source(
-        self, catalog: Any, name: str
+        self, catalog: Any, name: str, source_type: str = ""
     ) -> ToolResult:
-        """Inspect a data source's schema, CRS, and bounding box."""
+        """Inspect a data source's schema, CRS, and bounding box.
+
+        Args:
+            catalog: The DataCatalog to query.
+            name: Source name (table, file, or region).
+            source_type: Optional connector filter — forwarded to the catalog
+                so a local-file lookup never triggers a network request.
+        """
         if not name:
             return ToolResult(
                 output="Error: 'name' is required for inspect action.",
                 is_error=True,
             )
 
-        detail = catalog.get_source_detail(name)
+        detail = catalog.get_source_detail(name, source_type)
         if not detail:
             return ToolResult(
-                output=f"Source '{name}' not found.",
+                output=(
+                    f"Source '{name}' not found"
+                    + (f" in '{source_type}'" if source_type else "")
+                    + "."
+                ),
                 is_error=True,
             )
 

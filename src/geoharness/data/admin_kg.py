@@ -21,6 +21,27 @@ logger = logging.getLogger(__name__)
 # Administrative levels
 _LEVELS = ["province", "city", "district"]
 
+# Suffixes that mark a name as a Chinese administrative region. Used to skip
+# needless network lookups for table/file identifiers.
+_REGION_SUFFIXES = (
+    "省", "市", "区", "县", "州", "盟", "旗",
+    "自治区", "特别行政区", "自治县", "自治州",
+)
+
+
+def _looks_like_region_name(name: str) -> bool:
+    """Heuristic: does ``name`` look like a Chinese administrative region?
+
+    Local file names (``城际公路``), PostGIS tables (``province``) and typo'd
+    identifiers must not trigger a network request.
+    """
+    candidate = (name or "").strip()
+    if not candidate:
+        return False
+    if candidate.isdigit():
+        return True
+    return any(candidate.endswith(suffix) for suffix in _REGION_SUFFIXES)
+
 
 class AdminKGConnector:
     """Chinese administrative boundary connector via DataV API.
@@ -68,21 +89,44 @@ class AdminKGConnector:
 
     # The DataV endpoint intermittently resets connections mid-handshake
     # ("UNEXPECTED_EOF_WHILE_READING"). A few short retries plus a TLS1.2
-    # fallback make the fetch reliable without a real HTTP dependency.
-    _FETCH_ATTEMPTS = 3
+    # fallback make the fetch reliable — but the whole operation is capped by
+    # a total deadline, so an unreachable network fails fast instead of
+    # multiplying retries x contexts x timeout into minutes.
+    _FETCH_ATTEMPTS = 2
+    _FETCH_DEADLINE_SECONDS = 8.0
+    _FETCH_TIMEOUT_SECONDS = 4
 
-    def _http_get_json(self, url: str, timeout: int = 30) -> dict[str, Any]:
-        """GET ``url`` and decode JSON, retrying through TLS hiccups.
+    def _http_get_json(
+        self, url: str, timeout: int | None = None
+    ) -> dict[str, Any]:
+        """GET ``url`` and decode JSON within a hard total deadline.
+
+        Args:
+            url: Absolute URL to fetch.
+            timeout: Per-attempt socket timeout. Defaults to a small value so
+                attempts stay cheap; the overall budget is
+                ``_FETCH_DEADLINE_SECONDS`` regardless.
 
         Raises:
+            TimeoutError: if the deadline elapses before a successful read.
             Exception: the last transport error, if every attempt fails.
         """
+        import time as _time
+
+        per_attempt = timeout or self._FETCH_TIMEOUT_SECONDS
+        deadline = _time.monotonic() + self._FETCH_DEADLINE_SECONDS
         last_error: Exception | None = None
+
         for attempt in range(self._FETCH_ATTEMPTS):
             for context in self._ssl_contexts():
+                if _time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"DataV fetch exceeded {self._FETCH_DEADLINE_SECONDS:.0f}s "
+                        f"budget for {url}"
+                    ) from last_error
                 try:
                     with urlopen(  # noqa: S310
-                        url, timeout=timeout, context=context
+                        url, timeout=per_attempt, context=context
                     ) as resp:
                         return json.loads(resp.read().decode("utf-8"))
                 except Exception as exc:
@@ -246,17 +290,46 @@ class AdminKGConnector:
     def get_source_detail(self, name: str) -> dict[str, Any]:
         """Get details for a specific administrative region by name.
 
+        Offline-first: local file names and PostGIS table names never carry a
+        Chinese region suffix, so a cheap shape check avoids a pointless
+        network round-trip (and the multi-second stall that follows when the
+        network is unreachable).
+
         Args:
-            name: Region name (e.g., "湖北省", "武汉市", "武昌区").
+            name: Region name (e.g., "湖北省", "武汉市") or a 6-digit adcode.
 
         Returns:
             Dictionary with region details, or empty dict if not found.
         """
-        # Search provinces first
+        candidate = (name or "").strip()
+        if not candidate:
+            return {}
+
+        # A bare adcode: resolve it as a region without a province lookup.
+        if candidate.isdigit():
+            data = self._fetch_boundary(candidate, "full")
+            features = data.get("features", [])
+            if not features:
+                return {}
+            props = features[0].get("properties", {})
+            return {
+                "name": props.get("name", candidate),
+                "source_type": "admin_kg",
+                "format": "GeoJSON",
+                "adcode": str(props.get("adcode", candidate)),
+                "level": props.get("level", ""),
+            }
+
+        # Only names that look like Chinese administrative regions are worth a
+        # network request. Table/file identifiers ("province", "城际公路") are
+        # not regions, so skip the network entirely.
+        if not _looks_like_region_name(candidate):
+            return {}
+
         try:
             provinces = self.list_provinces()
             for p in provinces:
-                if p["name"] == name or p["name"].replace("省", "") == name:
+                if p["name"] == candidate or p["name"].replace("省", "") == candidate:
                     return {
                         "name": p["name"],
                         "source_type": "admin_kg",
@@ -265,8 +338,8 @@ class AdminKGConnector:
                         "level": "province",
                         "children_count": len(self.list_cities(p["adcode"])),
                     }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Province lookup failed for %r: %s", candidate, exc)
 
         # If not found at province level, try city/district
         # (This requires knowing the parent adcode — in production,
