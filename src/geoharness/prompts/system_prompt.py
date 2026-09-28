@@ -99,7 +99,15 @@ L1 tools: geo_db_data, geo_vector_data, geo_raster_data, geo_geocode, geo_bbox, 
 L2 tools: geo_moran_global, geo_moran_local, geo_getis_ord
 L3 tools: geo_cluster_detect, geo_od_flow, geo_causal_check
 
-Load skills with: skill_view(name="geo-perception") etc.
+Load skills with: skill(name="geo-perception") etc.
+
+### 空间分析入口（重要）
+- 分析空间规律/聚集/热点时，先加载 skill(name="spatial-analysis") — 它是
+  总入口，按数据形态（点/面/线）给出技术路线与工具映射。
+- **点数据不能直接算 Moran's I**：需先聚合到面单元（如按 county/village
+  分组计数），再传面几何给 L2 工具。`analysis_type` 只决定制图符号化，
+  不执行统计；统计计算必须调用 geo-mcp-server 的 MCP 工具。
+- 制图用 geo_cartography（多图层见 cartography 技能）。
 
 ### L1→L2 Transition
 After L1 perception is complete (5 steps done), if spatial pattern analysis \
@@ -143,7 +151,12 @@ _TOOL_CATALOG = """\
 ## MCP Tools (27)
 - **geo-mcp-server** (18 tools): Spatial analysis, geocoding, statistics, \
   clustering, causal checks
+  - 空间统计: geo_moran_global / geo_moran_local (LISA) / geo_getis_ord (Gi*)
+  - 聚类与因果: geo_cluster_detect / geo_causal_check
+  - 距离/缓冲: geo_calculate_distance / geo_buffer
+  - 这些工具执行真正的统计计算；geo_cartography 只负责把结果画出来
 - **postgres** (9 tools): Database queries, schema inspection, query analysis
+  - 属性表聚合（如点计数到面单元）用 SQL 完成
 
 ## Whitelist Tools (5)
 - ask_user_question, skill, todo_write, tool_search, brief

@@ -98,6 +98,12 @@ async def build_geo_runtime(
     if system_prompt is None:
         system_prompt = _build_system_prompt(config, cwd, cascade_manager)
 
+    # Skill directories: project skills/ plus any caller-provided dirs. Needed
+    # both for the RuntimeBundle (below) and the engine's tool_metadata so the
+    # `skill` tool can find bundled skills at runtime.
+    project_skills_dir = str(Path(__file__).parent.parent.parent / "skills")
+    all_skill_dirs = (project_skills_dir, *extra_skill_dirs)
+
     engine = QueryEngine(
         api_client=api_client,
         tool_registry=tool_registry,
@@ -118,6 +124,11 @@ async def build_geo_runtime(
             "geoharness_config": config,
             "data_catalog": data_catalog,
             "cascade_manager": cascade_manager,
+            # The `skill` tool reads this key to find skill directories.
+            # Without it, project skills (cartography, spatial-analysis, …)
+            # are invisible at runtime even though they are bundled — which
+            # made the model burn turns guessing skill names in the TUI.
+            "extra_skill_dirs": all_skill_dirs,
         },
     )
 
@@ -141,10 +152,6 @@ async def build_geo_runtime(
     commands = _build_commands()
 
     # 11. Construct RuntimeBundle directly
-    # Auto-include project skills directory (skills/ at project root)
-    project_skills_dir = str(Path(__file__).parent.parent.parent / "skills")
-    all_skill_dirs = (project_skills_dir, *extra_skill_dirs)
-
     bundle = RuntimeBundle(
         api_client=api_client,
         cwd=str(cwd),

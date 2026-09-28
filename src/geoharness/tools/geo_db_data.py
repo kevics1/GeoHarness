@@ -177,7 +177,32 @@ class GeoDBDataTool(BaseTool):
                 output="Error: PostGIS connector does not support data loading.",
                 is_error=True,
             )
-        gdf = loader(name, limit=limit)
+        try:
+            gdf = loader(name, limit=limit)
+        except ValueError as exc:
+            # Pure-attribute tables (no geometry column) are legitimate data —
+            # e.g. admin_attributes carries population/GDP for joins. Report
+            # them usefully instead of failing the whole call.
+            if "no geometry column" in str(exc):
+                detail = connector.get_source_detail(name) or {}
+                cols = detail.get("schema") or {}
+                col_text = (
+                    ", ".join(f"{c}: {t}" for c, t in list(cols.items())[:12])
+                    if cols
+                    else "(run inspect for columns)"
+                )
+                return ToolResult(
+                    output=(
+                        f"Table '{name}' is an attribute table (no geometry) — "
+                        f"not directly mappable, but usable for joins/analysis.\n"
+                        f"  Columns: {col_text}\n"
+                        f"  Typical use: join on region_id with a spatial table "
+                        f"(province/city/county), or query via postgres MCP "
+                        f"tools for aggregates."
+                    ),
+                    metadata={"attribute_only": True, "table": name},
+                )
+            return ToolResult(output=f"Error: {exc}", is_error=True)
         cols = ", ".join(str(c) for c in gdf.columns[:20])
         b = gdf.total_bounds
         return ToolResult(
