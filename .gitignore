@@ -1,39 +1,35 @@
-# Byte-compiled / optimized / DLL files
+# ── 用户数据（绝不入库）─────────────────────────────
+# 本地工作区示例/真实数据、运行产物与个人笔记
+example/
+exports/
+TODO.md
+
+# ── Python ──────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Distribution / packaging
+*.egg-info/
+.eggs/
 build/
 dist/
-*.egg-info/
-*.egg
-
-# Virtual environments
 .venv/
 venv/
 env/
 
-# IDE
+# ── 测试/工具缓存 ───────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ── IDE / 编辑器 ────────────────────────────────────
 .idea/
 .vscode/
 *.swp
-*.swo
+*~
 
-# Environment
-.env
-
-# Test coverage
-htmlcov/
-.coverage
-.pytest_cache/
-
-# Ruff
-.ruff_cache/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# GeoHarness runtime
-*.geoharness-session.jsonl
+# ── GeoHarness 运行时产物 ───────────────────────────
+.geoharness/
+~/
+*.log

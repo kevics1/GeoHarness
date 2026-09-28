@@ -4,13 +4,25 @@
 
 基于 OpenHarness 构建，通过直接构造 RuntimeBundle 实现 8 层配置隔离，不修改上游源码。
 
+## 特性亮点
+
+- **三源独立数据工具**：`geo_db_data`（PostGIS 数据库）/ `geo_vector_data`
+  （本地矢量 SHP/GeoJSON/GPKG/CSV）/ `geo_raster_data`（本地栅格
+  GeoTIFF/IMG/ASC/VRT）— 每个工具只访问自己的后端，互不拖累
+- **多图层合成制图**：一次调用将行政区划/水系/道路/火场/居民点等多层
+  叠加到一张 PNG/HTML，支持高程栅格底图、自动统一 CRS、图层图例
+- **原生渲染，无 QGIS 依赖**：matplotlib（Agg，无头安全）+ folium/Leaflet
+- **认知级联**：L1 感知 → L2 理解 → L3 推理，建议制（模型可跳过）
+- **生产级鲁棒性**：逐工具超时预算、PostGIS 连接串行化+keepalive+断线重连、
+  目录扫描单飞锁、PROJ 环境自愈、371 项自动化测试
+
 ## 架构概览
 
 ```
 用户输入
   → GeoHarness 系统提示词（6地理原则 + 技能目录 + 工具目录 + 级联状态）
   → LLM 调用（OpenAI 兼容 API）
-  → 工具调度（2 原生 + 27 MCP + 5 白名单 = 34 工具）
+  → 工具调度（4 原生 + 27 MCP + 5 白名单 = 36 工具）
   → 认知级联（L1感知 → L2理解 → L3推理，建议制，模型可跳过）
   → 制图输出（桥接规则 → 原生渲染 → PNG/PDF/SVG/HTML）
 ```
@@ -43,17 +55,24 @@
 
 ```bash
 # 1. 克隆项目
-cd F:\Desktop
-# （假设项目已在 F:\Desktop\GeoHarness\）
-
-# 2. 安装 GeoHarness（开发模式）
+git clone https://github.com/kevics1/GeoHarness.git
 cd GeoHarness
-pip install -e ".[dev]"
+
+# 2. 创建虚拟环境并安装（开发模式）
+python -m venv .venv
+# Windows:
+.venv\Scripts\pip install -e ".[dev]"
+# Linux/macOS:
+# .venv/bin/pip install -e ".[dev]"
 
 # 3. 验证安装
-geoh version
+.venv\Scripts\geoh version
 # 输出: GeoHarness v0.1.0
 ```
+
+> GeoHarness 需要 Python ≥ 3.10，建议 3.11+。矢量/栅格能力由
+> geopandas、rasterio、matplotlib、folium 提供，随依赖自动安装；
+> 数据库能力可选（无 PostGIS 时仅使用本地文件数据源）。
 
 ## 配置
 
@@ -392,4 +411,4 @@ GeoHarness 通过直接构造 RuntimeBundle 实现 8 层隔离：
 
 ## 许可证
 
-MIT
+[MIT](LICENSE)
