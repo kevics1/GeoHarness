@@ -160,6 +160,25 @@ class TestRuntimeIncludesSkills:
                 f"Skills dir not in extra_skill_dirs: "
                 f"{bundle.extra_skill_dirs}"
             )
+            for name in EXPECTED_SKILLS | {"spatial-analysis", "cartography"}:
+                assert (Path(skills_paths[0]) / name / "SKILL.md").is_file()
+
+    def test_installed_skills_from_unrelated_working_directory(self, tmp_path, monkeypatch):
+        """A wheel's skill resources must resolve without the source checkout."""
+        import geoharness.runtime as runtime
+
+        package_dir = tmp_path / "site-packages" / "geoharness"
+        skill = package_dir / "skills" / "cartography" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("Installed cartography skill", encoding="utf-8")
+        workspace = tmp_path / "unrelated workspace"
+        workspace.mkdir()
+        monkeypatch.setattr(runtime, "__file__", str(package_dir / "runtime.py"))
+        monkeypatch.chdir(workspace)
+
+        assert (runtime._bundled_skills_dir() / "cartography" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ) == "Installed cartography skill"
 
     @pytest.mark.asyncio
     async def test_data_catalog_in_tool_metadata(

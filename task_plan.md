@@ -35,6 +35,12 @@
 ## 验证状态
 最终全量 pytest：467 passed；ruff 与 diff 检查通过。真实 CLI 已完成技能读取、影响分析、中文四图层制图及实际模型检查。最终地图视觉状态 passed，0 轮修正；修正循环、上限与失败回退由回归测试验证。独立审查报告的缺陷均已修复并复验。真实 PostGIS/大型业务数据、热点与栅格验收留待后续。
 
+## 追加任务：任意终端目录启动
+- 将当前版本构建为包含全部技能的 wheel，替换本机指向旧 checkout 的 editable 安装。
+- 保留现有凭证、数据和 MCP 配置，默认模型与检查预算同步为用户先前确认的本地 DeepSeek 参数；当前终端目录继续作为工作目录。
+- 验证源码/安装两种布局、真实 wheel 内容和其他目录中的 CLI 启动，更新使用指南。
+- 状态：complete。安装与跨目录 CLI/默认 React TUI 验证完成；56 项针对性测试、ruff/diff 检查通过，独立审查无本次引入的问题。
+
 ## 执行记录
 - Git 读取全局 ignore 文件出现 Permission denied 警告；仓库状态和文件读取成功。
 - 查找上游 api/models.py 时路径不存在；改为按 openai_client.py 的真实导入追踪 engine/messages.py，不再假定消息模型目录。

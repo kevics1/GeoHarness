@@ -42,3 +42,14 @@
 - 最终全量验证：467 passed, 33 warnings in 208.00s；警告为上游Typer/pyproj弃用提示与未知CRS测试夹具警告。ruff check和git diff检查通过。
 - 最终交付材料齐备：原生空间分析、自主Python、像素审查/最多两轮重绘；配置示例、两份项目技能、README、使用指南与规划记录。真实CLI与修正后的中文地图均验收通过，独立审查无阻断问题。
 - 运行产物和合成数据保留于被Git忽略的 .geoharness/；本地TODO按仓库既有忽略规则保留。仅实现、测试、技能与文档纳入提交。
+
+## 追加：任意终端目录启动
+- 现有 PATH 已包含 D:/Python312/Scripts，但 GeoHarness editable 原先指向旧 F: checkout；构建包含所有 Python 模块和 33 个技能资源文件的 wheel，并仅替换 GeoHarness 安装。
+- 运行时优先使用安装包内技能，保留源码/开发安装回退；56 项技能/运行时回归通过，ruff 与 diff 检查通过。
+- 不依赖 PYTHONPATH，在 C:/Users/Administrator 运行 geoh version、dry-run 与 run --print 均退出成功；在 D:/ 组装确认使用 site-packages 中的新包、5 个顶层技能、12 个工具和当前目录作为 cwd。
+- 在用户主目录实际启动默认 React TUI，显示当前全局模型并正常交互待输入，再用 Ctrl+C 退出，退出码 0。
+- 核对持久 Machine PATH 包含 D:/Python312/Scripts，geoh/geoharness 均解析到该目录，无需临时 PATH 或源码目录设置。
+- 最初发现全局默认模型仍为旧 GLM 配置；最终按用户先前明确指定，将全局 YAML 的 model 同步为 cbcn/deepseek-v4.1-flash(max)，加入已验证的 map_review 32768 token/180秒预算。逐字段确认所有其他配置不变，保留 .env 与凭证；在用户主目录再次启动 print 模式，显示 DeepSeek 模型并正常退出0。
+- 现有配置的 geo-mcp-server/postgres 模块缺失，连接警告后继续启动；未擅自移除配置。
+- 更新用户指南中的安装/更新和任意目录启动操作；保留用户原有 .env.example 改动，不纳入本次提交。
+- 独立只读审查核对 wheel 文件内容及上游 loader，5个顶层技能均从安装目录加载；没有本次引入的 Critical/Important/Minor 问题。既有认知技能旧调用提示不影响本次入口，未扩展修改范围。

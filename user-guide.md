@@ -14,15 +14,28 @@ api_key: local
 
 local 是无鉴权本地网关的占位值。启用鉴权时改成 `${GEOH_API_KEY}`，在配置同目录 `.env` 设置密钥，不提交 `.env`。本轮用合成图片验证了完整模型名支持图片输入；更换服务或模型后需要重新核实能力。
 
-在本 worktree 使用系统 Python 时，显式指定源码目录以免读到其他目录的 editable 安装：
+安装后，在任意文件夹的终端运行：
 
 ```powershell
-$env:PYTHONPATH = Join-Path (Get-Location) 'src'
-python -m geoharness dry-run --config config.example.yaml
-python -m geoharness run --config config.example.yaml --cwd '你的数据目录' --print
+geoh run
+# 使用纯终端交互
+geoh run --print
+# 指定数据工作目录
+geoh run --cwd '你的数据目录'
 ```
 
-已有安装也可将 `python -m geoharness` 换成 `geoh`。去掉 --print 使用现有 React TUI。--config 会传到后端，未指定时沿用 `~/.geoharness/config.yaml`。相对数据路径和输出目录按工作目录解析。dry-run 验证组装，不连接 MCP，也不证明模型可用。
+`geoharness run` 是同一入口。默认使用当前终端目录作为工作目录；无需进入源码目录或设置 PYTHONPATH。默认界面为 React TUI，--print 使用打印模式。未指定 --config 或 GEOH_CONFIG_PATH 时，读取 `~/.geoharness/config.yaml` 及同目录 `.env`；--config 可指定其他 YAML，且会传到后端。相对数据路径和输出目录按工作目录解析；已有绝对路径仍按配置使用。`geoh dry-run` 验证组装，不连接 MCP，也不证明模型可用。
+
+首次安装或更新时，在源码目录构建并安装 wheel（使用 uv，安装目标为当前 python 对应环境）：
+
+```powershell
+uv build --wheel
+uv pip install --python python --reinstall .\dist\geoharness-0.1.0-py3-none-any.whl
+```
+
+wheel 包含全部内置技能及其参考文件，安装后运行无需保留源码目录。确保该 Python 的 Scripts 目录（Windows）或 bin 目录（Linux/macOS）在 PATH 中；新环境可运行 `geoh init` 创建配置。全局配置与安装文件分开存放，升级安装不会覆盖配置或 `.env`。希望使用上面的服务参数时，在全局 YAML 中配置，或运行 `geoh run --config '配置文件的完整路径'`。
+
+若启动提示配置的 MCP 模块不存在，系统会继续运行原生工具；需要相应扩展时，为该服务配置实际可用的 command/args。
 
 ## 一个完整任务
 

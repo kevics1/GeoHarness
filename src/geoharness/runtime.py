@@ -99,11 +99,10 @@ async def build_geo_runtime(
     if system_prompt is None:
         system_prompt = _build_system_prompt(config, cwd, cascade_manager)
 
-    # Skill directories: project skills/ plus any caller-provided dirs. Needed
+    # Skill directories: bundled skills/ plus any caller-provided dirs. Needed
     # both for the RuntimeBundle (below) and the engine's tool_metadata so the
     # `skill` tool can find bundled skills at runtime.
-    project_skills_dir = str(Path(__file__).parent.parent.parent / "skills")
-    all_skill_dirs = (project_skills_dir, *extra_skill_dirs)
+    all_skill_dirs = (str(_bundled_skills_dir()), *extra_skill_dirs)
 
     engine = QueryEngine(
         api_client=api_client,
@@ -185,6 +184,15 @@ async def build_geo_runtime(
 
     logger.info("GeoHarness runtime assembled successfully")
     return bundle
+
+
+def _bundled_skills_dir() -> Path:
+    """Find installed package resources, or source skills in an editable checkout."""
+    package_dir = Path(__file__).resolve().parent
+    installed_dir = package_dir / "skills"
+    if installed_dir.is_dir():
+        return installed_dir
+    return package_dir.parent.parent / "skills"
 
 
 def _warm_data_layer(data_catalog: Any) -> None:
