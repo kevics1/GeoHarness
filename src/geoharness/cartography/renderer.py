@@ -35,6 +35,7 @@ from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 from geoharness._proj_fix import ensure_proj_data  # noqa: E402
+from geoharness.config.settings import MapLayout  # noqa: E402
 
 # Reprojection (to_crs) must not inherit a poisoned PROJ database.
 ensure_proj_data()
@@ -216,7 +217,7 @@ def _quantile_classes(vals: np.ndarray, k: int) -> np.ndarray:
     try:
         import mapclassify
 
-        return np.asarray(mapclassify.Quantiles(vals, k=k).yb, dtype=int) - 1
+        return np.asarray(mapclassify.Quantiles(vals, k=k).yb, dtype=int)
     except Exception as exc:
         logger.warning("mapclassify unavailable (%s); using rank quantiles", exc)
 
@@ -360,15 +361,10 @@ def _to_wgs84(gdf: Any) -> Any:
     """Reproject to EPSG:4326 for web tiling (leaflet is lon/lat)."""
     crs = getattr(gdf, "crs", None)
     if crs is None:
-        logger.warning("Dataset has no CRS; assuming EPSG:4326 for interactive output")
-        return gdf
+        raise ValueError("Cannot render an interactive map with an unknown CRS.")
     if crs.is_geographic and crs.to_epsg() == 4326:
         return gdf
-    try:
-        return gdf.to_crs("EPSG:4326")
-    except Exception as exc:
-        logger.warning("Reprojection to EPSG:4326 failed (%s); using source CRS", exc)
-        return gdf
+    return gdf.to_crs("EPSG:4326")
 
 
 # ── Composition elements (static maps) ────────────────────────────────────
@@ -389,16 +385,22 @@ def _nice_distance(meters: float) -> float:
 def _draw_scalebar(ax: Any, gdf: Any) -> None:
     """Draw an approximate scale bar (kilometres)."""
     try:
-        minx, miny, maxx, maxy = gdf.total_bounds
+        # The canvas includes margins; using feature bounds overstates the bar.
+        minx, maxx = ax.get_xlim()
+        miny, maxy = ax.get_ylim()
         width = float(maxx - minx)
         if width <= 0:
             return
         crs = getattr(gdf, "crs", None)
-        if crs is not None and crs.is_geographic:
+        if crs is None:
+            return
+        if crs.is_geographic:
             mid_lat = (float(miny) + float(maxy)) / 2.0
-            width_m = width * 111_320.0 * max(0.05, math.cos(math.radians(mid_lat)))
+            _, _, width_m = crs.get_geod().inv(float(minx), mid_lat, float(maxx), mid_lat)
         else:
-            width_m = width
+            width_m = width * crs.axis_info[0].unit_conversion_factor
+        if not math.isfinite(width_m) or width_m <= 0:
+            return
         distance_m = _nice_distance(width_m * 0.22)
         if distance_m <= 0:
             return
@@ -460,7 +462,9 @@ def _draw_north_arrow(ax: Any) -> None:
         logger.debug("North arrow skipped: %s", exc)
 
 
-def _attach_legend(ax: Any, legend: list[tuple[str, str]], method: str) -> None:
+def _attach_legend(
+    ax: Any, legend: list[tuple[str, str]], method: str, layout: MapLayout | None = None,
+) -> None:
     if not legend:
         return
     if method == "flow":
@@ -471,11 +475,14 @@ def _attach_legend(ax: Any, legend: list[tuple[str, str]], method: str) -> None:
         handles = [Patch(facecolor=color, edgecolor="#5a5a5a", label=label)
                    for label, color in legend]
         title = "Classes"
+    options = layout or MapLayout()
+    placement = {"loc": "upper left", "bbox_to_anchor": (1.02, 1)} if (
+        options.legend_outside
+    ) else {"loc": "lower left", "bbox_to_anchor": (0.01, 0.09)}
     leg = ax.legend(
         handles=handles,
-        loc="lower left",
-        bbox_to_anchor=(0.01, 0.09),
-        fontsize=8,
+        **placement,
+        fontsize=options.legend_font_size,
         frameon=True,
         framealpha=0.9,
         title=title,
@@ -501,11 +508,14 @@ def render_static(
     add_legend: bool = True,
     add_scalebar: bool = True,
     add_north_arrow: bool = True,
+    layout: MapLayout | None = None,
 ) -> Path:
     """Render a static map to PNG / PDF / SVG and return the written path."""
     _configure_matplotlib()
     _validate_gdf(gdf)
     path = _prepare_output_path(output_path, ".png")
+    options = layout or MapLayout(width=figsize[0], height=figsize[1], dpi=dpi)
+    figsize, dpi = (options.width, options.height), options.dpi
 
     method = (render_method or "categorized").strip().lower()
     hex_colors, legend, weights = _row_colors_and_legend(
@@ -523,7 +533,8 @@ def render_static(
             for coords in _geom_lines(geom):
                 segments.append(coords)
                 seg_colors.append(hex_colors[i])
-                seg_widths.append(weights[i] if weights else 1.6)
+                # Scale every flow width equally, preserving the data ratios.
+                seg_widths.append((weights[i] if weights else 1.6) * options.line_width / 1.8)
         if not segments:
             raise ValueError(
                 "Cannot render flow: geometries contain no lines or polygon rings."
@@ -534,19 +545,21 @@ def render_static(
         ax.autoscale()
         ax.set_aspect("equal")
     else:
-        gdf.plot(
-            ax=ax,
-            color=hex_colors,
-            edgecolor="#5a5a5a",
-            linewidth=0.4,
-            aspect="equal",
-        )
+        polygon_mask = gdf.geom_type.isin(["Polygon", "MultiPolygon"]).to_numpy()
+        for mask, alpha in ((polygon_mask, options.polygon_alpha), (~polygon_mask, 1.0)):
+            if not mask.any():
+                continue
+            gdf.loc[mask].plot(
+                ax=ax, color=[color for color, include in zip(hex_colors, mask) if include],
+                edgecolor="#5a5a5a", linewidth=options.line_width,
+                markersize=options.point_size, aspect="equal", alpha=alpha,
+            )
 
     if title:
-        ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+        ax.set_title(title, fontsize=options.title_font_size, fontweight="bold", pad=12)
 
     if add_legend:
-        _attach_legend(ax, legend, method)
+        _attach_legend(ax, legend, method, options)
     if add_scalebar:
         _draw_scalebar(ax, gdf)
     if add_north_arrow:
@@ -721,6 +734,8 @@ def render_layers(
     figsize: tuple[float, float] = (10.0, 8.0),
     dpi: int = 150,
     basemap_raster: str = "",
+    layout: MapLayout | None = None,
+    raster_cache: dict[str, Any] | None = None,
 ) -> Path:
     """Compose several layers onto ONE output map.
 
@@ -755,6 +770,8 @@ def render_layers(
         if gdf is None:
             raise ValueError(f"Layer {label!r} is missing 'gdf'.")
         _validate_gdf(gdf)
+        if gdf.crs is None:
+            raise ValueError(f"Layer {label!r} has no CRS; declare it before composition.")
         kind = _geom_kind(gdf)
         static_color, _, _, _ = _LAYER_KIND_DEFAULTS.get(
             kind, _LAYER_KIND_DEFAULTS["polygon"]
@@ -776,7 +793,7 @@ def render_layers(
     if is_html:
         return _render_layers_interactive(prepared, title, path)
     return _render_layers_static(
-        prepared, title, path, figsize, dpi, basemap_raster
+        prepared, title, path, figsize, dpi, basemap_raster, layout, raster_cache
     )
 
 
@@ -787,8 +804,17 @@ def _render_layers_static(
     figsize: tuple[float, float],
     dpi: int,
     basemap_raster: str,
+    layout: MapLayout | None = None,
+    raster_cache: dict[str, Any] | None = None,
 ) -> Path:
     _configure_matplotlib()
+    options = layout or MapLayout(width=figsize[0], height=figsize[1], dpi=dpi)
+    figsize, dpi = (options.width, options.height), options.dpi
+    target_crs = prepared[0][1].crs
+    prepared = [
+        (label, gdf.to_crs(target_crs), color, kind)
+        for label, gdf, color, kind in prepared
+    ]
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.set_facecolor("#f7f9fb")
 
@@ -803,17 +829,24 @@ def _render_layers_static(
         import rasterio
         from rasterio.plot import plotting_extent
 
-        with rasterio.open(basemap_raster) as ds:
-            arr = ds.read(1, masked=True)
-            extent = plotting_extent(ds)
-            raster_crs = ds.crs
-            ax.imshow(
-                arr,
-                extent=extent,
-                cmap="terrain" if ds.dtypes[0] in ("int16", "float32") else "gray",
-                alpha=0.75,
-                zorder=0,
-            )
+        cache = raster_cache if raster_cache is not None else {}
+        if "basemap" not in cache:
+            with rasterio.open(basemap_raster) as ds:
+                cache["basemap"] = {
+                    "array": ds.read(1, masked=True), "extent": plotting_extent(ds),
+                    "crs": ds.crs, "dtype": ds.dtypes[0],
+                }
+        basemap = cache["basemap"]
+        extent = basemap["extent"]
+        raster_crs = basemap["crs"]
+        if raster_crs is None:
+            plt.close(fig)
+            raise ValueError("Raster basemap has no CRS; cannot align vector layers.")
+        ax.imshow(
+            basemap["array"], extent=basemap["extent"],
+            cmap="terrain" if basemap["dtype"] in ("int16", "float32") else "gray",
+            alpha=0.75, zorder=0,
+        )
         if raster_crs is not None:
             # geopandas.to_crs accepts EPSG integers / WKT text, NOT rasterio
             # CRS objects — pass a string it understands.
@@ -828,26 +861,24 @@ def _render_layers_static(
                     if gdf.crs is not None:
                         gdf = gdf.to_crs(target_crs)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Could not reproject layer %r to raster CRS: %s",
-                        label,
-                        exc,
-                    )
+                    plt.close(fig)
+                    raise ValueError(f"Cannot align layer {label!r} with raster CRS.") from exc
                 reprojected.append((label, gdf, color, kind))
             prepared = reprojected
 
-    for label, gdf, color, kind in prepared:
+    for order, (label, gdf, color, kind) in enumerate(prepared, start=1):
         if kind == "line":
-            gdf.plot(ax=ax, color=color, linewidth=1.8, aspect="equal", zorder=2)
+            gdf.plot(ax=ax, color=color, linewidth=options.line_width,
+                     aspect="equal", zorder=order)
         elif kind == "point":
             gdf.plot(
-                ax=ax, color=color, markersize=18, edgecolor="#333333",
-                linewidth=0.4, aspect="equal", zorder=3,
+                ax=ax, color=color, markersize=options.point_size, edgecolor="#333333",
+                linewidth=0.4, aspect="equal", zorder=order,
             )
         else:
             gdf.plot(
                 ax=ax, color=color, edgecolor="#5a5a5a", linewidth=0.5,
-                alpha=0.75, aspect="equal", zorder=1,
+                alpha=options.polygon_alpha, aspect="equal", zorder=order,
             )
 
     # Extent = union of all vector layers (plus raster when present) so the
@@ -857,7 +888,9 @@ def _render_layers_static(
 
         frames = [gdf[["geometry"]] for _label, gdf, _c, _k in prepared]
         stacked = _pd.concat(frames, ignore_index=True)
-        union = type(prepared[0][1])(stacked, geometry="geometry")
+        union = type(prepared[0][1])(
+            stacked, geometry="geometry", crs=prepared[0][1].crs,
+        )
         minx, miny, maxx, maxy = union.total_bounds
         if basemap_raster and raster_crs is not None:
             # Clip the canvas to the raster footprint: vectors (e.g. rivers)
@@ -897,14 +930,17 @@ def _render_layers_static(
         for label, _gdf, color, kind in prepared
     ]
     if handles:
+        placement = {"loc": "upper left", "bbox_to_anchor": (1.02, 1)} if (
+            options.legend_outside
+        ) else {"loc": "upper right"}
         ax.legend(
-            handles=handles, loc="upper right", fontsize=9,
+            handles=handles, fontsize=options.legend_font_size, **placement,
             framealpha=0.92, title="图层",
         )
 
     # Title + scalebar (uses the union extent computed above).
     if title:
-        ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+        ax.set_title(title, fontsize=options.title_font_size, fontweight="bold", pad=12)
     try:
         _draw_scalebar(ax, union_for_scale)
     except Exception:  # noqa: BLE001 — scalebar is cosmetic

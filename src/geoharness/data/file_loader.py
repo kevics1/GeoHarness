@@ -294,7 +294,7 @@ class FileLoader:
             name: File name (with/without extension) or full path.
 
         Returns:
-            GeoDataFrame; CRS defaults to EPSG:4326 when the file has none.
+            GeoDataFrame; unknown CRS stays unknown and must be explicitly declared.
 
         Raises:
             ValueError: If the file cannot be found or contains no features.
@@ -305,8 +305,11 @@ class FileLoader:
         if path is None:
             raise ValueError(f"File not found: {name!r}")
         gdf = gpd.read_file(path)
-        if gdf.crs is None:
-            gdf = gdf.set_crs("EPSG:4326")
+        if not isinstance(gdf, gpd.GeoDataFrame):
+            raise ValueError(
+                "File has no spatial geometry; read attribute tables with geo_python/pandas "
+                "or provide explicit coordinates/geometry and CRS."
+            )
         if gdf.empty:
             raise ValueError(f"File contains no features: {path}")
         return gdf

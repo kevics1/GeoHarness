@@ -83,6 +83,12 @@ def _from_postgis(table: str, catalog: Any) -> Any:
     loader = getattr(connector, "query_geodataframe", None)
     if not callable(loader):
         raise ValueError("PostGIS connector does not support GeoDataFrame loading.")
+    from geoharness.data.postgis import PostGISConnector
+
+    if isinstance(connector, PostGISConnector):
+        # Source layers must be complete. Retain compatibility with custom
+        # connectors whose public loader accepts only the table argument.
+        return loader(table, limit=None)
     return loader(table)
 
 

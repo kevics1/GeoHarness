@@ -10,6 +10,56 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AnalysisConfig(BaseModel):
+    """Native analysis settings; an empty metric CRS selects a local UTM CRS."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outputs_dir: str = ".geoharness/analysis"
+    metric_crs: str = ""
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+
+
+class ExecutionConfig(BaseModel):
+    """Reproducible Python execution with workspace write guards."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    enabled: bool = True
+    outputs_dir: str = ".geoharness/runs"
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+    max_output_chars: int = Field(default=12000, ge=100, le=1000000)
+
+
+class MapLayout(BaseModel):
+    """Presentation parameters that a map reviewer may safely adjust."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    width: float = Field(default=10, ge=4, le=24)
+    height: float = Field(default=8, ge=4, le=24)
+    dpi: int = Field(default=150, ge=72, le=300)
+    legend_outside: bool = False
+    title_font_size: float = Field(default=14, ge=8, le=32)
+    legend_font_size: float = Field(default=9, ge=6, le=20)
+    point_size: float = Field(default=18, ge=2, le=150)
+    line_width: float = Field(default=1.8, ge=0.2, le=8)
+    polygon_alpha: float = Field(default=0.75, ge=0.1, le=1)
+
+
+class MapReviewConfig(BaseModel):
+    """Image-based review. Empty model/provider fields reuse the main model."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    enabled: bool = True
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    max_repairs: int = Field(default=2, ge=0, le=2)
+    timeout_seconds: float = Field(default=90, gt=0, le=300)
+    max_tokens: int = Field(default=8192, ge=256, le=65536)
+    max_image_side: int = Field(default=1800, ge=256, le=4096)
+    layout: MapLayout = Field(default_factory=MapLayout)
 
 # Pattern for ${VAR} expansion in config values
 _VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
@@ -39,7 +89,7 @@ class CartographyConfig:
     """Cartography configuration."""
 
     default_template: str = ""
-    outputs_dir: str = ""
+    outputs_dir: str = "~/.geoharness/exports"
     bridge_rules: dict[str, BridgeRule] = field(default_factory=dict)
 
 
@@ -101,6 +151,9 @@ class GeoConfig:
     cognition: CognitionConfig = field(default_factory=CognitionConfig)
     data: DataConfig = field(default_factory=DataConfig)
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    map_review: MapReviewConfig = field(default_factory=MapReviewConfig)
 
 
 def _expand_vars(value: Any) -> Any:
@@ -165,7 +218,7 @@ def _parse_cartography(raw: dict[str, Any] | None) -> CartographyConfig:
     if not raw:
         return CartographyConfig()
     template = _expand_vars(raw.get("default_template", ""))
-    outputs_dir = _expand_vars(raw.get("outputs_dir", ""))
+    outputs_dir = _expand_vars(raw.get("outputs_dir") or CartographyConfig().outputs_dir)
     rules = _parse_bridge_rules(raw.get("bridge_rules"))
     return CartographyConfig(
         default_template=template,
@@ -262,6 +315,8 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         GeoConfig dataclass with all configuration.
     """
     # Determine config directory and file
+    if config_path is None and os.environ.get("GEOH_CONFIG_PATH"):
+        config_path = Path(os.environ["GEOH_CONFIG_PATH"]).expanduser()
     if config_path is None:
         config_dir = Path.home() / ".geoharness"
         config_path = config_dir / "config.yaml"
@@ -301,6 +356,9 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         cognition=cognition,
         data=data,
         permissions=permissions,
+        analysis=AnalysisConfig.model_validate(_expand_vars(raw.get("analysis") or {})),
+        execution=ExecutionConfig.model_validate(_expand_vars(raw.get("execution") or {})),
+        map_review=MapReviewConfig.model_validate(_expand_vars(raw.get("map_review") or {})),
     )
 
 

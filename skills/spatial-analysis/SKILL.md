@@ -1,74 +1,55 @@
 ---
 name: spatial-analysis
-description: 空间分析总入口 — 点数据分布规律（Moran's I/核密度/热点）与多图层叠加、邻近、分区统计的完整工具链与工作流。用户要求"分析空间规律/分布/聚集/热点"时加载。
+description: 地理空间分析入口。首期聚焦叠加、缓冲、距离、分区计数与影响范围；原生 GIS 与 Python 结合，保留结果并检查成图。
 ---
 
 # 空间分析工作流
 
-## 第一步：判断数据形态（决定整条技术路线）
+先明确用户问题、输入图层、分析对象、距离/范围口径与交付要求。仅询问不能从数据或配置得到、并会改变分析结果的信息。
 
-| 数据形态 | 特征 | 走哪条路线 |
-|---|---|---|
-| **点数据** | 居民点/监测站/POI（每行一个点） | → 路线 A：点模式分析 |
-| **面数据** | 行政区/网格（每行一个多边形+属性值） | → 路线 B：面聚合统计 |
-| **线数据** | 河流/道路（拓扑/网络问题） | → 路线 C：网络/缓冲分析 |
+工具文本返回准确的产物路径、统计和最多 20 行属性预览；不要猜测输出文件名。完整属性/manifest 用 geo_python 按返回路径读取，SOURCE_CWD 是脚本全局变量，脚本当前目录为 RUN_DIR，不从 os.environ 读取这些变量。
 
-## 路线 A：点数据空间规律（如"受威胁居民点空间规律"）
+## 检查输入
 
-点数据无法直接算 Moran's I（需要面单元聚合）。标准流程：
+本地数据用 geo_vector_data，数据库数据用 geo_db_data；确认几何类型、字段、CRS 和范围。load 的概况没有完整几何，不要手工重建 GeoJSON。未知 CRS 需要明确声明；已有 CRS 用变换，不重新贴标签。检查空/无效几何和阈值；计量使用米制投影。原生分析默认按全部输入范围选择适用的 UTM，跨带或极地等范围需要显式配置 analysis.metric_crs。
 
-1. **描述性空间结构**（L1，本地即可完成）
-   - `geo_vector_data action=load` → 得到要素数、字段、CRS、范围
-   - `geo_vector_data action=inspect` → 几何类型确认（Point?）
-   - 用 `postgres` MCP 工具做 SQL 分组统计（按区县/字段分组计数）
+## 执行空间运算
 
-2. **空间聚集证据**（L2，用 MCP 空间分析工具）
-   - 核密度估计 / 热点：`geo-mcp-server` 的 `geo_cluster_detect`、
-     `geo_getis_ord`（Gi*）
-   - 全局/局部自相关：`geo_moran_global` / `geo_moran_local`（LISA）
-     —— 注意：需先把点聚合到面单元（如 village/county 网格计数），
-     再以 `geometries` 参数传入多边形坐标（避免大 payload 超时）
-3. **邻近与背景关联**（L1+）
-   - 到火场/道路/水系的距离：`geo_calculate_distance`、`geo_buffer`
-   - 拓扑关系：`geo_spatial_relation`
+首期 geo_analysis 不依赖 MCP 或 PostGIS。source、reference、zones 使用结构化 SpatialSource，每个来源恰好提供 file_path、source_name 或 geojson 中的一项。
 
-4. **成果落图**
-   - `geo_cartography` 多图层渲染（layers 参数），
-     叠加 行政区划+火场+居民点（按密度/等级配色）
-
-> ⚠️ `analysis_type`（cluster_detect/moran_local 等）只影响制图符号化方案，
-> 不执行统计计算。统计必须调 MCP 工具；符号化只是把结果画出来。
-
-## 路线 B：面数据统计
-
-1. `geo_db_data action=load`（PostGIS 表）或 `geo_vector_data action=load`
-2. `geo_moran_global` / `geo_moran_local`（直接传面几何 + 属性值）
-3. `geo_getis_ord` 找热点/冷点
-4. 成果图用 graduated 渲染（连续值分级）
-
-## 路线 C：线/邻近/叠加
-
-- 邻近/可达性 → 技能 `proximity-analysis`
-- 多因子叠加/风险区划 → 技能 `overlay-analysis`
-- 分区统计（面内点数/均值）→ 技能 `zonal-statistics`
-
-## 相关技能
-
-| 技能名 | 用途 |
+| action | 运算与输入 |
 |---|---|
-| `geo-perception` | L1 五步感知（坐标/距离/方向/几何/拓扑） |
-| `geo-comprehension` | L2 六步理解（自相关/热点/异质性） |
-| `geo-reasoning` | L3 六步推理（聚类/OD/因果） |
-| `proximity-analysis` | 邻近/覆盖/可达性 |
-| `overlay-analysis` | 多图层叠加/风险区划 |
-| `zonal-statistics` | 分区统计 |
-| `cartography` | 分析成果落图（含多图层用法） |
+| buffer | source 按 distance_m 生成缓冲区 |
+| clip | source 按 reference 面图层裁剪 |
+| intersection | source 与 reference 做几何交集 |
+| distance | source 到 reference 的最短距离，输出 distance_m |
+| count | 按 zones 或 reference 统计 source 要素数量 |
+| impact | source 资产到 reference 危险区的距离及 affected，可选 zones 分区统计 |
 
-## 报告规范
+例如：
 
-空间规律分析结论必须包含：
-1. **全局格局**（聚集/离散/随机 + 统计量与 p 值）
-2. **局部位置**（热点/冷点在哪里 —— LISA/Gi* 结果）
-3. **尺度声明**（分析单元、MAUP 提醒）
-4. ** CRS 声明**（WGS84 / CGCS2000 / 投影坐标）
-5. **成果图**（geo_cartography 渲染，符号化与分析类型匹配）
+```json
+{"action":"impact","source":{"file_path":"居民点.geojson"},"reference":{"file_path":"危险区.geojson"},"zones":{"file_path":"行政区.geojson"},"distance_m":500,"output_name":"impact"}
+```
+
+affected 表示相交或最短距离不超过阈值，不是未经验证的风险等级。分区采用 intersects，包含边界；跨区/重叠区会分别计数，所以分区数之和可能超过全局唯一资产数。保留这项计数口径。
+
+输出包含 GeoJSON、CSV、统计、manifest 和可制图 layers。计量 CRS 与导出 CRS 分别记录。核验实际数量、单位和参数；空影响选集也是有效结果，不应改阈值制造受影响对象。
+
+## 组合分析与自主 Python
+
+组合任务使用 geo_python。可用已安装的 GeoPandas、Shapely、pandas、matplotlib 和 rasterio，读取 SOURCE_CWD/DATA_DIRS，输出只写 RUN_DIR 或相对文件名。保留脚本、参数、日志与结果，检查 exit_code；失败按实际错误修正。
+
+源数据默认只读；修改数据时生成新文件。不使用网络、shell、子进程或读取凭证。应用级保护用于可信分析脚本，不是 OS 沙箱。
+
+## 结果制图与检查
+
+加载 skill(name="cartography")。将 geo_analysis 返回的 layers 序列化后传给 geo_cartography，突出真正的影响选集，不要把全部资产画成受影响对象。
+
+原生制图会读取成图进行视觉检查，在上限内按确认的呈现问题修正、重绘。Python 生成的 PNG 使用 geo_map_review，提供用户目标、预期图层及数据/分析摘要；按问题修改呈现代码、重绘、再检查。视觉检查不能证明数值正确，仍需程序核验。不根据视觉建议更换数据、统计方法或距离阈值。
+
+## 交付
+
+给出用户问题的结论、数量/距离/范围、方法与单位、计数口径，以及数据结果、地图、脚本/manifest、检查报告的实际路径。明确 passed、issues 或 unverified；剩余问题如实说明。
+
+热点与空间分布、栅格/地形是后续重点。现有 skill(name="geo-perception")、skill(name="geo-comprehension")、skill(name="geo-reasoning") 可提供领域参考；只用实际可用的工具，不把简单叠加任务强制升级到 Moran/LISA 或因果分析。

@@ -1,56 +1,42 @@
 ---
 name: cartography
-description: 制图工作流 — 单图层与多图层合成渲染（PNG/PDF/SVG/HTML），图层顺序、颜色搭配与常见错误。当用户要求制图/出图/地图/态势图/专题图时加载。
+description: 分析结果制图与图片检查。生成单图层或多图层 PNG/PDF/SVG/HTML，读取实际成图检查图层、图例、文字与布局，有限自动修正后交付。
 ---
 
-# 制图工作流（geo_cartography）
+# 制图与检查工作流
 
-## 工具选择
+## 明确地图表达什么
 
-| 需求 | 做法 |
-|---|---|
-| 单个图层出图 | `action=export` + `source_type=file` + `source_name=图层名` |
-| **多图层合成图（态势图/专题图）** | `action=export` + **`layers` JSON 数组**（一次调用，勿逐层调用） |
-| 叠加高程/栅格底图 | 加 `basemap_raster='<tif路径>'`（静态 PNG 有效） |
-| 仅想了解符号化方案 | `action=symbolize`（需 `layer_name`；`analysis_type` 可省略） |
+使用真实分析结果和对应图层。analysis_type 只选择符号化规则，不执行分析。核对数量、CRS、字段、单位及范围；不要把目录/通配符当作 file_path，也不要根据概况回复重建几何。
 
-## 多图层用法（推荐）
+## 原生制图
+
+geo_cartography 的 export/full 渲染，symbolize/compose 仅返回方案。首期优先 PNG。多图层一次传 layers JSON 字符串，按数组顺序由下到上绘制；每层可带 label 和 color。geo_analysis 返回的 layers 可直接序列化使用。
 
 ```json
-geo_cartography(
-  action="export",
-  output_format="png",
-  title="西昌市3·30森林火灾应急态势图",
-  layers='[
-    {"source_type":"file","source_name":"西昌市行政区划","label":"行政区划","color":"#4c78a8"},
-    {"source_type":"file","source_name":"水系","label":"水系","color":"#2b7bba"},
-    {"source_type":"file","source_name":"城际公路","label":"城际公路","color":"#333333"},
-    {"source_type":"file","source_name":"预测蔓延范围","label":"预测蔓延","color":"#fc8d59"},
-    {"source_type":"file","source_name":"当前火场范围","label":"当前火场","color":"#d7301f"},
-    {"source_type":"file","source_name":"受威胁居民点","label":"受威胁居民点","color":"#e4572e"},
-    {"source_type":"file","source_name":"应急避难场所","label":"应急避难场所","color":"#2ca02c"}
-  ]',
-  basemap_raster="example/数据/西昌市高程.tif"
-)
+{"action":"export","output_format":"png","title":"影响范围分析","review_task":"检查危险区、受影响居民点和行政区是否清楚可见，图例是否对应","layers":"[{\"file_path\":\"行政区.geojson\",\"label\":\"行政区\",\"color\":\"#dbe8f2\"},{\"file_path\":\"危险区.geojson\",\"label\":\"危险区\",\"color\":\"#d7301f\"},{\"file_path\":\"affected.geojson\",\"label\":\"受影响居民点\",\"color\":\"#ff7f00\"}]"}
 ```
 
-要点：
-- **数组顺序 = 绘制顺序（先下后上）**。想突出某图层就把它放后面（后画的盖前面）。
-  火场范围应放在预测蔓延之后、点图层之前。
-- 每层可选 `label`（图例文字，默认用 source_name）与 `color`（缺省按几何类型配色：
-  面=蓝、线=红、点=橙）。
-- 层内也支持 `geojson` 内联数据代替 source_name。
-- 输出位置：省略 `output_path` 时写入 `~/.geoharness/exports/`（文件名取自
-  title/layer_name）。
+源图层必须有明确 CRS，静态合成统一到首图层或栅格底图 CRS；失败就报错，不继续绘制错位图层。影响选集为空时保留零影响结论，用危险区/背景图表达，不改变阈值或假造对象。输出只能位于工作区或配置 outputs_dir，不覆盖源数据。
 
-## 常见错误（勿重蹈）
+layout 可设置 width、height、dpi、legend_outside、title_font_size、legend_font_size、point_size、line_width、polygon_alpha。
 
-1. **不要把目录或通配符传给 file_path** —— `数据/*.shp`、`数据/` 均无法渲染。
-2. **不要逐图层多次调用 export 再指望自动拼接** —— 每次调用只出一层。
-3. **不要用 load 的输出手工拼 GeoJSON** —— load 只返回统计摘要，不含几何坐标。
-4. `analysis_type` 仅在空间分析成果制图时需要（如 moran_local）；专题制图直接省略。
+## 自动检查与修正
 
-## 图层顺序模板（应急态势图）
+工具显式把图片和任务/图层/参数摘要送入视觉模型，检查空白、图层可见性、图例对应、文字乱码/遮挡、范围与布局。文件落盘不代表检查通过。
 
-底 → 顶：栅格底图(basemap_raster) → 行政区划 → 水系 → 道路 → 预测蔓延 →
-当前火场 → 受威胁居民点 → 应急避难场所。
+确认问题且能用呈现参数修复时，自动重绘并再次检查，最多 map_review.max_repairs 轮（默认2）。每轮使用同一份加载数据，保留修正前地图与检查报告。涉及源数据、分析口径、阈值或无法确认的问题不自动改动。
+
+- passed：视觉检查通过，不等于统计或真实位置得到证明。
+- issues：存在剩余问题，报告具体内容。
+- unverified：检查关闭、模型不可用、格式无法核实或回复无效；不宣称地图正确。
+
+PDF/SVG 使用同参数 PNG 预览检查，不能替代导出文件自身的排版/字体核验。HTML 的静态预览不能证明网页正确，没有实际网页截图时仍为 unverified。
+
+## Python 自定义制图
+
+geo_python 生成图片后调用 geo_map_review(file_path=..., task=..., evidence=...)。按检查问题修改呈现代码，重绘、再检查，遵守同一轮数上限。保留脚本、产物和报告；未解决问题与地图一起说明，不因布局建议修改分析结果。
+
+## 交付
+
+交付地图及解释，附分析结果、脚本/manifest 和工具返回的 review_path，明确检查状态、修正次数、数据、CRS、单位与图层含义。预览、报告和修改前地图保存在独立目录。

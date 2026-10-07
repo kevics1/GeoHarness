@@ -49,6 +49,7 @@ async def build_geo_runtime(
     extra_skill_dirs: tuple[str, ...] = (),
     permission_prompt: Any | None = None,
     ask_user_prompt: Any | None = None,
+    config_override: GeoConfig | None = None,
 ) -> RuntimeBundle:
     """Build GeoHarness runtime by directly constructing RuntimeBundle.
 
@@ -67,7 +68,7 @@ async def build_geo_runtime(
         Fully assembled RuntimeBundle with domain-specific components.
     """
     # 1. Load GeoHarness config (from ~/.geoharness/config.yaml)
-    config = load_geo_config(config_path)
+    config = config_override or load_geo_config(config_path)
     logger.info("GeoHarness config loaded: model=%s", config.model)
 
     # 2. Build API client directly (bypasses resolve_auth profile override)
@@ -129,6 +130,12 @@ async def build_geo_runtime(
             # are invisible at runtime even though they are bundled — which
             # made the model burn turns guessing skill names in the TUI.
             "extra_skill_dirs": all_skill_dirs,
+            # Dedicated review calls bypass text-only tool result serialization.
+            # Provider/model overrides are resolved by the review service itself.
+            **({"map_review_client": api_client} if config.api_key and "${" not in config.api_key
+               and not (
+                config.map_review.model or config.map_review.base_url or config.map_review.api_key
+            ) else {}),
         },
     )
 
@@ -257,7 +264,7 @@ def _build_mcp_manager(config: GeoConfig) -> McpClientManager:
 
 
 def _build_tool_registry() -> ToolRegistry:
-    """Build the GeoHarness tool registry (4 native + 5 whitelisted).
+    """Build the GeoHarness tool registry (7 native + 5 whitelisted).
 
     MCP tools are registered later by geoharness.mcp.connect.activate_mcp()
     once servers have connected — registration mutates this same registry
@@ -290,7 +297,9 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
     # protection and explicit denied_tools still outrank this allow-list;
     # config deny_paths also keep applying to generic file tools, while the
     # cartography tool never targets anything but the exports directory.
-    perm_settings.allowed_tools.append("geo_cartography")
+    perm_settings.allowed_tools.extend(["geo_cartography", "geo_analysis", "geo_map_review"])
+    if config.execution.enabled:
+        perm_settings.allowed_tools.append("geo_python")
     return PermissionChecker(settings=perm_settings)
 
 

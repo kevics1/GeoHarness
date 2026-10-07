@@ -253,55 +253,102 @@ class PostGISConnector:
             col_names = [desc[0] for desc in cur.description]
             return [dict(zip(col_names, row)) for row in cur.fetchall()]
 
-    def query_geodataframe(self, table_name: str, limit: int = 5000) -> Any:
+    def query_geodataframe(self, table_name: str, limit: int | None = 5000) -> Any:
         """Load a spatial table into a GeoDataFrame.
 
-        Read-only: uses ``SELECT *`` on the named table with a row cap.
-        Geometry is returned as WKB and converted via ``shapely``.
+        Read-only: uses ``SELECT *`` with an optional row cap. SRIDs are
+        checked per feature, and the actual CRS is loaded from spatial_ref_sys.
+        The default cap is retained for inspection callers; analysis/render
+        source resolution requests ``limit=None`` for the complete layer.
 
         Args:
             table_name: Name of the spatial table.
-            limit: Maximum number of rows to load.
+            limit: Maximum number of rows to load, or None for the full table.
 
         Returns:
-            GeoDataFrame in EPSG:4326.
+            GeoDataFrame with the table's actual CRS and geometry column name.
 
         Raises:
-            ValueError: If the table has no geometry column or no rows.
+            ValueError: If geometry/CRS is missing, ambiguous or mixed, or no rows exist.
         """
         import geopandas as gpd
+        import pandas as pd
+        from psycopg import sql
+        from pyproj import CRS
         from shapely import wkb as shapely_wkb
 
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise ValueError("limit must be a positive integer or None.")
+        relation = sql.Identifier(table_name)
         with self._use_connection() as conn, conn.cursor() as cur:
+            # Resolve the exact quoted relation through the active search_path,
+            # rather than accidentally selecting a same-named table in another schema.
             cur.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = %s AND udt_name = 'geometry'",
-                (table_name,),
+                "SELECT attname FROM pg_attribute "
+                "WHERE attrelid = to_regclass(%s) AND atttypid = 'geometry'::regtype "
+                "AND attnum > 0 AND NOT attisdropped ORDER BY attnum",
+                (relation.as_string(),),
             )
-            row = cur.fetchone()
-            if not row:
+            geometry_columns = cur.fetchall()
+            if not geometry_columns:
                 raise ValueError(
                     f"Table '{table_name}' has no geometry column"
                 )
-            geom_col = row[0]
+            if len(geometry_columns) != 1:
+                raise ValueError(
+                    f"Table '{table_name}' has multiple geometry columns; select one first."
+                )
+            geom_col = geometry_columns[0][0]
 
-            # Table/column names cannot be parameterised; they come from
-            # information_schema lookups above, not raw user text.
-            cur.execute(
-                f'SELECT *, ST_AsBinary("{geom_col}") AS __geoh_wkb '
-                f'FROM "{table_name}" LIMIT %s',
-                (int(limit),),
+            query = sql.SQL(
+                "SELECT *, ST_AsBinary({geometry}) AS {wkb}, "
+                "ST_SRID({geometry}) AS {srid} FROM {table}"
+            ).format(
+                geometry=sql.Identifier(geom_col),
+                wkb=sql.Identifier("__geoh_wkb"),
+                srid=sql.Identifier("__geoh_srid"),
+                table=relation,
             )
+            if limit is None:
+                cur.execute(query)
+            else:
+                cur.execute(query + sql.SQL(" LIMIT %s"), (limit,))
             col_names = [d[0] for d in cur.description]
+            if len(col_names) != len(set(col_names)):
+                raise ValueError("Table fields conflict with reserved loader fields.")
             records = [dict(zip(col_names, r)) for r in cur.fetchall()]
-
-        if not records:
-            raise ValueError(f"Table '{table_name}' contains no rows")
+            if not records:
+                raise ValueError(f"Table '{table_name}' contains no rows")
+            srids = {rec.pop("__geoh_srid") for rec in records}
+            if None in srids or 0 in srids or any(value < 0 for value in srids):
+                raise ValueError(f"Table '{table_name}' has unknown geometry SRID.")
+            if len(srids) != 1:
+                raise ValueError(f"Table '{table_name}' has mixed geometry SRIDs: {sorted(srids)}.")
+            srid = srids.pop()
+            cur.execute(
+                "SELECT auth_name, auth_srid, srtext FROM spatial_ref_sys WHERE srid = %s",
+                (srid,),
+            )
+            definition = cur.fetchone()
+            if not definition:
+                raise ValueError(f"Unknown CRS for PostGIS SRID {srid}.")
+            authority, code, wkt = definition
+            try:
+                crs = CRS.from_user_input(f"{authority}:{code}") if authority and code else None
+            except Exception:
+                crs = None
+            if crs is None:
+                if not wkt:
+                    raise ValueError(f"Unknown CRS for PostGIS SRID {srid}.")
+                crs = CRS.from_wkt(wkt)
 
         wkb_values = [rec.pop("__geoh_wkb") for rec in records]
         geometry = [shapely_wkb.loads(v) if v is not None else None for v in wkb_values]
-        gdf = gpd.GeoDataFrame(records, geometry=geometry, crs="EPSG:4326")
-        return gdf
+        frame = pd.DataFrame(records)
+        frame[geom_col] = geometry
+        return gpd.GeoDataFrame(frame, geometry=geom_col, crs=crs)
 
     def list_sources(self) -> list[DataSource]:
         """List all spatial tables as DataSource objects.

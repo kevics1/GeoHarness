@@ -1,0 +1,31 @@
+# 用户指定的本地聚合服务。local 是无鉴权本地网关的占位值，不是真实密钥。
+# 若服务启用了鉴权，把 api_key 改成 ${GEOH_API_KEY}，在配置同目录 .env 中设置。
+model: cbcn/deepseek-v4.1-flash(max)
+base_url: http://localhost:20128/v1
+api_key: local
+mcp: {}
+data:
+  file_dir: .
+cartography:
+  outputs_dir: .geoharness/exports
+  bridge_rules:
+    impact:
+      render_method: categorized
+      color_scheme: Set1
+      n_classes: 2
+analysis:
+  outputs_dir: .geoharness/analysis
+  metric_crs: ""
+  timeout_seconds: 120
+execution:
+  enabled: true
+  outputs_dir: .geoharness/runs
+  timeout_seconds: 120
+  max_output_chars: 12000
+map_review:
+  enabled: true
+  max_repairs: 2
+  timeout_seconds: 180
+  max_tokens: 32768
+  layout:
+    legend_outside: false

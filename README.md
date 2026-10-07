@@ -1,5 +1,9 @@
 # GeoHarness
 
+当前首期聚焦多图层叠加与影响范围分析，支持原生 GIS 运算、可复现的自主 Python 分析，以及读取实际成图进行检查、有限自动修正和重绘。入口与配置保持 OpenHarness/GeoHarness 隔离。
+
+最新操作与检查状态说明见 [user-guide.md](user-guide.md)。本地聚合服务配置见 [config.example.yaml](config.example.yaml)。新增工具：geo_analysis、geo_python、geo_map_review；基础工具为 7 个原生工具与 5 个辅助工具，MCP 工具按实际连接动态发现。空间热点与栅格/地形列为后续重点。
+
 地理方向原生 Agent 系统 — 空间分析优先，制图为分析产物。
 
 基于 OpenHarness 构建，通过直接构造 RuntimeBundle 实现 8 层配置隔离，不修改上游源码。
@@ -22,7 +26,7 @@
 用户输入
   → GeoHarness 系统提示词（6地理原则 + 技能目录 + 工具目录 + 级联状态）
   → LLM 调用（OpenAI 兼容 API）
-  → 工具调度（4 原生 + 27 MCP + 5 白名单 = 36 工具）
+  → 工具调度（7 原生 + 5 白名单；按配置接入 MCP）
   → 认知级联（L1感知 → L2理解 → L3推理，建议制，模型可跳过）
   → 制图输出（桥接规则 → 原生渲染 → PNG/PDF/SVG/HTML）
 ```
@@ -316,11 +320,11 @@ GeoHarness/
 │   ├── hooks/cascade.py          # 认知级联钩子 (CascadeManager)
 │   ├── mcp/config.py             # MCP 服务器配置构建器
 │   └── prompts/system_prompt.py  # 系统提示词构建器
-├── skills/                       # 3 个认知技能
+├── skills/                       # 3 个认知技能 + 分析与制图操作技能
 │   ├── geo-perception/           # L1: 5步感知流程
 │   ├── geo-comprehension/        # L2: 6步理解流程
 │   └── geo-reasoning/            # L3: 6步推理流程
-├── tests/                        # 207 个测试
+├── tests/                        # 单元、集成与工作流回归测试
 │   ├── test_config.py            # 配置解析
 │   ├── test_runtime.py           # 运行时组装
 │   ├── test_data.py              # 数据层
@@ -335,7 +339,7 @@ GeoHarness/
 
 ## 工具清单
 
-**原生工具 (4)**：
+**原生工具 (7)**：
 
 | 工具 | 功能 | 只读 |
 |------|------|------|
@@ -343,6 +347,9 @@ GeoHarness/
 | geo_vector_data | 加载/检视本地矢量数据 (SHP/GeoJSON/GPKG/CSV) | 是 |
 | geo_raster_data | 加载/检视本地栅格数据 (GeoTIFF/IMG/ASC/VRT) | 是 |
 | geo_cartography | 原生渲染地图 PNG/PDF/SVG + 交互 HTML | 视操作 |
+| geo_analysis | 缓冲、裁剪、相交、距离、分区计数与影响范围分析 | 源数据只读，生成新结果 |
+| geo_python | 保存并执行自定义 GIS 分析脚本 | 源数据只读，写独立运行目录 |
+| geo_map_review | 读取实际成图，输出视觉检查与呈现修正建议 | 写独立检查报告 |
 
 **MCP 工具 (27)**：
 

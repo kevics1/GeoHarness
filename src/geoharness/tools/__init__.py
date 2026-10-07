@@ -1,13 +1,12 @@
 """GeoHarness tool registry — whitelist + native + MCP.
 
 Builds a ToolRegistry with only domain-relevant tools:
-- 4 native tools (geo_db_data, geo_vector_data, geo_raster_data,
-  geo_cartography) — one loader per data type plus cartography
+- 7 native tools: data loaders, analysis, Python execution, cartography and map review
 - 5 whitelisted OpenHarness tools (ask_user_question, skill, todo_write,
   tool_search, brief) — user interaction helpers
 - MCP tools (registered dynamically when MCP manager is connected)
 
-Total target: 4 + 5 + 27 MCP = 36 tools (when all MCP servers connected).
+12 tools are available without MCP; configured MCP tools register dynamically.
 """
 
 from __future__ import annotations
@@ -17,8 +16,11 @@ from typing import Any
 
 from openharness.tools.base import ToolRegistry
 
+from geoharness.tools.geo_analysis import GeoAnalysisTool
 from geoharness.tools.geo_cartography import GeoCartographyTool
 from geoharness.tools.geo_db_data import GeoDBDataTool
+from geoharness.tools.geo_map_review import GeoMapReviewTool
+from geoharness.tools.geo_python import GeoPythonTool
 from geoharness.tools.geo_raster_data import GeoRasterDataTool
 from geoharness.tools.geo_vector_data import GeoVectorDataTool
 
@@ -62,7 +64,10 @@ def build_geo_tool_registry(
     registry.register(GeoVectorDataTool())
     registry.register(GeoRasterDataTool())
     registry.register(GeoCartographyTool())
-    logger.info("Registered 4 native tools")
+    registry.register(GeoAnalysisTool())
+    registry.register(GeoPythonTool())
+    registry.register(GeoMapReviewTool())
+    logger.info("Registered 7 native tools")
 
     # 2. Register whitelisted OpenHarness tools
     _register_whitelist_tools(registry)

@@ -81,6 +81,12 @@ class DataCatalog:
         # data sitting in the workspace (e.g. 数据/*.shp) is discoverable
         # without extra config.
         file_dir = self._config.data.file_dir or self._workspace_dir or "."
+        from pathlib import Path
+
+        directory = Path(file_dir).expanduser()
+        if not directory.is_absolute():
+            directory = Path(self._workspace_dir or Path.cwd()) / directory
+        file_dir = str(directory.resolve())
         self._connectors["file"] = FileLoader(file_dir=file_dir)
         self._connectors["raster"] = RasterLoader(file_dir=file_dir)
 

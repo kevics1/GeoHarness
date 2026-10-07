@@ -98,11 +98,24 @@ class TestSpatialAnalysisSkill:
         text = skill_path.read_text(encoding="utf-8")
         for token in (
             "geo_vector_data", "geo_db_data", "geo_cartography",
-            "geo_moran_global", "geo_getis_ord", "geo_cluster_detect",
-            "proximity-analysis", "overlay-analysis", "zonal-statistics",
+            "geo_analysis", "geo_python", "geo_map_review",
             "cartography",
         ):
             assert token in text, f"skill must reference {token}"
+        from geoharness.tools import build_geo_tool_registry
+
+        tools = {tool.name for tool in build_geo_tool_registry().list_tools()}
+        for name in ("geo_analysis", "geo_python", "geo_map_review", "geo_cartography"):
+            assert name in tools
+        import re
+
+        from openharness.skills.loader import load_skill_registry
+
+        root = skill_path.parents[2]
+        skills = load_skill_registry(root, extra_skill_dirs=(str(root / "skills"),))
+        available = {skill.name for skill in skills.list_skills()}
+        for name in re.findall(r'skill\(name="([^"]+)"\)', text):
+            assert name in available, f"Referenced skill is missing: {name}"
 
 
 class TestSystemPromptGuidance:
@@ -112,10 +125,12 @@ class TestSystemPromptGuidance:
     def test_prompt_names_the_entry_skill(self, tmp_path: Path) -> None:
         assert "spatial-analysis" in self._prompt(tmp_path)
 
-    def test_prompt_warns_point_data_needs_aggregation(self, tmp_path: Path) -> None:
+    def test_prompt_prioritizes_native_impact_and_actual_map_review(self, tmp_path: Path) -> None:
         prompt = self._prompt(tmp_path)
-        assert "点数据不能直接算" in prompt
-        assert "MCP" in prompt  # statistics must go through MCP tools
+        assert "首期叠加/影响范围用 geo_analysis" in prompt
+        assert "geo_python" in prompt
+        assert "geo_map_review" in prompt
+        assert "Do not invoke Moran/LISA/causal analysis for a simple overlay task" in prompt
 
     def test_prompt_uses_real_skill_tool_name(self, tmp_path: Path) -> None:
         """The skill tool is 'skill', not 'skill_view' (old prompt typo)."""

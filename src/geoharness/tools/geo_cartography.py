@@ -20,15 +20,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger(__name__)
+from geoharness.config.settings import CartographyConfig, MapLayout
 
-_DEFAULT_OUTPUTS_DIR = "~/.geoharness/exports"
+logger = logging.getLogger(__name__)
 
 # Hard ceiling for a single render. Prevents a pathological source (huge
 # table, unreachable DB) from hanging the tool forever.
@@ -133,6 +135,12 @@ class GeoCartographyInput(BaseModel):
         default="",
         description="Map title. Defaults to layer_name when empty.",
     )
+    review_task: str = Field(
+        default="", description="User goal and concrete requirements for visual map inspection.",
+    )
+    layout: MapLayout | None = Field(
+        default=None, description="Optional presentation settings; visual review may adjust these.",
+    )
 
 
 class GeoCartographyTool(BaseTool):
@@ -164,7 +172,7 @@ class GeoCartographyTool(BaseTool):
 
         bridge_rules = config.cartography.bridge_rules
         template_path = config.cartography.default_template
-        outputs_dir = getattr(config.cartography, "outputs_dir", "") or _DEFAULT_OUTPUTS_DIR
+        outputs_dir = config.cartography.outputs_dir or CartographyConfig().outputs_dir
 
         # Validate the layers JSON up front so a malformed payload is a clean
         # tool error instead of an exception inside the worker thread.
@@ -353,20 +361,23 @@ class GeoCartographyTool(BaseTool):
         layer_specs = self._parse_layers(args.layers)
         if layer_specs:
             return self._render_layers_blocking(
-                args, layer_specs, catalog, outputs_dir
+                args, layer_specs, catalog, outputs_dir,
+                context.metadata.get("_map_source_cache"),
             )
 
         from geoharness.cartography import render_map
         from geoharness.cartography.sources import resolve_geodataframe
 
         try:
-            gdf = resolve_geodataframe(
-                source_type=args.source_type,
-                file_path=args.file_path,
-                source_name=args.source_name,
-                geojson_text=args.geojson,
-                catalog=catalog,
-            )
+            cache = context.metadata.get("_map_source_cache", {})
+            if "single" not in cache:
+                cache["single"] = resolve_geodataframe(
+                    source_type=args.source_type, file_path=args.file_path,
+                    source_name=args.source_name, geojson_text=args.geojson, catalog=catalog,
+                )
+            gdf = cache["single"]
+            if gdf.crs is None:
+                raise ValueError("Data source has no CRS; explicitly declare it before mapping.")
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
         except Exception as exc:  # network / driver failures
@@ -390,6 +401,7 @@ class GeoCartographyTool(BaseTool):
                 color_scheme=scheme,
                 n_classes=n_classes,
                 title=title,
+                **({"layout": args.layout} if output_path.suffix.lower() != ".html" else {}),
             )
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
@@ -419,6 +431,8 @@ class GeoCartographyTool(BaseTool):
                 "bridge_rule": rule,
                 "output_path": str(written),
                 "feature_count": len(gdf),
+                "source_crs": str(gdf.crs),
+                "bounds": gdf.total_bounds.tolist(),
             },
         )
 
@@ -428,6 +442,7 @@ class GeoCartographyTool(BaseTool):
         layer_specs: list[dict[str, Any]],
         catalog: Any,
         outputs_dir: str,
+        source_cache: dict[str, Any] | None = None,
     ) -> ToolResult:
         """Resolve every layer spec and compose ONE multi-layer map."""
         from geoharness.cartography import render_layers
@@ -441,13 +456,16 @@ class GeoCartographyTool(BaseTool):
                 spec.get("source_name") or spec.get("file_path") or ""
             ).strip()
             try:
-                gdf = resolve_geodataframe(
-                    source_type=source_type,
-                    file_path=str(spec.get("file_path", "") or ""),
-                    source_name=name,
-                    geojson_text=str(spec.get("geojson", "") or ""),
-                    catalog=catalog,
-                )
+                cache = source_cache if source_cache is not None else {}
+                cache_key = f"layer_{i}"
+                if cache_key not in cache:
+                    cache[cache_key] = resolve_geodataframe(
+                        source_type=source_type,
+                        file_path=str(spec.get("file_path", "") or ""),
+                        source_name=name, geojson_text=str(spec.get("geojson", "") or ""),
+                        catalog=catalog,
+                    )
+                gdf = cache[cache_key]
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Layer %d (%s) failed to resolve", i, name)
                 return ToolResult(
@@ -472,6 +490,8 @@ class GeoCartographyTool(BaseTool):
                 title=title,
                 output_path=output_path,
                 basemap_raster=str(args.basemap_raster or ""),
+                layout=args.layout,
+                raster_cache=source_cache,
             )
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
@@ -546,9 +566,197 @@ class GeoCartographyTool(BaseTool):
                 is_error=True,
             )
 
-        return await self._run_off_loop(
+        config = context.metadata["geoharness_config"]
+        context = ToolExecutionContext(
+            cwd=context.cwd,
+            metadata={**context.metadata, "_map_source_cache": {}},
+            hook_executor=context.hook_executor,
+        )
+        desired = self._resolve_output_path(args, outputs_dir)
+        if not desired.is_absolute():
+            desired = context.cwd / desired
+        desired = desired.resolve()
+        configured_root = Path(outputs_dir).expanduser()
+        if not configured_root.is_absolute():
+            configured_root = context.cwd / configured_root
+        if not any(desired.is_relative_to(root) for root in (
+            context.cwd.resolve(), configured_root.resolve(),
+        )):
+            return ToolResult(output="Error: map output must stay in the workspace or outputs_dir.",
+                              is_error=True)
+        def workspace_path(value: str) -> str:
+            if not value:
+                return ""
+            source = Path(value).expanduser()
+            return str((source if source.is_absolute() else context.cwd / source).resolve())
+
+        catalog = context.metadata.get("data_catalog")
+        connector = catalog.get_connector("file") if catalog is not None else None
+
+        def file_name(value: str, source_type: str) -> str:
+            if not value or source_type not in {"", "file"}:
+                return value
+            candidate = Path(workspace_path(value))
+            if candidate.is_file():
+                return str(candidate)
+            if connector is not None:
+                for attribute in ("resolve_path", "resolve"):
+                    resolver = getattr(connector, attribute, None)
+                    if callable(resolver):
+                        resolved = resolver(value)
+                        if resolved is not None:
+                            return str(Path(resolved).resolve())
+                        break
+            return value
+
+        import json
+
+        try:
+            specs = self._parse_layers(args.layers)
+            for spec in specs:
+                if spec.get("file_path"):
+                    spec["file_path"] = workspace_path(str(spec["file_path"]))
+                if spec.get("source_name"):
+                    spec["source_name"] = file_name(
+                        str(spec["source_name"]), str(spec.get("source_type") or "file"),
+                    )
+            args = args.model_copy(update={
+                "file_path": workspace_path(args.file_path),
+                "basemap_raster": workspace_path(args.basemap_raster),
+                "source_name": file_name(args.source_name, args.source_type),
+                "layers": json.dumps(specs, ensure_ascii=False) if specs else "",
+            })
+        except Exception as exc:
+            return ToolResult(output=f"Error: source path resolution failed — {exc}", is_error=True)
+        inputs = [args.file_path, args.basemap_raster]
+        if args.source_type in {"", "file"}:
+            inputs.append(args.source_name)
+        for spec in specs:
+            inputs.append(spec.get("file_path", ""))
+            if spec.get("source_type", "file") in {"", "file"}:
+                inputs.append(spec.get("source_name", ""))
+        for value in inputs:
+            if value:
+                source = Path(value).expanduser()
+                source = source if source.is_absolute() else context.cwd / source
+                if source.resolve() == desired:
+                    return ToolResult(output="Error: map output must not overwrite a data source.",
+                                      is_error=True)
+        args = args.model_copy(update={
+            "output_path": str(desired), "layout": args.layout or config.map_review.layout,
+        })
+        result = await self._run_off_loop(
             lambda: self._render_blocking(args, rule, outputs_dir, context),
             what="map rendering",
+        )
+        if result.is_error or not result.metadata.get("output_path"):
+            return result
+        return await self._inspect_and_repair(args, rule, outputs_dir, context, result)
+
+    async def _inspect_and_repair(
+        self, args: GeoCartographyInput, rule: dict[str, Any], outputs_dir: str,
+        context: ToolExecutionContext, result: ToolResult,
+    ) -> ToolResult:
+        from geoharness.cartography.quality import (
+            MapReview,
+            apply_layout_patch,
+            review_map,
+            save_review,
+        )
+
+        config = context.metadata["geoharness_config"]
+        written = Path(result.metadata["output_path"])
+        artifacts = Path(tempfile.mkdtemp(prefix=f"{written.stem}.review-", dir=written.parent))
+        history: list[dict[str, Any]] = []
+        evidence = {
+            "title": args.title or args.layer_name, "field": args.field_name,
+            "analysis_type": args.analysis_type, "render_metadata": result.metadata,
+            "expected_layers": [
+                {key: spec[key] for key in ("label", "source_name", "color") if key in spec}
+                for spec in self._parse_layers(args.layers)
+            ],
+        }
+        current = args
+        preview: Path | None = written if written.suffix.lower() == ".png" else None
+        client = context.metadata.get("map_review_client")
+        key = config.map_review.api_key or config.api_key
+        can_review = config.map_review.enabled and (client is not None or (key and "${" not in key))
+        for attempt in range(config.map_review.max_repairs + 1):
+            if not can_review:
+                checked = MapReview(status="unverified", summary=(
+                    "Visual map review is disabled." if not config.map_review.enabled
+                    else "No usable map review API credential configured."
+                ))
+                history.append({"attempt": attempt, **checked.model_dump()})
+                break
+            if written.suffix.lower() != ".png":
+                preview = artifacts / "preview.png"
+                preview_args = current.model_copy(update={
+                    "output_format": "png", "output_path": str(preview),
+                })
+                preview_result = await self._run_off_loop(
+                    lambda: self._render_blocking(preview_args, rule, outputs_dir, context),
+                    what="map preview rendering",
+                )
+                if preview_result.is_error:
+                    checked = MapReview(
+                        status="unverified", summary="PNG preview could not render.",
+                    )
+                    history.append({"attempt": attempt, **checked.model_dump()})
+                    break
+            checked = await review_map(
+                preview, config=config, task=args.review_task or args.title or args.layer_name,
+                evidence={**evidence, "layout": current.layout.model_dump()},
+                client=client,
+            )
+            if written.suffix.lower() == ".html" and checked.status == "passed":
+                checked = MapReview(
+                    status="unverified",
+                    summary="Static preview passed; interactive HTML has not been inspected.",
+                )
+            history.append({
+                "attempt": attempt, "layout": current.layout.model_dump(), **checked.model_dump(),
+            })
+            if checked.status != "issues" or attempt >= config.map_review.max_repairs:
+                break
+            patched = apply_layout_patch(current.layout, checked.layout_patch)
+            if patched == current.layout:
+                break
+            snapshot = artifacts / f"attempt-{attempt}{written.suffix}"
+            await asyncio.to_thread(shutil.copyfile, written, snapshot)
+            history[-1]["map_snapshot"] = str(snapshot)
+            current = current.model_copy(update={"layout": patched})
+            next_result = await self._run_off_loop(
+                lambda: self._render_blocking(current, rule, outputs_dir, context),
+                what="map repair rendering",
+            )
+            if next_result.is_error:
+                await asyncio.to_thread(shutil.copyfile, snapshot, written)
+                checked = MapReview(status="unverified", summary="Map repair could not render.")
+                history.append({"attempt": attempt + 1, **checked.model_dump()})
+                break
+            result = next_result
+        report_payload = {
+            "output_path": str(written), "preview_path": str(preview) if preview else None,
+            "status": checked.status, "summary": checked.summary,
+            "repair_count": max(0, len(history) - 1), "history": history,
+            "evidence": evidence,
+            "scope": "Visual presentation; numeric analysis correctness requires data validation.",
+            "reviewed_artifact": (
+                ("exported_png" if preview == written else "static_png_preview")
+                if can_review and preview else None
+            ),
+        }
+        report = await asyncio.to_thread(save_review, written, report_payload, report_dir=artifacts)
+        return ToolResult(
+            output=(f"{result.output}\nVisual review: {checked.status}\n"
+                    f"  {checked.summary}\n  Report: {report}\n"
+                    f"  Repairs: {report_payload['repair_count']}"),
+            metadata={**result.metadata, "review_status": checked.status,
+                      "review_path": str(report),
+                      "preview_path": str(preview) if preview else None,
+                      "reviewed_artifact": report_payload["reviewed_artifact"],
+                      "repair_count": report_payload["repair_count"]},
         )
 
     async def _export(
@@ -597,13 +805,8 @@ class GeoCartographyTool(BaseTool):
         """
         layer_specs = self._parse_layers(args.layers)
         if layer_specs:
-            catalog = context.metadata.get("data_catalog")
-            return await self._run_off_loop(
-                lambda: self._render_layers_blocking(
-                    args, layer_specs, catalog, outputs_dir
-                ),
-                what="multi-layer rendering",
-            )
+            rule = self._get_bridge_rule(args.analysis_type, bridge_rules)
+            return await self._render(args, rule, outputs_dir, context)
 
         sym_result = self._symbolize(args, bridge_rules)
         if sym_result.is_error:
@@ -627,11 +830,7 @@ class GeoCartographyTool(BaseTool):
             is_error=exp_result.is_error,
             metadata={
                 "bridge_rule": rule,
-                **(
-                    {"output_path": exp_result.metadata["output_path"]}
-                    if exp_result.metadata.get("output_path")
-                    else {}
-                ),
+                **exp_result.metadata,
             },
         )
 

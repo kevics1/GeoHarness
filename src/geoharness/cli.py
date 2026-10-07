@@ -92,7 +92,7 @@ def dry_run(
             table.add_row("RuntimeBundle", "OK")
             table.add_row("API Client", type(bundle.api_client).__name__)
             table.add_row("ToolRegistry", f"{len(bundle.tool_registry.list_tools())} tools")
-            table.add_row("MCP Manager", "connected")
+            table.add_row("MCP Manager", "configured (not connected)")
             table.add_row("QueryEngine", type(bundle.engine).__name__)
             console.print(table)
         except Exception as e:
@@ -104,6 +104,9 @@ def dry_run(
 
 @app.command()
 def run(
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="指定配置文件路径"
+    ),
     cwd: Optional[Path] = typer.Option(
         None, "--cwd", help="工作目录"
     ),
@@ -123,6 +126,7 @@ def run(
     exit_code = asyncio.run(
         launch_geo_tui(
             cwd=work_cwd,
+            config_path=config,
             prompt=prompt,
             print_mode=print_mode,
         )
@@ -182,6 +186,28 @@ cognition:
     l1_to_l2_tools: ["geo_spatial_relation", "geo_all_relations"]
     l2_to_l3_tools: ["geo_moran_local", "geo_getis_ord"]
     suggestion_prompt: "分析结果已完成，建议加载更高级认知技能以深入理解空间模式。"
+
+# 原生空间分析（无需 MCP；metric_crs 为空时选择适用的本地 UTM）
+analysis:
+  outputs_dir: .geoharness/analysis
+  metric_crs: ""
+  timeout_seconds: 120
+
+# 自主 Python 分析：源数据默认只读，输出限于单次运行目录
+execution:
+  enabled: true
+  outputs_dir: .geoharness/runs
+  timeout_seconds: 120
+  max_output_chars: 12000
+
+# 实际成图视觉检查；空 model/base_url/api_key 复用主模型
+map_review:
+  enabled: true
+  max_repairs: 2
+  timeout_seconds: 90
+  max_tokens: 8192
+  layout:
+    legend_outside: false
 
 # 数据配置
 data:

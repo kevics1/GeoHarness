@@ -32,6 +32,15 @@ with geographic data processing, spatial statistics, and map production.
 Your primary purpose is spatial analysis. Cartography is a product of analysis, \
 not an end in itself. Maps visualize what the analysis discovered — they do not \
 drive the analysis.
+
+Work as an executable geospatial harness: understand the user's goal and data,
+perform verified spatial calculations, produce a map, inspect the actual map
+image, fix confirmed presentation problems, and inspect again before delivery.
+Keep scripts, parameters, source descriptions, CRS, results and review reports.
+Native vector operations and Python execution work without external MCP servers.
+First release priority: multi-layer overlay and impact analysis. Hotspot and
+raster/terrain workflows are available only to the extent their tools actually
+support them; do not invent missing capabilities.
 """
 
 # ── 6 Geography Principles ────────────────────────────────────────
@@ -76,10 +85,10 @@ data, diverging for centered data (residuals, change rates). Follow bridge \
 rules in config for analysis→symbolization mapping.
 
 ## 6. Coordinate Discipline
-China requires GCJ-02 coordinate system for published maps. WGS84 is used \
-for GPS data and international analysis. Always declare which coordinate \
-system your data uses. Never silently reproject without noting the source \
-and target CRS.
+Identify WGS84, GCJ-02 or any other source coordinate system explicitly. \
+Offset systems and CRS reprojection are different operations; match the \
+actual basemap instead of silently assuming or applying an offset. Use a \
+suitable metric CRS for distances, and report source and target CRS.
 """
 
 # ── Cognitive Skills Catalog ──────────────────────────────────────
@@ -102,12 +111,12 @@ L3 tools: geo_cluster_detect, geo_od_flow, geo_causal_check
 Load skills with: skill(name="geo-perception") etc.
 
 ### 空间分析入口（重要）
-- 分析空间规律/聚集/热点时，先加载 skill(name="spatial-analysis") — 它是
-  总入口，按数据形态（点/面/线）给出技术路线与工具映射。
-- **点数据不能直接算 Moran's I**：需先聚合到面单元（如按 county/village
-  分组计数），再传面几何给 L2 工具。`analysis_type` 只决定制图符号化，
-  不执行统计；统计计算必须调用 geo-mcp-server 的 MCP 工具。
-- 制图用 geo_cartography（多图层见 cartography 技能）。
+- 空间任务先加载 skill(name="spatial-analysis")，确认输入、CRS、分析口径与验证。
+- 首期叠加/影响范围用 geo_analysis；复杂组合用 geo_python。不要为简单影响分析
+  强制执行空间自相关、热点或因果流程。
+- 制图前加载 skill(name="cartography")，成图后检查实际图片，按结果有限重绘。
+- `analysis_type` 只决定符号化，不执行统计。只有实际可用且输入符合要求的
+  工具才能用于热点等后续能力；不猜测工具名称或从摘要重建几何。
 
 ### L1→L2 Transition
 After L1 perception is complete (5 steps done), if spatial pattern analysis \
@@ -128,7 +137,22 @@ MCP timeout on large datasets.
 _TOOL_CATALOG = """\
 # Tool Catalog
 
-## Native Tools (4)
+## Native Tools (7)
+- **geo_analysis**: Native buffer, clip, intersection, distance, count and impact
+  - Inputs: action, source (file_path/source_name/geojson + optional crs),
+    reference, zones, distance_m, output_name.
+  - Distances use a declared metric CRS or validated local UTM; no silent CRS guessing.
+  - Returns persisted GeoJSON/CSV, statistics, source/parameter manifest and layers
+    suitable for geo_cartography. Use actual output paths; never reconstruct
+    geometries from a data loader's summary.
+- **geo_python**: Generate and run a Python analysis script when native operations
+  need custom composition. Original data is read-only by default; keep outputs
+  in the script's run directory. Use installed GIS libraries, no shell or network.
+  - Returns script, logs, manifest and artifact paths. Check exit_code and results.
+- **geo_map_review**: Inspect an actual PNG/JPEG map produced by a Python script.
+  - Provide file_path, task and evidence (expected layers, analysis/source summary).
+  - Apply confirmed presentation fixes to the script, re-render and check again,
+    respecting config.map_review.max_repairs. Keep unverified/remaining issues visible.
 - **geo_db_data**: Load/inspect data from the PostGIS database (tables)
   - Actions: list, inspect, load
 - **geo_vector_data**: Load/inspect local vector files (Shapefile/GeoJSON/GPKG/CSV)
@@ -138,6 +162,10 @@ _TOOL_CATALOG = """\
 - **geo_cartography**: Render maps natively — PNG/PDF/SVG + interactive HTML
   - Actions: symbolize, compose, export, full
   - Follows bridge rules for analysis→symbolization mapping
+  - Rendered maps are visually reviewed and presentation repairs are bounded by
+    config.map_review.max_repairs. Pass review_task to preserve the user's map goal.
+    PNG is preferred for the first workflow. PDF/SVG are checked via PNG previews;
+    interactive HTML requires its own screenshot and stays unverified without one.
   - Single layer: provide file_path, source_type+source_name, or geojson.
   - **MULTI-LAYER (thematic maps like 火灾态势总图)**: pass `layers` as a JSON
     array — e.g. layers='[{"source_type":"file","source_name":"西昌市行政区划"},
@@ -149,6 +177,9 @@ _TOOL_CATALOG = """\
     those render nothing.
 
 ## MCP Tools (27)
+These are optional integrations. Only invoke tools present in the current tool
+registry; configured servers may fail to connect. Native overlay/impact work
+requires neither MCP nor PostGIS.
 - **geo-mcp-server** (18 tools): Spatial analysis, geocoding, statistics, \
   clustering, causal checks
   - 空间统计: geo_moran_global / geo_moran_local (LISA) / geo_getis_ord (Gi*)
@@ -174,6 +205,23 @@ def _build_environment_section(cwd: Path) -> str:
         f"- Working directory: {cwd}\n"
         f"- Date: {datetime.now().strftime('%Y-%m-%d')}\n"
         f"- Python: {platform.python_version()}"
+    )
+
+
+def _build_execution_section(config: GeoConfig) -> str:
+    return (
+        "# Execution and Map Verification\n"
+        "Begin with the task and data, not a mandatory statistical cascade. "
+        "For impact analysis use native geo_analysis, or geo_python for custom work. "
+        "Do not invoke Moran/LISA/causal analysis for a simple overlay task.\n"
+        "Check source CRS, geometry validity, metric units, feature counts and analysis "
+        "parameters programmatically. Visual review cannot prove numeric correctness.\n"
+        f"Python enabled: {config.execution.enabled}. "
+        f"Visual review enabled: {config.map_review.enabled}. "
+        f"Maximum presentation repair rounds: {config.map_review.max_repairs}.\n"
+        "A written image is a draft until review completes. Report passed, issues or "
+        "unverified truthfully. Never claim to have seen a map from its path alone. "
+        "Ask before changing source data, analysis definitions or statistical thresholds."
     )
 
 
@@ -256,6 +304,7 @@ def build_geo_system_prompt(
         _build_cascade_section(cascade_manager),
         _build_bridge_rules_section(config),
         _build_environment_section(cwd),
+        _build_execution_section(config),
     ]
 
     prompt = "\n\n".join(sections)

@@ -1,0 +1,60 @@
+"""Review a map written by a Python script or an external cartography workflow."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
+from geoharness.cartography.quality import review_map, save_review
+
+
+class GeoMapReviewInput(BaseModel):
+    file_path: str = Field(description="PNG/JPEG map image to inspect; PDF/SVG need a PNG preview.")
+    task: str = Field(description="User's map requirements and the analysis goal.")
+    evidence: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Expected layers, CRS, source counts and rendering parameters.",
+    )
+
+
+class GeoMapReviewTool(BaseTool):
+    name = "geo_map_review"
+    description = (
+        "Read actual map pixels and review layer visibility, legends, text and layout. "
+        "Use after geo_python produces a PNG map. Returns issues and presentation fixes; "
+        "apply those fixes to the script and re-render, then review again within max_repairs. "
+        "A failed API call means unverified, never passed."
+    )
+    input_model = GeoMapReviewInput
+
+    async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
+        assert isinstance(arguments, GeoMapReviewInput)
+        config = context.metadata.get("geoharness_config")
+        if config is None:
+            return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        path = Path(arguments.file_path).expanduser()
+        if not path.is_absolute():
+            path = context.cwd / path
+        path = path.resolve()
+        roots = [context.cwd.resolve()]
+        for configured in (config.cartography.outputs_dir, config.execution.outputs_dir):
+            if configured:
+                root = Path(configured).expanduser()
+                roots.append((root if root.is_absolute() else context.cwd / root).resolve())
+        if not any(path.is_relative_to(root) for root in roots):
+            return ToolResult(output="Error: map must be in the workspace or output directory.",
+                              is_error=True)
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"} or not path.is_file():
+            return ToolResult(output="Error: an existing PNG/JPEG/WebP map image is required.",
+                              is_error=True)
+        result = await review_map(
+            path, config=config, task=arguments.task, evidence=arguments.evidence,
+            client=context.metadata.get("map_review_client"),
+        )
+        report = save_review(path, {"image_path": str(path), **result.model_dump()})
+        return ToolResult(output=result.model_dump_json(indent=2), metadata={
+            "review_status": result.status, "review_path": str(report), "image_path": str(path),
+        })
