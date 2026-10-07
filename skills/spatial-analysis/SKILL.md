@@ -7,7 +7,7 @@ description: 地理空间分析入口。首期聚焦叠加、缓冲、距离、�
 
 先明确用户问题、输入图层、分析对象、距离/范围口径与交付要求。仅询问不能从数据或配置得到、并会改变分析结果的信息。
 
-工具文本返回准确的产物路径、统计和最多 20 行属性预览；不要猜测输出文件名。完整属性/manifest 用 geo_python 按返回路径读取，SOURCE_CWD 是脚本全局变量，脚本当前目录为 RUN_DIR，不从 os.environ 读取这些变量。
+工具文本返回准确的产物路径、统计和最多 20 行属性预览；不要猜测输出文件名。完整属性/manifest 用 geo_python 按返回路径读取。SOURCE_CWD、RUN_DIR 是 Path 全局变量，同时也提供同名环境变量；DATA_DIRS 全局变量是路径集合，环境变量按 os.pathsep 分隔。脚本当前目录为 RUN_DIR。
 
 ## 检查输入
 
@@ -46,10 +46,10 @@ affected 表示相交或最短距离不超过阈值，不是未经验证的风�
 
 加载 skill(name="cartography")。将 geo_analysis 返回的 layers 序列化后传给 geo_cartography，突出真正的影响选集，不要把全部资产画成受影响对象。
 
-原生制图会读取成图进行视觉检查，在上限内按确认的呈现问题修正、重绘。Python 生成的 PNG 使用 geo_map_review，提供用户目标、预期图层及数据/分析摘要；按问题修改呈现代码、重绘、再检查。视觉检查不能证明数值正确，仍需程序核验。不根据视觉建议更换数据、统计方法或距离阈值。
+原生制图会读取成图进行视觉检查，并输出可编辑 QGIS 工程。Python 生成的 PNG 使用 geo_map_review，提供用户目标、预期图层及数据/分析摘要；geo_python、geo_map_review 和 geo_cartography 的各个版本使用同一 map_id。只合并修复具体错误，不为审美建议反复改图。审查通过、无法验证或预算耗尽时交付最新版本并说明限制。视觉检查不能证明数值正确，仍需程序核验。不根据视觉建议更换数据、统计方法或距离阈值。
 
 ## 交付
 
-给出用户问题的结论、数量/距离/范围、方法与单位、计数口径，以及数据结果、地图、脚本/manifest、检查报告的实际路径。明确 passed、issues 或 unverified；剩余问题如实说明。
+用 geo_deliver 把数据结果、地图、QGIS 工程、脚本/manifest 和检查报告交付到当前工作目录的 exports 子目录。Python 地图先用 geo_cartography(action="project") 和实际图层生成工程，不重新绘图；不要在脚本中绕过 RUN_DIR 复制文件。最终给出数量/距离/范围、方法与单位、计数口径及工具返回的交付路径。明确 passed、issues 或 unverified；剩余问题如实说明。
 
 热点与空间分布、栅格/地形是后续重点。现有 skill(name="geo-perception")、skill(name="geo-comprehension")、skill(name="geo-reasoning") 可提供领域参考；只用实际可用的工具，不把简单叠加任务强制升级到 Moran/LISA 或因果分析。

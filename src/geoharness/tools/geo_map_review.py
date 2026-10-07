@@ -8,12 +8,14 @@ from typing import Any
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
-from geoharness.cartography.quality import review_map, save_review
+from geoharness.cartography.quality import save_review
+from geoharness.cartography.workflow import review_with_budget
 
 
 class GeoMapReviewInput(BaseModel):
     file_path: str = Field(description="PNG/JPEG map image to inspect; PDF/SVG need a PNG preview.")
     task: str = Field(description="User's map requirements and the analysis goal.")
+    map_id: str = Field(default="", description="Stable logical map ID; keep it across versions.")
     evidence: dict[str, Any] = Field(
         default_factory=dict,
         description="Expected layers, CRS, source counts and rendering parameters.",
@@ -45,16 +47,42 @@ class GeoMapReviewTool(BaseTool):
                 root = Path(configured).expanduser()
                 roots.append((root if root.is_absolute() else context.cwd / root).resolve())
         if not any(path.is_relative_to(root) for root in roots):
-            return ToolResult(output="Error: map must be in the workspace or output directory.",
-                              is_error=True)
+            return ToolResult(
+                output="Error: map must be in the workspace or output directory.", is_error=True
+            )
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"} or not path.is_file():
-            return ToolResult(output="Error: an existing PNG/JPEG/WebP map image is required.",
-                              is_error=True)
-        result = await review_map(
-            path, config=config, task=arguments.task, evidence=arguments.evidence,
+            return ToolResult(
+                output="Error: an existing PNG/JPEG/WebP map image is required.", is_error=True
+            )
+        result, budget = await review_with_budget(
+            path,
+            config=config,
+            task=arguments.task,
+            evidence=arguments.evidence,
+            metadata=context.metadata,
+            map_id=arguments.map_id,
             client=context.metadata.get("map_review_client"),
         )
-        report = save_review(path, {"image_path": str(path), **result.model_dump()})
-        return ToolResult(output=result.model_dump_json(indent=2), metadata={
-            "review_status": result.status, "review_path": str(report), "image_path": str(path),
-        })
+        report = save_review(path, {"image_path": str(path), **result.model_dump(), **budget})
+        return ToolResult(
+            output=(
+                result.model_dump_json(indent=2)
+                + f"\nReport: {report}\n"
+                + (
+                    "Unchanged image: cached result; do not retry.\n"
+                    if budget["review_cached"]
+                    else ""
+                )
+                + (
+                    "STOP: deliver current outputs and editable project.\n"
+                    if budget["review_budget_exhausted"]
+                    else ""
+                )
+            ),
+            metadata={
+                "review_status": result.status,
+                "review_path": str(report),
+                "image_path": str(path),
+                **budget,
+            },
+        )

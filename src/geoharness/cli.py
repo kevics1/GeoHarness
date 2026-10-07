@@ -144,6 +144,9 @@ model: ${GEOH_MODEL}
 api_key: ${GEOH_API_KEY}
 base_url: ${GEOH_BASE_URL}
 
+agent:
+  max_tokens: 16384
+
 # MCP 服务器配置
 mcp:
   geo-mcp-server:
@@ -204,10 +207,16 @@ execution:
 map_review:
   enabled: true
   max_repairs: 2
+  max_reviews_per_request: 4
+  total_timeout_seconds: 120
   timeout_seconds: 90
   max_tokens: 8192
   layout:
-    legend_outside: false
+    legend_outside: true
+
+# 最终交付目录必须位于当前工作目录内
+delivery:
+  outputs_dir: exports
 
 # 数据配置
 data:
@@ -242,7 +251,7 @@ GEOH_POSTGRES_USER=postgres
 GEOH_POSTGRES_PASSWORD=postgres
 
 # 制图输出目录（原生渲染的 PNG/PDF/SVG/HTML 落盘位置）
-GEOH_OUTPUTS_DIR=~/.geoharness/exports
+GEOH_OUTPUTS_DIR=exports
 # 可选：PostGIS / MCP 相关变量
 # GEOH_GEO_MCP_PATH=/path/to/geo-mcp-server
 """

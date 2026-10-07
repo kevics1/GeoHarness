@@ -69,3 +69,15 @@
 - 视觉检查只能验证图层、符号、文字和布局；数值及计数口径必须程序核验。PDF/SVG 使用同参数 PNG 预览，HTML 无实际截图仍未验证。
 - VRT 可以间接读取其他文件；可信脚本的常规 GDAL 入口也必须递归检查依赖，单独检查入口路径不足。
 - 最终验收只使用合成数据和本地已授权聚合服务，未发送真实业务数据；真实 PostGIS、大型数据与质检准确率仍属后续验收。
+
+## 用户实际运行诊断（2026-10-07）
+- example/.geoharness/runs 共26份manifest，23次exit_code0、3次exit_code1；另有一次geo_python空参数在Pydantic校验阶段失败，无run目录。
+- list_data将SOURCE_CWD当环境变量，但旧runner只注入脚本全局；fire_analysis试图向RUN_DIR外创建analysis目录，被正确拒绝；fire_map_v1的DEM读取窗口越界，属于生成脚本错误。
+- example/.openharness只有autopilot/plugins空子目录，没有文件；需修复上游初始化副作用的GeoHarness适配层，不能修改上游依赖。
+- 当前全局cartography.outputs_dir=~/.geoharness/exports；脚本产物保存在工作区内部runs，缺少独立交付接口。两者造成交付目录偏离用户可见工作区。
+- 同一会话包含fire_map_v1..v7及fire_map_final，部分相同图片重复送审；Python审查工具每次调用独立，不执行config.max_repairs跨调用限制。需共享任务预算和内容缓存，而不是仅增加Prompt建议。
+- 用户确认可编辑工程主要用QGIS；工程必须携带可移动的数据副本、图层样式和布局，而非只交付PNG或外部数据路径。
+- 实际会话有16次地图审查，其中9次因token预算耗尽而未验证；7次报告问题。同图重复审查与Python版本缺少共享预算，导致8个火情绘图版本。
+- 本机QGIS 3.44.7实际读取、图层有效性、打印布局和PNG导出验证通过。Windows Qt offscreen字体库为空，验证脚本加载本机字体后正常；QGIS按范围比例恢复地图框高度，生成XML需匹配纸张地图框比例以防超页。
+- 未改图片的失败审查也缓存，整个请求默认4次/120秒、每图最多3版本；通过或未验证均停止自动完善。非max视觉模型的合成空图探测约7秒返回有效结论，但复杂合成地图4096token仍可能耗尽，不能承诺全部通过。
+- 已有两张业务地图补成QGIS工程，原PNG/PDF字节完全保留。详细Python注记和特殊符号不自动等价还原，交付说明明确此限制。

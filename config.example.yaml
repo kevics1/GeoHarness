@@ -4,10 +4,12 @@ model: cbcn/deepseek-v4.1-flash(max)
 base_url: http://localhost:20128/v1
 api_key: local
 mcp: {}
+agent:
+  max_tokens: 16384
 data:
   file_dir: .
 cartography:
-  outputs_dir: .geoharness/exports
+  outputs_dir: exports
   bridge_rules:
     impact:
       render_method: categorized
@@ -24,8 +26,13 @@ execution:
   max_output_chars: 12000
 map_review:
   enabled: true
+  model: cbcn/deepseek-v4.1-flash
   max_repairs: 2
-  timeout_seconds: 180
-  max_tokens: 32768
+  max_reviews_per_request: 4
+  total_timeout_seconds: 120
+  timeout_seconds: 45
+  max_tokens: 4096
   layout:
-    legend_outside: false
+    legend_outside: true
+delivery:
+  outputs_dir: exports

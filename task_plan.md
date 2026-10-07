@@ -41,6 +41,14 @@
 - 验证源码/安装两种布局、真实 wheel 内容和其他目录中的 CLI 启动，更新使用指南。
 - 状态：complete。安装与跨目录 CLI/默认 React TUI 验证完成；56 项针对性测试、ruff/diff 检查通过，独立审查无本次引入的问题。
 
+## 追加任务：运行诊断与地图交付
+1. 检查用户实际运行的脚本、manifest、错误和地图版本，复现目录隔离、交付与修改循环问题 — complete。
+2. 修复工作区 `.openharness` 副作用和 geo_python 已确认缺陷；将审查/重绘约束落实为运行时状态 — complete。
+3. 默认交付到工作目录，同时提供可编辑工程与重绘方式 — complete。
+4. 真实回归、独立审查、更新使用指南，安装修复版并跨目录验证 — complete。
+- 用户原始数据及既有产物只读，不删除运行历史；不修改上游 OpenHarness。
+- 并行责任：目录隔离、Python诊断/修复、独立工程模块；主Agent负责审查预算、交付工具、配置、整合及验收。
+
 ## 执行记录
 - Git 读取全局 ignore 文件出现 Permission denied 警告；仓库状态和文件读取成功。
 - 查找上游 api/models.py 时路径不存在；改为按 openai_client.py 的真实导入追踪 engine/messages.py，不再假定消息模型目录。

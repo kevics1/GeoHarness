@@ -81,7 +81,7 @@ class TestAttributeTableLoad:
 
 
 class TestSpatialAnalysisSkill:
-    def test_skill_file_exists_and_registers(self) -> None:
+    def test_skill_file_exists_and_registers(self, temp_config_dir: Path) -> None:
         from openharness.skills.loader import load_skill_registry
 
         skill_path = Path(__file__).resolve().parent.parent / "skills"
@@ -89,7 +89,7 @@ class TestSpatialAnalysisSkill:
         names = {s.name for s in reg.list_skills()}
         assert "spatial-analysis" in names
 
-    def test_skill_references_real_tools_and_skills(self) -> None:
+    def test_skill_references_real_tools_and_skills(self, temp_config_dir: Path) -> None:
         """The entry skill must only reference tools/skills that exist."""
         skill_path = (
             Path(__file__).resolve().parent.parent
@@ -142,7 +142,7 @@ class TestSystemPromptGuidance:
 class TestSkillVisibleAtRuntime:
     @pytest.mark.asyncio
     async def test_skill_tool_loads_bundled_skill_via_runtime(
-        self, tmp_path: Path
+        self, tmp_path: Path, temp_config_dir: Path
     ) -> None:
         """The runtime must expose extra_skill_dirs to the `skill` tool.
 
@@ -154,6 +154,9 @@ class TestSkillVisibleAtRuntime:
 
         from geoharness.runtime import build_geo_runtime
 
+        (temp_config_dir / "config.yaml").write_text(
+            "api_key: synthetic-test-key\n", encoding="utf-8"
+        )
         rt = await build_geo_runtime(cwd=tmp_path)
         ctx = ToolExecutionContext(
             cwd=tmp_path, metadata=rt.engine.tool_metadata, hook_executor=None

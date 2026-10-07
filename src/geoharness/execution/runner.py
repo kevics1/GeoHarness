@@ -286,6 +286,35 @@ def _install_guards(spec: dict[str, Any]) -> None:
                 f"Network, native dynamic loading and process launch denied: {event}"
             )
 
+    # On Windows, copy2 can call CopyFile2 without an audited Python open.
+    # copytree captures copy2 as its default argument, so guard that default too.
+    import shutil
+
+    original_copy2 = shutil.copy2
+    original_copytree = shutil.copytree
+    copytree_signature = inspect.signature(original_copytree)
+
+    @wraps(original_copy2)
+    def file_copy2(src: Any, dst: Any, *, follow_symlinks: bool = True) -> Any:
+        checked_path(src)
+        destination = os.fspath(dst)
+        if os.path.isdir(dst):
+            destination = os.path.join(destination, os.path.basename(src))
+        checked_path(destination, writing=True)
+        return original_copy2(src, dst, follow_symlinks=follow_symlinks)
+
+    @wraps(original_copytree)
+    def file_copytree(*args: Any, **kwargs: Any) -> Any:
+        bound = copytree_signature.bind(*args, **kwargs)
+        checked_path(bound.arguments["src"])
+        checked_path(bound.arguments["dst"], writing=True)
+        if bound.arguments.get("copy_function", original_copy2) is original_copy2:
+            bound.arguments["copy_function"] = file_copy2
+        return original_copytree(*bound.args, **bound.kwargs)
+
+    shutil.copy2 = file_copy2
+    shutil.copytree = file_copytree
+
     # GDAL performs native I/O without Python open audit events. Wrap the supported
     # public entry points in addition to the Python-level checks.
     import geopandas
@@ -511,6 +540,17 @@ def _child_main() -> None:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", newline="\n")
     spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     run_dir = Path(spec["run_dir"]).resolve()
+    source_cwd = Path(spec["source_cwd"]).resolve()
+    data_dirs = [Path(value) for value in spec["read_roots"]]
+    # Support generated scripts that read paths through os.environ as well as
+    # the injected Path globals. Export only explicit, non-credential run data.
+    os.environ.update(
+        {
+            "RUN_DIR": str(run_dir),
+            "SOURCE_CWD": str(source_cwd),
+            "DATA_DIRS": os.pathsep.join(str(directory) for directory in data_dirs),
+        }
+    )
     script = run_dir / "analysis.py"
     code = compile(script.read_text(encoding="utf-8"), str(script), "exec")
     # Warm up native libraries and font/cache initialization before constraining
@@ -529,8 +569,8 @@ def _child_main() -> None:
         "__name__": "__main__",
         "__file__": str(script),
         "RUN_DIR": run_dir,
-        "SOURCE_CWD": Path(spec["source_cwd"]),
-        "DATA_DIRS": [Path(value) for value in spec["read_roots"]],
+        "SOURCE_CWD": source_cwd,
+        "DATA_DIRS": data_dirs,
     }
     exec(code, namespace)
 

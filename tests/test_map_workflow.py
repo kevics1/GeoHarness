@@ -1,0 +1,172 @@
+"""Map checks must share limits across tools and changing filenames."""
+
+import asyncio
+import json
+
+import pytest
+from openharness.api.client import ApiMessageCompleteEvent
+from openharness.api.usage import UsageSnapshot
+from openharness.engine.messages import ConversationMessage
+from openharness.tools.base import ToolExecutionContext
+from PIL import Image
+
+from geoharness.cartography.workflow import (
+    reserve_map_render,
+    reserve_python_render,
+    reset_map_workflow,
+    review_with_budget,
+)
+from geoharness.config.settings import GeoConfig, MapReviewConfig
+from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+
+class Reviewer:
+    def __init__(self):
+        self.calls = 0
+
+    async def stream_message(self, request):
+        self.calls += 1
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage.from_user_text(
+                json.dumps(
+                    {
+                        "status": "unverified",
+                        "summary": "No definitive visual conclusion.",
+                    }
+                )
+            ),
+            usage=UsageSnapshot(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_unchanged_map_is_not_sent_to_model_repeatedly(tmp_path):
+    image = tmp_path / "map.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    reviewer = Reviewer()
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={
+            "geoharness_config": GeoConfig(),
+            "map_review_client": reviewer,
+            "map_workflow_state": {},
+        },
+    )
+    tool = GeoMapReviewTool()
+    first = await tool.execute(GeoMapReviewInput(file_path=str(image), task="Check map"), context)
+    second = await tool.execute(
+        GeoMapReviewInput(file_path=str(image), task="Check again"),
+        context,
+    )
+    assert first.metadata["review_status"] == second.metadata["review_status"] == "unverified"
+    assert reviewer.calls == 1
+    assert second.metadata["review_cached"] is True
+
+
+@pytest.mark.asyncio
+async def test_changed_names_cannot_reset_request_review_budget(tmp_path):
+    reviewer = Reviewer()
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={
+            "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_reviews_per_request=1)),
+            "map_review_client": reviewer,
+            "map_workflow_state": {},
+        },
+    )
+    results = []
+    for name, color in (("first", "white"), ("changed-name-v8", "black")):
+        image = tmp_path / f"{name}.png"
+        Image.new("RGB", (32, 32), color).save(image)
+        results.append(
+            await GeoMapReviewTool().execute(
+                GeoMapReviewInput(file_path=str(image), task="Check map"),
+                context,
+            )
+        )
+    assert reviewer.calls == 1
+    assert results[-1].metadata["review_budget_exhausted"] is True
+    assert not results[-1].is_error
+
+
+def test_request_reset_preserves_shared_dict_and_starts_new_budget():
+    metadata = {"map_workflow_state": {}}
+    shallow_copy = dict(metadata)
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
+    assert reserve_map_render("fire", shallow_copy, config) is None
+    assert reserve_map_render("fire", metadata, config) is not None
+    reset_map_workflow(metadata)
+    assert shallow_copy["map_workflow_state"] is metadata["map_workflow_state"]
+    assert reserve_map_render("fire", shallow_copy, config) is None
+
+
+@pytest.mark.asyncio
+async def test_review_time_budget_stops_new_images_without_calling_provider(tmp_path):
+    image = tmp_path / "map.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    metadata = {"map_workflow_state": {"seconds": 121}}
+    reviewer = Reviewer()
+    review, flags = await review_with_budget(
+        image, config=GeoConfig(), task="Check", evidence={}, metadata=metadata, client=reviewer
+    )
+    assert flags["review_budget_exhausted"]
+    assert review.status == "unverified"
+    assert reviewer.calls == 0
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "from matplotlib.pyplot import savefig; savefig('map.png')",
+        "from matplotlib.pyplot import savefig as save; save('map.png')",
+        "from geoharness.cartography import render_map as draw; draw(data, output_path='map.png')",
+        "import geoharness.cartography as cart; cart.render_map(data, output_path='map.png')",
+        "import geoharness.cartography; "
+        "geoharness.cartography.render_map(data, output_path='map.png')",
+        "from geoharness import cartography as cart; "
+        "cart.render_layers(data, output_path='map.png')",
+    ],
+)
+def test_imported_drawing_aliases_share_python_version_budget(code):
+    metadata = {}
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
+    kwargs = {
+        "code": code,
+        "name": "fire",
+        "map_id": "fire",
+        "metadata": metadata,
+        "config": config,
+    }
+    assert reserve_python_render(**kwargs) is None
+    assert reserve_python_render(**kwargs) is not None
+
+
+@pytest.mark.asyncio
+async def test_parallel_checks_of_identical_pixels_share_one_model_request(tmp_path):
+    image = tmp_path / "map.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    reviewer = Reviewer()
+    original = reviewer.stream_message
+
+    async def slow(request):
+        await asyncio.sleep(0.02)
+        async for event in original(request):
+            yield event
+
+    reviewer.stream_message = slow
+    metadata = {}
+    results = await asyncio.gather(
+        *(
+            review_with_budget(
+                image,
+                config=GeoConfig(),
+                task="Check",
+                evidence={},
+                metadata=metadata,
+                client=reviewer,
+            )
+            for _ in range(2)
+        )
+    )
+    assert reviewer.calls == metadata["map_workflow_state"]["reviews"] == 1
+    assert sorted(flags["review_cached"] for _, flags in results) == [False, True]

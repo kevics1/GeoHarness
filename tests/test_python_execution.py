@@ -13,6 +13,7 @@ from openharness.tools.base import ToolExecutionContext
 from pydantic import ValidationError
 from shapely.geometry import Point
 
+from geoharness.config.settings import ExecutionConfig, GeoConfig, MapReviewConfig
 from geoharness.execution import execute_python
 from geoharness.tools.geo_python import GeoPythonInput, GeoPythonTool
 
@@ -465,6 +466,79 @@ print("error" * 10000, file=sys.stderr)
     assert "private" not in json.dumps(result)
 
 
+async def test_script_path_environment_matches_injected_globals(tmp_path: Path, monkeypatch):
+    # Generated scripts use both os.environ and the injected Path globals.
+    # Explicit execution paths must win over any inherited parent values.
+    monkeypatch.setenv("SOURCE_CWD", "parent-source")
+    monkeypatch.setenv("RUN_DIR", "parent-run")
+    monkeypatch.setenv("DATA_DIRS", "parent-data")
+    data = tmp_path / "数据"
+    data.mkdir()
+    (data / "source.txt").write_text("source", encoding="utf-8")
+    result = await run_script(
+        tmp_path,
+        """
+import os
+from pathlib import Path
+source = Path(os.environ.get("SOURCE_CWD"))
+output = Path(os.environ.get("RUN_DIR"))
+assert source == SOURCE_CWD
+assert output == RUN_DIR == Path.cwd()
+assert [Path(value) for value in os.environ["DATA_DIRS"].split(os.pathsep)] == DATA_DIRS
+assert (source / "数据" / "source.txt").read_text(encoding="utf-8") == "source"
+(output / "result.txt").write_text("done", encoding="utf-8")
+""",
+    )
+    assert result["exit_code"] == 0, result["stderr"]
+    assert [Path(value["path"]).name for value in result["files"]] == ["result.txt"]
+    assert (Path(result["run_dir"]) / "result.txt").read_text(encoding="utf-8") == "done"
+    assert (data / "source.txt").read_text(encoding="utf-8") == "source"
+
+
+async def test_shutil_native_copy_keeps_sources_and_provenance_protected(tmp_path: Path):
+    source = tmp_path / "source.txt"
+    source.write_text("original", encoding="utf-8")
+    provenance = tmp_path / "inputs" / "analysis.py"
+    provenance.parent.mkdir()
+    provenance.write_text("replacement", encoding="utf-8")
+    sensitive = tmp_path / "sensitive"
+    sensitive.mkdir()
+    (sensitive / ".env").write_text("synthetic-secret", encoding="utf-8")
+    result = await run_script(
+        tmp_path,
+        """
+import shutil
+source = SOURCE_CWD / "source.txt"
+attempts = [
+    lambda: shutil.copy2(src=source, dst=SOURCE_CWD / "outside.txt"),
+    lambda: shutil.copy2(SOURCE_CWD / "sensitive" / ".env", RUN_DIR / "leak.txt"),
+    lambda: shutil.copy2(SOURCE_CWD / "inputs" / "analysis.py", RUN_DIR),
+    lambda: shutil.copytree(SOURCE_CWD / "sensitive", RUN_DIR / "tree"),
+]
+for attempt in attempts:
+    try:
+        attempt()
+    except (PermissionError, shutil.Error):
+        continue
+    raise AssertionError("File copy bypassed analysis path protection")
+shutil.copy2(src=source, dst=RUN_DIR / "local.txt")
+local = RUN_DIR / "local"
+local.mkdir()
+shutil.copy2(source, local)
+shutil.copytree(SOURCE_CWD / "inputs", RUN_DIR / "copied-inputs")
+assert (RUN_DIR / "local.txt").read_text(encoding="utf-8") == "original"
+assert (local / "source.txt").read_text(encoding="utf-8") == "original"
+assert (RUN_DIR / "copied-inputs" / "analysis.py").read_text() == "replacement"
+""",
+    )
+    assert result["exit_code"] == 0, result["stderr"]
+    assert source.read_text(encoding="utf-8") == "original"
+    assert not (tmp_path / "outside.txt").exists()
+    assert not (Path(result["run_dir"]) / "leak.txt").exists()
+    assert not (Path(result["run_dir"]) / "tree" / ".env").exists()
+    assert Path(result["script_path"]).read_text(encoding="utf-8").startswith("\nimport shutil")
+
+
 async def test_exception_is_recorded(tmp_path: Path):
     result = await run_script(tmp_path, "print('before')\nraise ValueError('analysis failed')")
     assert result["exit_code"] != 0
@@ -506,6 +580,71 @@ async def test_tool_enforces_config_and_timeout_limit(tmp_path: Path):
     assert not result.is_error, result.output
     assert "tool success" in result.metadata["stdout"]
     assert result.metadata["manifest_path"]
+
+
+@pytest.mark.parametrize(
+    ("code", "is_error"),
+    [
+        ("import warnings; warnings.warn('analysis warning')", False),
+        ("raise ValueError('analysis failed')", True),
+    ],
+)
+async def test_tool_error_status_uses_child_exit_not_stderr(
+    tmp_path: Path, code: str, is_error: bool
+):
+    config = SimpleNamespace(
+        execution=SimpleNamespace(
+            enabled=True, outputs_dir="runs", timeout_seconds=30, max_output_chars=12000
+        ),
+        data=SimpleNamespace(file_dir=""),
+    )
+    context = ToolExecutionContext(
+        cwd=tmp_path, metadata={"geoharness_config": config}, hook_executor=None
+    )
+    result = await GeoPythonTool().execute(GeoPythonInput(code=code), context)
+    assert result.is_error is is_error
+    assert result.metadata["stderr"]
+    assert (result.metadata["exit_code"] != 0) is is_error
+    assert json.loads(result.output) == result.metadata
+
+
+@pytest.mark.parametrize("map_id", ["", "fire-map"])
+async def test_python_map_version_budget_stops_before_execution_and_keeps_analysis_available(
+    tmp_path: Path, monkeypatch, map_id: str
+):
+    executed = []
+
+    async def capture_execution(**kwargs):
+        executed.append(kwargs)
+        return {"exit_code": 0, "timed_out": False, "files": []}
+
+    monkeypatch.setattr("geoharness.tools.geo_python.execute_python", capture_execution)
+    config = GeoConfig(
+        execution=ExecutionConfig(outputs_dir="runs"),
+        map_review=MapReviewConfig(max_repairs=0),
+    )
+    context = ToolExecutionContext(
+        cwd=tmp_path, metadata={"geoharness_config": config}, hook_executor=None
+    )
+    tool = GeoPythonTool()
+    names = ("different_first", "different_second") if map_id else ("fire_v1", "fire_final")
+    first = await tool.execute(
+        GeoPythonInput(code="plt.savefig('map.png')", name=names[0], map_id=map_id), context
+    )
+    assert not first.is_error
+    stopped = await tool.execute(
+        GeoPythonInput(code="plt.savefig('map.png')", name=names[1], map_id=map_id), context
+    )
+    assert not stopped.is_error
+    assert stopped.metadata["render_budget_exhausted"]
+    assert "Stop automatic refinements" in stopped.output
+    assert len(executed) == 1
+    analysis = await tool.execute(
+        GeoPythonInput(code="print('plt.savefig is only text')", name=names[1], map_id=map_id),
+        context,
+    )
+    assert not analysis.is_error
+    assert len(executed) == 2
 
 
 async def test_tool_can_read_analysis_maps_and_prior_runs_without_granting_source_writes(
@@ -598,3 +737,8 @@ print((SOURCE_CWD / ".geoharness" / "config.yaml").read_text())
 def test_names_cannot_escape_run_directory(name: str):
     with pytest.raises(ValidationError):
         GeoPythonInput(code="print(1)", name=name)
+
+
+def test_empty_tool_arguments_explain_no_script_was_executed():
+    with pytest.raises(ValidationError, match="no script was executed"):
+        GeoPythonInput.model_validate({})

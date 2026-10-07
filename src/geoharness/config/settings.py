@@ -32,6 +32,18 @@ class ExecutionConfig(BaseModel):
     max_output_chars: int = Field(default=12000, ge=100, le=1000000)
 
 
+class AgentConfig(BaseModel):
+    """Completion budget for reasoning and complete tool arguments."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    max_tokens: int = Field(default=16384, ge=1024, le=65536)
+
+
+class DeliveryConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outputs_dir: str = "exports"
+
+
 class MapLayout(BaseModel):
     """Presentation parameters that a map reviewer may safely adjust."""
 
@@ -56,6 +68,8 @@ class MapReviewConfig(BaseModel):
     api_key: str = ""
     base_url: str = ""
     max_repairs: int = Field(default=2, ge=0, le=2)
+    max_reviews_per_request: int = Field(default=4, ge=0, le=20)
+    total_timeout_seconds: float = Field(default=120, gt=0, le=900)
     timeout_seconds: float = Field(default=90, gt=0, le=300)
     max_tokens: int = Field(default=8192, ge=256, le=65536)
     max_image_side: int = Field(default=1800, ge=256, le=4096)
@@ -89,7 +103,7 @@ class CartographyConfig:
     """Cartography configuration."""
 
     default_template: str = ""
-    outputs_dir: str = "~/.geoharness/exports"
+    outputs_dir: str = "exports"
     bridge_rules: dict[str, BridgeRule] = field(default_factory=dict)
 
 
@@ -154,6 +168,8 @@ class GeoConfig:
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     map_review: MapReviewConfig = field(default_factory=MapReviewConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
 
 
 def _expand_vars(value: Any) -> Any:
@@ -359,6 +375,8 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         analysis=AnalysisConfig.model_validate(_expand_vars(raw.get("analysis") or {})),
         execution=ExecutionConfig.model_validate(_expand_vars(raw.get("execution") or {})),
         map_review=MapReviewConfig.model_validate(_expand_vars(raw.get("map_review") or {})),
+        agent=AgentConfig.model_validate(_expand_vars(raw.get("agent") or {})),
+        delivery=DeliveryConfig.model_validate(_expand_vars(raw.get("delivery") or {})),
     )
 
 

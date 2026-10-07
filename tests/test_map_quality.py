@@ -179,7 +179,7 @@ async def test_default_map_export_can_be_read_as_python_input(tmp_path, monkeypa
     ), ctx)
     assert not mapped.is_error, mapped.output
     path = Path(mapped.metadata["output_path"])
-    assert path.parent == home / ".geoharness" / "exports"
+    assert path.parent == tmp_path / "exports"
     read = await GeoPythonTool().execute(GeoPythonInput(code=(
         "from PIL import Image\n"
         f"with Image.open({str(path)!r}) as image:\n"
@@ -304,7 +304,8 @@ async def test_review_artifacts_preserve_sources_and_cache_basemap(tmp_path, mon
     assert result.metadata["reviewed_artifact"] == "static_png_preview"
     assert all(path.read_bytes() == original for path, original in originals.items())
     assert Path(result.metadata["preview_path"]).parent != tmp_path
-    assert len(reads) == 1  # The PDF, previews and repair all use the same raster data.
+    # Exports and the portable snapshot reuse the exact raster already drawn.
+    assert sum(Path(path).resolve() == basemap.resolve() for path in reads) == 1
 
 
 @pytest.mark.asyncio

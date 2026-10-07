@@ -41,6 +41,7 @@ from geoharness.config.settings import GeoConfig, load_geo_config
 from geoharness.hooks.cascade import build_cascade_manager
 from geoharness.mcp.connect import activate_mcp
 from geoharness.prompts.system_prompt import build_geo_system_prompt
+from geoharness.workspace_isolation import install_workspace_isolation
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ async def launch_geo_tui(
     Returns:
         Exit code (0 = success).
     """
+    install_workspace_isolation()
     config = load_geo_config(config_path)
 
     if not config.api_key:

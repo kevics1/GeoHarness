@@ -586,7 +586,7 @@ class TestBuildGeoToolRegistry:
         assert "web_search" not in tool_names
 
     def test_registry_tool_count(self):
-        """Registry should have 7 native + 5 whitelist = 12 tools
+        """Registry should have 8 native + 5 whitelist = 13 tools
         (without MCP).
         """
         from geoharness.tools import build_geo_tool_registry
@@ -594,8 +594,7 @@ class TestBuildGeoToolRegistry:
         registry = build_geo_tool_registry()
         tools = registry.list_tools()
 
-        # 4 native + 5 whitelist = 9 (no MCP connected)
-        assert len(tools) == 12
+        assert len(tools) == 13
 
     def test_registry_with_mock_mcp(self):
         """Registry with mock MCP manager should register MCP tools."""
@@ -608,5 +607,5 @@ class TestBuildGeoToolRegistry:
         registry = build_geo_tool_registry(mcp_manager=mock_mcp)
         tools = registry.list_tools()
 
-        # Should still have the 12 base tools
-        assert len(tools) >= 9
+        # Should still have the 13 base tools
+        assert len(tools) >= 13

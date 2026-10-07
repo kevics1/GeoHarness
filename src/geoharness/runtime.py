@@ -16,7 +16,6 @@ from typing import Any
 from openharness.api.openai_client import OpenAICompatibleClient
 from openharness.commands.registry import create_default_command_registry
 from openharness.config.settings import PathRuleConfig, PermissionSettings
-from openharness.engine.query_engine import QueryEngine
 from openharness.hooks.executor import HookExecutionContext, HookExecutor
 from openharness.hooks.loader import HookRegistry
 from openharness.mcp.client import McpClientManager
@@ -27,12 +26,14 @@ from openharness.tools.base import ToolRegistry
 from openharness.ui.runtime import RuntimeBundle
 
 from geoharness.config.settings import GeoConfig, load_geo_config
+from geoharness.engine import GeoQueryEngine
 from geoharness.hooks.cascade import (
     CascadeManager,
     build_cascade_manager,
     register_cascade_hooks,
 )
 from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
+from geoharness.workspace_isolation import install_workspace_isolation
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,10 @@ async def build_geo_runtime(
     Returns:
         Fully assembled RuntimeBundle with domain-specific components.
     """
+    # Reused upstream prompt/plugin consumers also need project path isolation;
+    # OPENHARNESS_CONFIG_DIR alone does not affect their cwd/.openharness paths.
+    install_workspace_isolation()
+
     # 1. Load GeoHarness config (from ~/.geoharness/config.yaml)
     config = config_override or load_geo_config(config_path)
     logger.info("GeoHarness config loaded: model=%s", config.model)
@@ -104,14 +109,14 @@ async def build_geo_runtime(
     # `skill` tool can find bundled skills at runtime.
     all_skill_dirs = (str(_bundled_skills_dir()), *extra_skill_dirs)
 
-    engine = QueryEngine(
+    engine = GeoQueryEngine(
         api_client=api_client,
         tool_registry=tool_registry,
         permission_checker=permission_checker,
         cwd=str(cwd),
         model=config.model,
         system_prompt=system_prompt,
-        max_tokens=4096,
+        max_tokens=config.agent.max_tokens,
         # Multi-layer cartography routinely needs 20+ tool calls (inspect every
         # layer, load, symbolize, export). The upstream default of 8 turns
         # aborts mid-workflow ("Stopped after 8 turns"); default to 40, still
@@ -124,6 +129,7 @@ async def build_geo_runtime(
             "geoharness_config": config,
             "data_catalog": data_catalog,
             "cascade_manager": cascade_manager,
+            "map_workflow_state": {},
             # The `skill` tool reads this key to find skill directories.
             # Without it, project skills (cartography, spatial-analysis, …)
             # are invisible at runtime even though they are bundled — which
@@ -174,6 +180,7 @@ async def build_geo_runtime(
             "api_key": config.api_key,
             "api_format": "openai",
             "base_url": config.base_url,
+            "system_prompt": system_prompt,
         },
         extra_skill_dirs=all_skill_dirs,
         extra_plugin_roots=(),
@@ -272,7 +279,7 @@ def _build_mcp_manager(config: GeoConfig) -> McpClientManager:
 
 
 def _build_tool_registry() -> ToolRegistry:
-    """Build the GeoHarness tool registry (7 native + 5 whitelisted).
+    """Build the GeoHarness tool registry (8 native + 5 whitelisted).
 
     MCP tools are registered later by geoharness.mcp.connect.activate_mcp()
     once servers have connected — registration mutates this same registry
@@ -299,13 +306,11 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
             path_rules.append(PathRuleConfig(pattern=variant, allow=True))
 
     perm_settings = PermissionSettings(path_rules=path_rules)
-    # geo_cartography writes ONLY into the configured outputs directory
-    # (~/.geoharness/exports); asking the user to confirm every map export
-    # adds friction without protecting anything. Built-in sensitive-path
-    # protection and explicit denied_tools still outrank this allow-list;
-    # config deny_paths also keep applying to generic file tools, while the
-    # cartography tool never targets anything but the exports directory.
-    perm_settings.allowed_tools.extend(["geo_cartography", "geo_analysis", "geo_map_review"])
+    # Native tools enforce their artifact/workspace destinations. Sensitive-path
+    # protection and explicit denied_tools still outrank this allow-list.
+    perm_settings.allowed_tools.extend([
+        "geo_cartography", "geo_analysis", "geo_map_review", "geo_deliver",
+    ])
     if config.execution.enabled:
         perm_settings.allowed_tools.append("geo_python")
     return PermissionChecker(settings=perm_settings)

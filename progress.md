@@ -53,3 +53,17 @@
 - 现有配置的 geo-mcp-server/postgres 模块缺失，连接警告后继续启动；未擅自移除配置。
 - 更新用户指南中的安装/更新和任意目录启动操作；保留用户原有 .env.example 改动，不纳入本次提交。
 - 独立只读审查核对 wheel 文件内容及上游 loader，5个顶层技能均从安装目录加载；没有本次引入的 Critical/Important/Minor 问题。既有认知技能旧调用提示不影响本次入口，未扩展修改范围。
+
+## 追加：实际运行诊断、有限审查与QGIS交付
+- 检查example的26次Python记录（23成功、3失败）和对应会话；另一次空参数在校验前未执行。SOURCE_CWD/DATA_DIRS环境缺失、RUN_DIR外写入及DEM窗口越界分别有脚本/日志证据。16次图片审查中9次因token耗尽未验证，存在重复图片检查及8个火情版本。
+- 上游项目状态函数在GeoHarness进程内适配到用户.geoharness/workspaces；保留cwd，实际插件/自动任务初始化不再创建工作目录.openharness。仅清理example已核实为空的autopilot/plugins及父目录，不修改上游源文件。
+- Python同时提供Path全局变量与环境变量；修补Windows CopyFile2/copytree绕写保护，保留源数据只读。工具结果提供status、exit_code及error_summary，空code报明确未执行错误。
+- 所有制图工具共享用户请求预算：每图最多初版加2修正、所有图片4次/120秒；缓存未变图片（含失败）及合并并发同图请求。处理常见绘图导入别名，passed/unverified/info-only/上限均停止完善。
+- 原生制图自动附带工程，project动作给既有Python成图打包实际来源而不重绘；QGS真实数据/样式/CRS/画布/基础布局及相对引用，GPKG/TIFF副本、JSON、重绘脚本和说明完整。零影响空图层可保留，既有用户编辑不覆盖。
+- geo_deliver交付明确选定的文件和工程到cwd/exports唯一目录，文件重名（含Windows保留名大小写）不覆盖。默认配置、初始化模板、系统提示、两份已获授权技能及用户指南同步。
+- 独立只读审查确认六项P2边界问题，均修复并复验；最终无新直接相关问题，16项相关测试通过。
+- 全量509 passed；实际QGIS发现地图框高度按extent比例恢复后超出纸张，已匹配地图框比例，并验证真实尺寸在纸张内；相关18 passed。最终CLI/端到端17 passed，ruff及diff检查通过。初期技能测试依赖真实用户home导致权限失败，改用隔离配置和合成凭证；测试目标不存在的调用已按真实test_e2e文件纠正，不作为通过记录。
+- 使用本机QGIS3.44.7实际读取、验证有效图层、关联比例尺和导出中文布局；Windows Qt offscreen无系统字体，验证进程显式加载本机字体后正常，不修改桌面字体设置。
+- 实际本地模型完整流程核验影响数2，地图/报告/QGIS工程/交付成功；该次4096token审查耗尽，正确报告unverified并停止，无伪报passed。非max模型的空图探测约7秒返回有效检查，不能保证业务图每次通过。
+- 用户既有两张PNG/PDF哈希完全保留，补充实际图层与原分类工程到 F:/Desktop/Project/GeoHarness/example/exports/20261007-补充交付-18310bde，含原脚本/manifest、分析报告、诊断、QGIS真实布局预览。详细Python注记和特殊符号可能需参照原图手动补充，已说明。
+- wheel核对新模块/工具/技能完整，已更新D:/Python312全局安装与用户YAML审查/交付配置，主模型仍为指定max，其他配置与凭证保留。example中geoh version、dry-run、实际run --print退出成功，无.openharness再创建。真实安装包init在隔离home验证输出为相对exports；用户原.env.example改动不纳入提交。

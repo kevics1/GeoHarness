@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from geoharness.cartography.workflow import reserve_python_render
 from geoharness.config.settings import CartographyConfig
 from geoharness.execution import execute_python
 
@@ -19,9 +20,24 @@ class GeoPythonInput(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
         description="Short ASCII name for this reproducible analysis run.",
     )
+    map_id: str = Field(
+        default="",
+        description="Stable map identity shared by all versions of the same map.",
+    )
     timeout_seconds: float | None = Field(
         default=None, gt=0, description="Optional timeout no greater than the configured maximum."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_complete_code(cls, value):
+        if isinstance(value, dict) and not value.get("code"):
+            raise ValueError(
+                "geo_python requires complete 'code' arguments; no script was executed. "
+                "Empty arguments can result from an incomplete/invalid provider tool call. "
+                "Send a shorter complete script, or use the native GIS/cartography tools."
+            )
+        return value
 
 
 class GeoPythonTool(BaseTool):
@@ -31,6 +47,8 @@ class GeoPythonTool(BaseTool):
         "GeoPandas, Shapely, pandas, matplotlib (Agg) and rasterio are available. "
         "SOURCE_CWD and DATA_DIRS identify read-only source folders; RUN_DIR is the only "
         "allowed output folder and is also the working directory. "
+        "These paths are injected as Python Path globals and environment variables; "
+        "the DATA_DIRS environment variable uses os.pathsep-separated paths. "
         "Configured analysis, map and previous Python run outputs "
         "are available as read-only inputs. "
         "Use relative output filenames or RUN_DIR / filename. Network and subprocesses "
@@ -54,6 +72,19 @@ class GeoPythonTool(BaseTool):
                 output=f"Error: timeout exceeds configured maximum ({execution.timeout_seconds}s).",
                 is_error=True,
             )
+        budget_stop = reserve_python_render(
+            code=arguments.code,
+            name=arguments.name,
+            map_id=arguments.map_id,
+            metadata=context.metadata,
+            config=config,
+        )
+        if budget_stop is not None:
+            return ToolResult(
+                output=budget_stop,
+                is_error=False,
+                metadata={"render_budget_exhausted": True},
+            )
         file_dir = getattr(getattr(config, "data", None), "file_dir", "")
         directories = []
         for section in ("analysis", "cartography", "execution"):
@@ -76,6 +107,15 @@ class GeoPythonTool(BaseTool):
             )
         except (OSError, ValueError) as exc:
             return ToolResult(output=f"Error: Python analysis could not run: {exc}", is_error=True)
+        status = (
+            "timed_out"
+            if result["timed_out"]
+            else ("succeeded" if result["exit_code"] == 0 else "failed")
+        )
+        result = {"status": status, **result}
+        if status != "succeeded":
+            lines = result["stderr"].strip().splitlines()
+            result["error_summary"] = lines[-1][:500] if lines else status
         return ToolResult(
             output=json.dumps(result, ensure_ascii=False, indent=2),
             is_error=result["timed_out"] or result["exit_code"] != 0,

@@ -137,7 +137,7 @@ MCP timeout on large datasets.
 _TOOL_CATALOG = """\
 # Tool Catalog
 
-## Native Tools (7)
+## Native Tools (8)
 - **geo_analysis**: Native buffer, clip, intersection, distance, count and impact
   - Inputs: action, source (file_path/source_name/geojson + optional crs),
     reference, zones, distance_m, output_name.
@@ -149,10 +149,16 @@ _TOOL_CATALOG = """\
   need custom composition. Original data is read-only by default; keep outputs
   in the script's run directory. Use installed GIS libraries, no shell or network.
   - Returns script, logs, manifest and artifact paths. Check exit_code and results.
+    Supply complete code and a stable map_id for every version of a custom map.
+    SOURCE_CWD/RUN_DIR are also environment variables; DATA_DIRS uses os.pathsep.
 - **geo_map_review**: Inspect an actual PNG/JPEG map produced by a Python script.
   - Provide file_path, task and evidence (expected layers, analysis/source summary).
-  - Apply confirmed presentation fixes to the script, re-render and check again,
-    respecting config.map_review.max_repairs. Keep unverified/remaining issues visible.
+  - Use the same map_id as geo_python. Consolidate concrete errors/warnings into
+    one repair. Stop on passed, unverified, info-only suggestions or budget exhaustion.
+    Unchanged image checks are cached; never repeat a failed check blindly.
+- **geo_deliver**: Copy selected files and a project_dir into workspace exports.
+  - Use the returned delivery_dir and qgis_project paths in the final answer.
+    Include map, editable project, analysis outputs, report and original Python script.
 - **geo_db_data**: Load/inspect data from the PostGIS database (tables)
   - Actions: list, inspect, load
 - **geo_vector_data**: Load/inspect local vector files (Shapefile/GeoJSON/GPKG/CSV)
@@ -160,12 +166,15 @@ _TOOL_CATALOG = """\
 - **geo_raster_data**: Load/inspect local raster files (GeoTIFF/IMG/ASC/VRT)
   - Actions: list, inspect, stats
 - **geo_cartography**: Render maps natively — PNG/PDF/SVG + interactive HTML
-  - Actions: symbolize, compose, export, full
+  - Actions: symbolize, compose, export, full, project
   - Follows bridge rules for analysis→symbolization mapping
   - Rendered maps are visually reviewed and presentation repairs are bounded by
     config.map_review.max_repairs. Pass review_task to preserve the user's map goal.
     PNG is preferred for the first workflow. PDF/SVG are checked via PNG previews;
     interactive HTML requires its own screenshot and stays unverified without one.
+    Native rendering also returns a portable editable QGIS project. For Python maps,
+    action=project with existing output_path and actual layer sources creates the
+    engineering files without redrawing. Custom Python annotations may need QGIS edits.
   - Single layer: provide file_path, source_type+source_name, or geojson.
   - **MULTI-LAYER (thematic maps like 火灾态势总图)**: pass `layers` as a JSON
     array — e.g. layers='[{"source_type":"file","source_name":"西昌市行政区划"},
@@ -219,8 +228,19 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"Python enabled: {config.execution.enabled}. "
         f"Visual review enabled: {config.map_review.enabled}. "
         f"Maximum presentation repair rounds: {config.map_review.max_repairs}.\n"
-        "A written image is a draft until review completes. Report passed, issues or "
-        "unverified truthfully. Never claim to have seen a map from its path alone. "
+        f"All tools share a maximum of {config.map_review.max_reviews_per_request} "
+        f"image reviews and {config.map_review.total_timeout_seconds:g} seconds per user "
+        f"request; each map allows {1 + config.map_review.max_repairs} versions.\n"
+        "Prepare title, legend, layers, extent and readable labels before the first render. "
+        "Prefer native multi-layer cartography when it can express the requested map. "
+        "Use one stable map_id across filenames, formats, Python and native tools. "
+        "Fix a consolidated list of concrete errors/warnings; aesthetic preferences and "
+        "info-only suggestions do not justify another version. After passed, unverified "
+        "or budget exhaustion, deliver the latest map and editable project immediately "
+        "with remaining issues. A failed review is not a request to retry. "
+        "Report passed, issues or unverified truthfully. Never claim to have seen a map "
+        "from its path alone. Use geo_deliver for final artifacts in the current "
+        "workspace; Python scripts only write RUN_DIR. "
         "Ask before changing source data, analysis definitions or statistical thresholds."
     )
 

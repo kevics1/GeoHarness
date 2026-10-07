@@ -2,7 +2,7 @@
 
 当前首期聚焦多图层叠加与影响范围分析，支持原生 GIS 运算、可复现的自主 Python 分析，以及读取实际成图进行检查、有限自动修正和重绘。入口与配置保持 OpenHarness/GeoHarness 隔离。
 
-最新操作与检查状态说明见 [user-guide.md](user-guide.md)。本地聚合服务配置见 [config.example.yaml](config.example.yaml)。新增工具：geo_analysis、geo_python、geo_map_review；基础工具为 7 个原生工具与 5 个辅助工具，MCP 工具按实际连接动态发现。空间热点与栅格/地形列为后续重点。
+最新操作与检查状态说明见 [user-guide.md](user-guide.md)。本地聚合服务配置见 [config.example.yaml](config.example.yaml)。新增工具：geo_analysis、geo_python、geo_map_review、geo_deliver；基础工具为 8 个原生工具与 5 个辅助工具，MCP 工具按实际连接动态发现。地图同时提供可编辑 QGIS 工程，默认交付到当前工作目录。空间热点与栅格/地形列为后续重点。
 
 地理方向原生 Agent 系统 — 空间分析优先，制图为分析产物。
 
@@ -119,7 +119,7 @@ GEOH_POSTGRES_PASSWORD=your-password
 
 # ── 制图输出 ──────────────────────────────────
 # 原生渲染（matplotlib/folium）的 PNG/PDF/SVG/HTML 落盘目录
-GEOH_OUTPUTS_DIR=~/.geoharness/exports
+GEOH_OUTPUTS_DIR=exports
 ```
 
 ### 第三步：编辑 config.yaml
@@ -350,6 +350,7 @@ GeoHarness/
 | geo_analysis | 缓冲、裁剪、相交、距离、分区计数与影响范围分析 | 源数据只读，生成新结果 |
 | geo_python | 保存并执行自定义 GIS 分析脚本 | 源数据只读，写独立运行目录 |
 | geo_map_review | 读取实际成图，输出视觉检查与呈现修正建议 | 写独立检查报告 |
+| geo_deliver | 交付地图、结果、报告及可编辑 QGIS 工程 | 写当前工作目录 exports 子目录 |
 
 **MCP 工具 (27)**：
 
@@ -393,7 +394,7 @@ A: 静态渲染需要一个中文字体。安装任意一款即可（如 `Noto S
 
 **Q: 想调整输出目录 / 地图尺寸**
 
-A: 输出目录由 `.env` 的 `GEOH_OUTPUTS_DIR`（或 config.yaml 的 `cartography.outputs_dir`）控制，默认 `~/.geoharness/exports`。
+A: 地图默认写入当前工作目录的 `exports/`，可用 config.yaml 的 `cartography.outputs_dir` 设置，初始化模板通过 `.env` 的 `GEOH_OUTPUTS_DIR` 引用该值。geo_deliver 的最终交付由 `delivery.outputs_dir` 控制，必须是当前工作目录的子目录。可编辑工程与使用方式见 [user-guide.md](user-guide.md)。
 
 **Q: 没有 PostGIS 数据库怎么办？**
 
