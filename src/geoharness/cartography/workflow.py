@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import json
 import re
 import time
 from pathlib import Path
@@ -22,7 +23,7 @@ _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDic
 def reset_map_workflow(metadata: dict[str, Any]) -> None:
     state = metadata.setdefault("map_workflow_state", {})
     state.clear()
-    state.update(reviews=0, seconds=0.0, maps={}, cache={})
+    state.update(reviews=0, seconds=0.0, reserved_seconds=0.0, maps={}, cache={}, cache_settings={})
 
 
 def _state(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -31,8 +32,10 @@ def _state(metadata: dict[str, Any]) -> dict[str, Any]:
     state = metadata["map_workflow_state"]
     state.setdefault("reviews", 0)
     state.setdefault("seconds", 0.0)
+    state.setdefault("reserved_seconds", 0.0)
     state.setdefault("maps", {})
     state.setdefault("cache", {})
+    state.setdefault("cache_settings", {})
     return state
 
 
@@ -64,6 +67,15 @@ def reserve_map_render(
         )
     entry["renders"] += 1
     return None
+
+
+def refund_map_render(name: str, metadata: dict[str, Any]) -> bool:
+    """Release one failed render reservation; callers must own that reservation."""
+    entry = _state(metadata)["maps"].get(name)
+    if entry is None or entry["renders"] <= 0:
+        return False
+    entry["renders"] -= 1
+    return True
 
 
 def reserve_python_render(
@@ -102,7 +114,9 @@ def reserve_python_render(
                 draw_names.update(
                     alias.asname or alias.name
                     for alias in node.names
-                    if alias.name in {"render_map", "render_static", "render_layers"}
+                    if alias.name in {
+                        "render_map", "render_static", "render_layers", "save_map_figure",
+                    }
                 )
 
     def qualified_name(node: ast.AST) -> str:
@@ -118,7 +132,9 @@ def reserve_python_render(
             (isinstance(node.func, ast.Attribute) and node.func.attr == "savefig")
             or (
                 isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"render_map", "render_static", "render_layers"}
+                and node.func.attr in {
+                    "render_map", "render_static", "render_layers", "save_map_figure",
+                }
                 and qualified_name(node.func.value) in draw_modules
             )
             or (isinstance(node.func, ast.Name) and node.func.id in draw_names)
@@ -170,20 +186,29 @@ async def _review_once(
     map_id: str,
     client: Any,
 ) -> tuple[MapReview, dict[str, Any]]:
-    if digest in state["cache"]:
+    settings = config.map_review
+    fingerprint = hashlib.sha256(json.dumps({
+        "enabled": settings.enabled,
+        "model": settings.model or config.model,
+        "base_url": settings.base_url or config.base_url,
+        "credential_digest": hashlib.sha256(
+            (settings.api_key or config.api_key).encode()
+        ).hexdigest(),
+        "max_tokens": settings.max_tokens,
+        "timeout_seconds": settings.timeout_seconds,
+        "max_image_side": settings.max_image_side,
+        "request_extra_body": settings.request_extra_body,
+    }, sort_keys=True, default=str).encode()).hexdigest()
+    flags = {"image_sha256": digest, "review_cached": False, "review_budget_exhausted": False}
+    if digest in state["cache"] and state["cache_settings"].get(digest) == fingerprint:
         return MapReview.model_validate(state["cache"][digest]), {
-            "review_cached": True,
-            "review_budget_exhausted": False,
+            **flags, "review_cached": True,
         }
     identity = map_id or image_map_identity(path)
     entry = state["maps"].setdefault(identity, {"renders": 0, "reviews": 0})
-    settings = config.map_review
-    remaining_seconds = settings.total_timeout_seconds - state["seconds"]
-    if "started_at" in state:
-        remaining_seconds = min(
-            remaining_seconds,
-            settings.total_timeout_seconds - (time.time() - state["started_at"]),
-        )
+    remaining_seconds = (
+        settings.total_timeout_seconds - state["seconds"] - state["reserved_seconds"]
+    )
     if (
         state["reviews"] >= settings.max_reviews_per_request
         or entry["reviews"] >= settings.max_repairs + 1
@@ -195,14 +220,15 @@ async def _review_once(
                 "Visual review budget reached. Do not retry or create more previews; "
                 "deliver the current map and editable project with this limitation."
             ),
-        ), {"review_cached": False, "review_budget_exhausted": True}
+        ), {**flags, "review_budget_exhausted": True}
     # Reserve before yielding, so parallel tool calls cannot overspend the count.
     state["reviews"] += 1
     entry["reviews"] += 1
-    state.setdefault("started_at", time.time())
+    timeout = min(settings.timeout_seconds, remaining_seconds)
+    state["reserved_seconds"] += timeout
     bounded = settings.model_copy(
         update={
-            "timeout_seconds": min(settings.timeout_seconds, remaining_seconds),
+            "timeout_seconds": timeout,
         }
     )
     from dataclasses import replace
@@ -218,6 +244,8 @@ async def _review_once(
         )
     finally:
         state["seconds"] += time.monotonic() - started
+        state["reserved_seconds"] = max(0.0, state["reserved_seconds"] - timeout)
     # Cache failures too. Unchanged images should never trigger blind API retries.
     state["cache"][digest] = result.model_dump()
-    return result, {"review_cached": False, "review_budget_exhausted": False}
+    state["cache_settings"][digest] = fingerprint
+    return result, flags

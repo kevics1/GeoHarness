@@ -14,6 +14,7 @@ native rendering parameters as a complementary reproducible entry point.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import shutil
 import tempfile
@@ -43,7 +44,10 @@ _RENDER_KEYS = {
     "add_scalebar",
     "add_north_arrow",
 }
-_LAYER_KEYS = {"color", "column", "render_method", "color_scheme", "n_classes"}
+_LAYER_KEYS = {
+    "color", "column", "field_name", "render_method", "color_scheme", "n_classes",
+    "categories", "colors", "default_color", "style",
+}
 
 
 class ProjectLayer(BaseModel):
@@ -67,8 +71,10 @@ class MapProject(BaseModel):
     schema_version: Literal[1] = 1
     renderer: Literal["single", "layers"]
     preview: str
+    preview_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     project_crs: str
     extent: list[float]
+    extent_locked: bool = False
     layout: MapLayout
     render_kwargs: dict[str, Any]
     layers: list[ProjectLayer]
@@ -178,20 +184,31 @@ def _vector_style(gdf: Any, options: dict[str, Any], mode: str) -> tuple[Any, di
         _LAYER_KIND_DEFAULTS,
         _classify_values,
         _geom_kind,
+        _layer_symbolization,
         _numeric_values,
         _row_colors_and_legend,
     )
 
     kind = _geom_kind(gdf)
     if mode == "layers":
-        color = str(options.get("color") or _LAYER_KIND_DEFAULTS[kind][0])
-        return gdf, {"type": "singleSymbol", "geometry": kind, "color": color}
+        options, colors, legend, weights, categories = _layer_symbolization(gdf, options)
+        if categories is not None:
+            return gdf, {
+                "type": "categorizedSymbol", "geometry": kind,
+                "column": options["column"], "categories": categories,
+            }
+        if options["render_method"] == "none":
+            color = colors[0] if colors else str(
+                options.get("color") or _LAYER_KIND_DEFAULTS[kind][0]
+            )
+            return gdf, {"type": "singleSymbol", "geometry": kind, "color": color}
 
     column = str(options.get("column", ""))
     method = str(options.get("render_method", "categorized")).strip().lower()
     scheme = str(options.get("color_scheme", "Set1"))
     n_classes = int(options.get("n_classes", 5))
-    colors, legend, weights = _row_colors_and_legend(gdf, column, method, scheme, n_classes)
+    if mode != "layers":
+        colors, legend, weights = _row_colors_and_legend(gdf, column, method, scheme, n_classes)
     if method == "flow":
         from shapely.geometry import MultiLineString
 
@@ -227,7 +244,7 @@ def _vector_style(gdf: Any, options: dict[str, Any], mode: str) -> tuple[Any, di
                 ],
             )
             return gdf, style
-    if len(set(colors)) == 1 and weights is None:
+    if len(set(colors)) == 1 and weights is None and not (mode == "layers" and column):
         style.update(type="singleSymbol", color=colors[0])
         return gdf, style
     if method in {"categorized", "graduated"} and not graduated and column in gdf:
@@ -482,14 +499,23 @@ def _qgis_print_layout(parent: ET.Element, project: MapProject) -> None:
     center_x, center_y = (xmin + xmax) / 2, (ymin + ymax) / 2
     extent_width, extent_height = xmax - xmin, ymax - ymin
     frame_ratio = map_width / map_height
-    extent_width = max(extent_width, extent_height * frame_ratio)
-    extent_height = extent_width / frame_ratio
-    frame_extent = [
-        center_x - extent_width / 2,
-        center_y - extent_height / 2,
-        center_x + extent_width / 2,
-        center_y + extent_height / 2,
-    ]
+    if project.extent_locked:
+        extent_ratio = extent_width / extent_height
+        if extent_ratio > frame_ratio:
+            map_height = map_width / extent_ratio
+        else:
+            map_width = map_height * extent_ratio
+        map_item.set("size", f"{map_width},{map_height},mm")
+        frame_extent = project.extent
+    else:
+        extent_width = max(extent_width, extent_height * frame_ratio)
+        extent_height = extent_width / frame_ratio
+        frame_extent = [
+            center_x - extent_width / 2,
+            center_y - extent_height / 2,
+            center_x + extent_width / 2,
+            center_y + extent_height / 2,
+        ]
     ET.SubElement(
         map_item, "Extent", dict(zip(("xmin", "ymin", "xmax", "ymax"), map(str, frame_extent)))
     )
@@ -748,6 +774,7 @@ def export_map_project(
     output_path: str | Path,
     render_kwargs: dict[str, Any],
     layout: MapLayout | None = None,
+    extent: list[float] | None = None,
 ) -> dict[str, str]:
     """Snapshot an actual native render into a portable editable project.
 
@@ -755,9 +782,13 @@ def export_map_project(
     bottom-to-top. ``render_kwargs['mode']`` is ``single`` or ``layers``.
     The current native composition API supports one raster backdrop; it is
     copied from ``render_kwargs['basemap_raster']``. No source/catalog metadata
-    is persisted. Existing nonempty projects are never overwritten.
+    is persisted. ``extent`` optionally records the actual map-frame bounds in
+    the project CRS (xmin, ymin, xmax, ymax), without expanding to source bounds.
+    Existing nonempty projects are never overwritten.
     """
     mode = str(render_kwargs.get("mode", "layers"))
+    if extent is None:
+        extent = render_kwargs.get("extent")
     if mode not in {"single", "layers"}:
         raise ValueError("Project mode must be 'single' or 'layers'.")
     if not layers or (mode == "single" and len(layers) != 1):
@@ -825,14 +856,26 @@ def export_map_project(
                     style=style,
                 )
             )
-        crs, extent = _canvas_extent(layers, raster, mode)
+        crs, canvas_extent = _canvas_extent(layers, raster, mode)
+        if extent is not None:
+            if (
+                len(extent) != 4 or not np.isfinite(extent).all()
+                or extent[0] >= extent[2] or extent[1] >= extent[3]
+            ):
+                raise ValueError("Project extent needs finite xmin, ymin, xmax, ymax bounds.")
+            canvas_extent = [float(value) for value in extent]
+            if mode == "layers":
+                kwargs["extent"] = canvas_extent
         preview_name = "preview" + preview.suffix.lower()
         shutil.copyfile(preview, staging / preview_name)
+        preview_sha256 = hashlib.sha256((staging / preview_name).read_bytes()).hexdigest()
         project = MapProject(
             renderer=mode,
             preview=preview_name,
+            preview_sha256=preview_sha256,
             project_crs=crs,
-            extent=extent,
+            extent=canvas_extent,
+            extent_locked=extent is not None,
             layout=options,
             render_kwargs=kwargs,
             layers=copied_layers,
@@ -859,6 +902,7 @@ def export_map_project(
         "qgis_project": str(destination / "map.qgs"),
         "redraw_script": str(destination / "redraw.py"),
         "project_readme": str(destination / "README.md"),
+        "preview_sha256": preview_sha256,
     }
 
 
@@ -889,11 +933,21 @@ def redraw_map_project(project_file: str | Path, *, output_path: str | Path | No
                 raise ValueError("The native renderer supports one raster backdrop per map.")
             basemap = str(data)
         else:
+            layer_options = dict(layer.options)
+            if (
+                project.renderer == "layers" and layer.style.get("type") == "singleSymbol"
+                and not layer_options.get("column") and not layer_options.get("field_name")
+                and "categories" not in layer_options and "colors" not in layer_options
+                and "style" not in layer_options
+            ):
+                # Legacy tool projects saved the global classification rule despite
+                # drawing uniform layers. Their effective recorded style remains authoritative.
+                layer_options.update(render_method="none", color=layer.style["color"])
             layers.append(
                 {
                     "gdf": gpd.read_file(data, layer="features"),
                     "label": layer.label,
-                    **layer.options,
+                    **layer_options,
                 }
             )
     kwargs = {key: value for key, value in project.render_kwargs.items() if key in _RENDER_KEYS}
@@ -905,6 +959,8 @@ def redraw_map_project(project_file: str | Path, *, output_path: str | Path | No
             kwargs["layout"] = project.layout
         return render_map(layers[0]["gdf"], output_path=output, **kwargs)
     kwargs = {key: value for key, value in kwargs.items() if key in {"title", "figsize", "dpi"}}
+    if "extent" in project.render_kwargs:
+        kwargs["extent"] = project.render_kwargs["extent"]
     return render_layers(
         layers, output_path=output, basemap_raster=basemap, layout=project.layout, **kwargs
     )

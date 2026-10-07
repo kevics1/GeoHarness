@@ -27,11 +27,13 @@ layout 可设置 width、height、dpi、legend_outside、title_font_size、legen
 
 将具体错误/警告合并为一份修正清单，能用呈现参数修复时统一重绘，最多 map_review.max_repairs 轮（默认2）。每轮使用同一份加载数据，保留修正前地图与检查报告。不要因审美偏好、info 提示或无法确认的问题重绘；不自动改动源数据、分析口径或阈值。
 
-同一用户请求的所有工具共享审查次数及时间预算，默认最多4次、120秒；每张地图最多初版加2轮修正。同图的所有文件名、格式、Python/原生工具使用同一 map_id。未改变图片的重复检查直接使用缓存，失败检查也不盲目重试。passed、unverified 或预算耗尽后立即交付，不再生成 v4、v8 等自动完善版本。用户的新修改请求会开启新的预算。
+同一用户请求的所有工具共享审查次数及时间预算，默认最多4次、120秒实际服务调用时间，不计中间分析、渲染和写报告耗时；每张地图最多初版加2轮成功成图，执行失败不占成功版本。同图的所有文件名、格式、Python/原生工具使用同一 map_id。未改变图片的重复检查直接使用缓存，失败检查也不盲目重试。passed 后停止完善；unverified 或审查预算耗尽后停止视觉重试，仍有版本预算时统一修复已测出的明确布局问题，随后按未完成视觉审查的草稿交付。用户的新修改请求会开启新的预算。
 
 - passed：视觉检查通过，不等于统计或真实位置得到证明。
 - issues：存在剩余问题，报告具体内容。
 - unverified：检查关闭、模型不可用、格式无法核实或回复无效；不宣称地图正确。
+
+分别报告数据核验、布局几何检查和模型视觉审查的结果。非白像素比例和颜色检出最多证明文件有绘制内容；图例本身就有这些颜色，不能证明图层正确、对象数量正确或不存在压盖。严禁用“像素级校验确认所有图层与配色正确”等语句替代失败的视觉审查。服务失败时明确说“地图已生成，视觉审查未完成，作为草稿交付”，说明具体原因及已知问题，不把自动审查责任推给用户。
 
 PDF/SVG 使用同参数 PNG 预览检查，不能替代导出文件自身的排版/字体核验。HTML 的静态预览不能证明网页正确，没有实际网页截图时仍为 unverified。
 
@@ -39,7 +41,9 @@ PDF/SVG 使用同参数 PNG 预览检查，不能替代导出文件自身的排�
 
 geo_python 生成图片后调用 geo_map_review(file_path=..., task=..., evidence=..., map_id=...)，使用与 Python 相同的 map_id。一次合并处理具体错误，遵守共享预算。保留脚本、产物和报告；未解决问题与地图一起说明，不因布局建议修改分析结果。
 
-对已生成的地图，用 geo_cartography(action="project", output_path=实际地图路径, layers=实际图层JSON, ...) 生成 QGIS 工程；该操作不重新制图或审查。工程还原真实数据和基础样式/布局，Python 自定义文字、标注和复杂注记可能需用户在 QGIS 内参照预览补充，原脚本一并交付。
+有晕渲、放大图或密集重点标签时采用自定义布局，不能为获得工程而退回缺失要素的通用地图。使用 `geoharness.cartography.layout` 的 `create_map_figure(layout, title=..., subtitle=..., detail=True)` 预留主图、放大图、图例和说明的独立区域；先设置最终范围、比例，再用 `place_point_labels(ax, points, font_size=..., max_offset_points=...)` 测量文字边界并避让，禁止所有名字使用相同固定偏移。无法放下的标签使用编号与名单对应，不能静默丢弃重点点。`save_map_figure(page, output_path)` 保存成图及对应 SHA256 的 `.layout.json`，先处理 panel_overlaps、label_overlaps、clipped_labels、overflow_text，再进行视觉审查；布局报告仅证明已测的几何项。可参照 [Python 布局示例](references/python-layout.md)。
+
+对已生成的地图，用 geo_cartography(action="project", output_path=已存在的实际地图路径, layers=实际图层JSON, ...) 生成 QGIS 工程；该操作不重新制图或审查。必须传实际来源和对应样式，分类层明确 column/field_name、categories 和 colors，不能仅把“风险分级”写在 label 中。参数错误时修正缺失参数，不能 action=full 另画简化图或换 map_id 绕过预算。工程预览必须是同一张交付地图。Python 自定义文字、标注和复杂注记可能需在 QGIS 内参照预览补充，原脚本一并交付。
 
 ## 交付
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -314,3 +315,151 @@ def test_explicit_layout_is_preserved(tmp_path: Path) -> None:
     assert project["layout"] == layout.model_dump()
     root = ET.parse(delivery["qgis_project"]).getroot()
     assert root.find("Layouts/Layout").get("printResolution") == "100"
+
+
+def test_risk_categories_match_native_pixels_qgis_and_project_redraw(tmp_path: Path) -> None:
+    points = gpd.GeoDataFrame(
+        {"RiskTier": ["High", "Medium", "Low"]},
+        geometry=[Point(0, 0), Point(1, 1), Point(2, 0)], crs=3857,
+    )
+    colors = ["#d73027", "#fee08b", "#1a9850"]
+    layers = [{
+        "gdf": points, "label": "Risk sites", "field_name": "RiskTier",
+        "style": {"categories": ["High", "Medium", "Low"], "colors": colors},
+    }]
+    image = tmp_path / "actual-risk.png"
+    extent = [-0.5, -0.5, 2.5, 1.5]
+    render_layers(layers, output_path=image, extent=extent)
+    delivery = export_map_project(
+        tmp_path / "risk-project", layers=layers, output_path=image,
+        render_kwargs={"mode": "layers", "extent": extent},
+    )
+    manifest = json.loads(Path(delivery["project_file"]).read_text(encoding="utf-8"))
+    assert manifest["preview_sha256"] == hashlib.sha256(image.read_bytes()).hexdigest()
+    assert manifest["extent"] == extent
+    assert manifest["extent_locked"] is True
+    style = manifest["layers"][0]["style"]
+    assert style["column"] == "RiskTier"
+    assert [item["color"] for item in style["categories"][:3]] == colors
+    renderer = ET.parse(delivery["qgis_project"]).find(".//renderer-v2")
+    assert renderer.get("type") == "categorizedSymbol" and renderer.get("attr") == "RiskTier"
+    assert [category.get("value") for category in renderer.findall("categories/category")][:3] == [
+        "High", "Medium", "Low",
+    ]
+    qgis_colors = [symbol.find("layer/prop[@k='color']").get("v")
+                   for symbol in renderer.findall("symbols/symbol")][:3]
+    assert qgis_colors == ["215,48,39,255", "254,224,139,255", "26,152,80,255"]
+    frame = ET.parse(delivery["qgis_project"]).find(".//LayoutItem[@id='Map']")
+    qgis_extent = frame.find("Extent")
+    assert [float(qgis_extent.get(axis)) for axis in ("xmin", "ymin", "xmax", "ymax")] == extent
+    frame_width, frame_height = map(float, frame.get("size").split(",")[:2])
+    assert frame_width / frame_height == pytest.approx(3 / 2)
+    redrawn = redraw_map_project(delivery["project_file"])
+    for path in (image, redrawn):
+        with Image.open(path) as rendered:
+            pixels = {color for _count, color in rendered.convert("RGB").getcolors(
+                maxcolors=rendered.width * rendered.height
+            )}
+        assert {(215, 48, 39), (254, 224, 139), (26, 152, 80)} <= pixels
+
+
+@pytest.mark.parametrize("style, message", [
+    ({"field_name": "Missing"}, "does not exist"),
+    ({"field_name": "value", "render_method": "magic"}, "Unsupported"),
+    ({"field_name": "value", "categories": [1], "colors": ["red"]}, "absent"),
+    ({"field_name": "value", "categories": [1, 2], "colors": ["red"]}, "one color"),
+    ({"style": {"unsupported": True}}, "Unsupported"),
+    ({"field_name": "value", "categories": [
+        {"value": 1, "color": "red"}, {"value": None, "color": "blue"},
+    ], "default_color": "yellow"}, "default_color must match"),
+])
+def test_multilayer_rejects_ignored_or_incomplete_styles(tmp_path, style, message):
+    with pytest.raises(ValueError, match=message):
+        render_layers(
+            [{"gdf": _polygons(), "label": "Risk", **style}], output_path=tmp_path / "bad.png"
+        )
+    assert not (tmp_path / "bad.png").exists()
+
+
+def test_explicit_context_extent_excludes_outlying_features(tmp_path, monkeypatch):
+    from matplotlib.axes import Axes
+
+    points = gpd.GeoDataFrame(geometry=[Point(0, 0), Point(1000, 1000)], crs=3857)
+    seen = []
+    original = Axes.set_xlim
+
+    def record(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        seen.append(result)
+        return result
+
+    monkeypatch.setattr(Axes, "set_xlim", record)
+    render_layers(
+        [{"gdf": points, "label": "Context"}], output_path=tmp_path / "context.png",
+        extent=[-1, -1, 1, 1],
+    )
+    assert seen[-1] == (-1, 1)
+
+
+def test_single_risk_category_legend_matches_actual_points(tmp_path, monkeypatch):
+    from matplotlib.axes import Axes
+
+    points = gpd.GeoDataFrame(
+        {"RiskTier": ["High", "High"]}, geometry=[Point(0, 0), Point(1, 1)], crs=3857,
+    )
+    recorded = []
+    original = Axes.legend
+
+    def inspect(self, *args, **kwargs):
+        recorded.extend(kwargs.get("handles", []))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "legend", inspect)
+    render_layers(
+        [{"gdf": points, "label": "Risk sites", "field_name": "RiskTier"}],
+        output_path=tmp_path / "single-risk.png",
+    )
+    assert len(recorded) == 1
+    assert recorded[0].get_markerfacecolor() == "#e41a1c"
+    assert recorded[0].get_label() == "Risk sites: High"
+
+
+def test_used_default_category_is_in_native_legend(tmp_path, monkeypatch):
+    from matplotlib.axes import Axes
+
+    points = gpd.GeoDataFrame(
+        {"RiskTier": ["High", "Medium"]}, geometry=[Point(0, 0), Point(1, 1)], crs=3857,
+    )
+    recorded = []
+    original = Axes.legend
+
+    def inspect(self, *args, **kwargs):
+        recorded.extend(kwargs.get("handles", []))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "legend", inspect)
+    render_layers([{
+        "gdf": points, "label": "Risk sites", "field_name": "RiskTier",
+        "categories": ["High"], "colors": ["red"], "default_color": "yellow",
+    }], output_path=tmp_path / "fallback-risk.png")
+    assert [handle.get_markerfacecolor() for handle in recorded] == ["#ff0000", "#ffff00"]
+    assert recorded[1].get_label() == "Risk sites: Other / NULL"
+
+
+def test_legacy_uniform_layer_project_still_redraws(tmp_path):
+    image = tmp_path / "legacy.png"
+    Image.new("RGB", (64, 64), "white").save(image)
+    delivery = export_map_project(
+        tmp_path / "legacy", layers=[{"gdf": _polygons(), "label": "Context"}],
+        output_path=image, render_kwargs={"mode": "layers"},
+    )
+    manifest_file = Path(delivery["project_file"])
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    manifest.pop("preview_sha256")
+    manifest.pop("extent_locked")
+    manifest["layers"][0]["options"] = {
+        "color": "", "column": "", "render_method": "categorized",
+        "color_scheme": "Set1", "n_classes": 5,
+    }
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+    assert redraw_map_project(manifest_file).is_file()

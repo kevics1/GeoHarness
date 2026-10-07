@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import tempfile
 from pathlib import Path
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from geoharness.cartography.project import MapProject
+from geoharness.cartography.quality import MapReview
+
+_MAP_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".pdf", ".svg", ".html"}
 
 
 class GeoDeliverInput(BaseModel):
@@ -21,6 +25,18 @@ class GeoDeliverInput(BaseModel):
         description="Explicit map, table, report or script file paths to deliver.",
     )
     project_dir: str = Field(default="", description="Portable map project folder to include.")
+    primary_map: str = Field(
+        default="",
+        validation_alias=AliasChoices("primary_map", "map_path"),
+        description=(
+            "Actual main map to deliver (map_path alias). When a project is included, its "
+            "preview must have the same SHA256. Inferred from matching selected maps when omitted."
+        ),
+    )
+    review_path: str = Field(
+        default="",
+        description="Optional recorded map-review JSON; passed requires the actual image SHA256.",
+    )
     name: str = Field(
         default="delivery",
         min_length=1,
@@ -66,6 +82,8 @@ class GeoDeliverTool(BaseTool):
         "Copy selected maps, data, reports and an editable map project into workspace exports. "
         "Use this after Python/native analysis; scripts must not write outside RUN_DIR. "
         "Returns the actual user-facing delivery folder and files; preserves prior deliveries."
+        " A selected primary map must match the included project's preview. "
+        "Quality is draft unless a recorded review verifies the same image and has no issues."
     )
     input_model = GeoDeliverInput
 
@@ -93,7 +111,16 @@ class GeoDeliverTool(BaseTool):
 
         def publish() -> dict:
             files = [resolve(value) for value in arguments.files]
+            primary = resolve(arguments.primary_map) if arguments.primary_map else None
+            if primary is not None and primary.suffix.lower() not in _MAP_SUFFIXES:
+                raise ValueError("Primary map must be a PNG/JPEG/WebP/PDF/SVG/HTML map artifact.")
+            if primary is not None and primary not in files:
+                files.append(primary)
+            report_file = resolve(arguments.review_path) if arguments.review_path else None
+            if report_file is not None and report_file not in files:
+                files.append(report_file)
             project_files: list[tuple[Path, Path]] = []
+            project_digest = None
             if arguments.project_dir:
                 project_root = Path(arguments.project_dir).expanduser()
                 project_root = (
@@ -101,6 +128,31 @@ class GeoDeliverTool(BaseTool):
                 ).resolve()
                 manifest = resolve(str(project_root / "project.json"))
                 project = MapProject.model_validate_json(manifest.read_text(encoding="utf-8"))
+                preview = (project_root / project.preview).resolve()
+                if not preview.is_relative_to(project_root):
+                    raise ValueError("Project preview reference must stay inside its folder.")
+                preview = resolve(str(preview))
+                project_digest = hashlib.sha256(preview.read_bytes()).hexdigest()
+                if project.preview_sha256 and project.preview_sha256 != project_digest:
+                    raise ValueError(
+                        "Project preview SHA256 no longer matches its recorded snapshot."
+                    )
+                maps = [path for path in files if path.suffix.lower() in _MAP_SUFFIXES]
+                if primary is None and maps:
+                    matching = [path for path in maps if hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest() == project_digest]
+                    if not matching:
+                        raise ValueError(
+                            "Selected map differs from the project's preview SHA256. "
+                            "Create the project from the actual final map; "
+                            "no rerender fallback is used."
+                        )
+                    primary = matching[0]
+                if primary is not None and hashlib.sha256(
+                    primary.read_bytes()
+                ).hexdigest() != project_digest:
+                    raise ValueError("Primary map differs from the project's preview SHA256.")
                 relative_files = {
                     "project.json",
                     "map.qgs",
@@ -116,9 +168,46 @@ class GeoDeliverTool(BaseTool):
                     project_files.append((resolve(str(target)), Path("project") / relative))
             if not files and not project_files:
                 raise ValueError("Select at least one artifact or a portable project.")
+            if primary is None:
+                primary = next(
+                    (file for file in files if file.suffix.lower() in _MAP_SUFFIXES), None
+                )
+            digest = hashlib.sha256(primary.read_bytes()).hexdigest() if primary else project_digest
+            recorded = (
+                context.metadata.get("map_workflow_state", {}).get("cache", {}).get(digest)
+                if digest else None
+            )
+            if recorded is None and digest:
+                candidates = [report_file] if report_file else [
+                    path for path in files if path.suffix.lower() == ".json"
+                ]
+                for candidate in candidates:
+                    try:
+                        report = json.loads(candidate.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeError, ValueError):
+                        continue
+                    if isinstance(report, dict) and report.get("image_sha256") == digest:
+                        recorded = {
+                            key: report[key] for key in MapReview.model_fields if key in report
+                        }
+                        break
+            try:
+                review = MapReview.model_validate(recorded) if recorded is not None else None
+            except ValueError:
+                review = None
+            review_status = review.status if review else "unverified"
+            if review and review.status == "passed" and any(
+                issue.severity in {"error", "warning"} for issue in review.issues
+            ):
+                review_status = "issues"
+            if review and review.status == "passed" and review.layout_patch.model_dump(
+                exclude_none=True
+            ):
+                review_status = "issues"
             directory.mkdir(parents=True, exist_ok=True)
             destination = Path(tempfile.mkdtemp(prefix=arguments.name + "-", dir=directory))
             copied = []
+            delivered_primary = None
             for index, source in enumerate(files):
                 target = destination / source.name
                 suffix = index
@@ -127,15 +216,40 @@ class GeoDeliverTool(BaseTool):
                     suffix += 1
                 shutil.copy2(source, target)
                 copied.append(str(target))
+                if source == primary:
+                    delivered_primary = str(target)
             for source, relative in project_files:
                 target = destination / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 copied.append(str(target))
+            if delivered_primary and hashlib.sha256(
+                Path(delivered_primary).read_bytes()
+            ).hexdigest() != digest:
+                raise ValueError(
+                    "Primary map changed while being delivered; retry from one snapshot."
+                )
+            if project_files:
+                copied_preview = destination / "project" / project.preview
+                if hashlib.sha256(copied_preview.read_bytes()).hexdigest() != project_digest:
+                    raise ValueError("Project preview changed while being delivered.")
+                if delivered_primary is None:
+                    delivered_primary = str(copied_preview)
             payload = {
                 "delivery_dir": str(destination),
                 "files": copied,
                 "qgis_project": str(destination / "project" / "map.qgs") if project_files else None,
+                "primary_map": delivered_primary,
+                "primary_map_sha256": digest,
+                "project_preview_sha256": project_digest,
+                "quality_status": "passed" if review_status == "passed" else "draft",
+                "review_status": review_status,
+                "review_summary": review.summary if review else (
+                    "No visual review verifies the delivered image SHA256."
+                ),
+                "remaining_issues": (
+                    [issue.model_dump() for issue in review.issues] if review else []
+                ),
             }
             manifest = destination / "delivery.json"
             manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

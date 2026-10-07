@@ -17,6 +17,12 @@ Importing this package is headless-safe: the Agg backend is forced before
 
 from __future__ import annotations
 
+from geoharness.cartography.layout import (
+    create_map_figure,
+    inspect_figure_layout,
+    place_point_labels,
+    save_map_figure,
+)
 from geoharness.cartography.renderer import (
     render_interactive,
     render_layers,
@@ -25,6 +31,10 @@ from geoharness.cartography.renderer import (
 )
 
 __all__ = [
+    "create_map_figure",
+    "inspect_figure_layout",
+    "place_point_labels",
+    "save_map_figure",
     "render_interactive",
     "render_layers",
     "render_map",

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 from openharness.api.client import ApiMessageCompleteEvent
@@ -11,6 +12,7 @@ from openharness.tools.base import ToolExecutionContext
 from PIL import Image
 
 from geoharness.cartography.workflow import (
+    refund_map_render,
     reserve_map_render,
     reserve_python_render,
     reset_map_workflow,
@@ -100,6 +102,89 @@ def test_request_reset_preserves_shared_dict_and_starts_new_budget():
     assert reserve_map_render("fire", shallow_copy, config) is None
 
 
+def test_failed_render_refund_preserves_the_next_valid_attempt():
+    metadata = {}
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
+    assert reserve_map_render("fire", metadata, config) is None
+    assert refund_map_render("fire", metadata)
+    assert not refund_map_render("fire", metadata)
+    assert reserve_map_render("fire", metadata, config) is None
+    assert reserve_map_render("fire", metadata, config) is not None
+
+
+@pytest.mark.asyncio
+async def test_rendering_and_analysis_time_between_reviews_do_not_expire_review_budget(tmp_path):
+    image = tmp_path / "map.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    metadata = {"map_workflow_state": {"seconds": 1, "started_at": 0}}
+    reviewer = Reviewer()
+    review, flags = await review_with_budget(
+        image, config=GeoConfig(), task="Check", evidence={}, metadata=metadata, client=reviewer,
+    )
+    assert review.status == "unverified"
+    assert not flags["review_budget_exhausted"]
+    assert len(flags["image_sha256"]) == 64
+    assert reviewer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_provider_setting_change_can_recheck_a_cached_unverified_image(tmp_path):
+    image = tmp_path / "map.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    metadata = {}
+    reviewer = Reviewer()
+    config = GeoConfig()
+    results = []
+    for current in (
+        config, config, replace(config, map_review=MapReviewConfig(
+            request_extra_body={"thinking": {"type": "disabled"}},
+        )),
+    ):
+        results.append(await review_with_budget(
+            image, config=current, task="Check", evidence={}, metadata=metadata, client=reviewer,
+        ))
+    assert reviewer.calls == 2
+    assert [flags["review_cached"] for _, flags in results] == [False, True, False]
+    assert len({flags["image_sha256"] for _, flags in results}) == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_distinct_images_reserve_and_release_only_available_review_seconds(
+    tmp_path, monkeypatch,
+):
+    from geoharness.cartography import workflow
+    from geoharness.cartography.quality import MapReview
+
+    paths = [tmp_path / f"map-{index}.png" for index in range(2)]
+    for path, color in zip(paths, ("white", "black")):
+        Image.new("RGB", (32, 32), color).save(path)
+    metadata = {}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    timeouts = []
+
+    async def blocking_review(path, *, config, **kwargs):
+        timeouts.append(config.map_review.timeout_seconds)
+        if len(timeouts) == 2:
+            entered.set()
+        await release.wait()
+        return MapReview(status="unverified", summary="Test review")
+
+    monkeypatch.setattr(workflow, "review_map", blocking_review)
+    tasks = [asyncio.create_task(review_with_budget(
+        path, config=GeoConfig(), task="Check", evidence={}, metadata=metadata,
+    )) for path in paths]
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert sorted(timeouts) == [30, 90]
+        assert metadata["map_workflow_state"]["reserved_seconds"] == 120
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+    assert metadata["map_workflow_state"]["reserved_seconds"] == 0
+    assert metadata["map_workflow_state"]["seconds"] < 1
+
+
 @pytest.mark.asyncio
 async def test_review_time_budget_stops_new_images_without_calling_provider(tmp_path):
     image = tmp_path / "map.png"
@@ -125,6 +210,8 @@ async def test_review_time_budget_stops_new_images_without_calling_provider(tmp_
         "geoharness.cartography.render_map(data, output_path='map.png')",
         "from geoharness import cartography as cart; "
         "cart.render_layers(data, output_path='map.png')",
+        "from geoharness.cartography import save_map_figure as save; save(fig, 'map.png')",
+        "import geoharness.cartography as cart; cart.save_map_figure(fig, 'map.png')",
     ],
 )
 def test_imported_drawing_aliases_share_python_version_budget(code):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import geopandas as gpd
 import numpy as np
@@ -52,6 +53,45 @@ FIX = {
 }
 
 
+@pytest.mark.asyncio
+async def test_known_layout_collision_blocks_visual_call_before_repair(tmp_path):
+    from geoharness.cartography.layout import create_map_figure, save_map_figure
+
+    reviewer = Reviewer([PASS])
+    page = create_map_figure(MapLayout(), title="Risk map", detail=True)
+    page.detail.set_position(page.main.get_position())
+    image = tmp_path / "map.png"
+    save_map_figure(page, image)
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(image), task="Inspect overlaps", map_id="risk",
+    ), context(tmp_path, reviewer))
+    assert result.metadata["layout_status"] == "issues"
+    assert result.metadata["review_status"] == "issues"
+    assert reviewer.requests == []
+    report = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
+    assert report["image_sha256"]
+    assert report["visual_review_status"] == "unverified"
+    assert any(i["location"] == "panel_overlaps" for i in report["issues"])
+
+
+@pytest.mark.asyncio
+async def test_stale_layout_report_cannot_prove_a_different_image(tmp_path):
+    from PIL import Image
+
+    reviewer = Reviewer([PASS])
+    image = tmp_path / "map.png"
+    Image.new("RGB", (20, 20), "white").save(image)
+    image.with_suffix(".layout.json").write_text(json.dumps({
+        "scope": "layout_geometry", "image_sha256": "0" * 64,
+        "status": "passed", "panel_overlaps": [],
+    }), encoding="utf-8")
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(image), task="Inspect", map_id="risk",
+    ), context(tmp_path, reviewer))
+    assert result.metadata["layout_status"] == "unverified"
+    assert len(reviewer.requests) == 1
+
+
 def data() -> str:
     return gpd.GeoDataFrame(
         {"value": [1, 2]}, geometry=[Point(114, 30), Point(114.1, 30.1)], crs=4326,
@@ -63,6 +103,20 @@ def context(tmp_path, reviewer=None, *, repairs=2):
         "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=repairs)),
         **({"map_review_client": reviewer} if reviewer else {}),
     })
+
+
+@pytest.mark.asyncio
+async def test_style_patch_without_a_concrete_issue_does_not_overturn_visual_pass(tmp_path):
+    from PIL import Image
+
+    image = tmp_path / "map.png"
+    Image.new("RGB", (20, 20), "white").save(image)
+    response = {**PASS, "layout_patch": {"legend_font_size": 13}}
+    review = await review_map(image, config=GeoConfig(), task="Inspect", evidence={},
+                              client=Reviewer([response]))
+    assert review.status == "passed"
+    assert review.layout_patch.model_dump(exclude_none=True) == {}
+    assert review.diagnostics["ignored_layout_patch"] == {"legend_font_size": 13}
 
 
 @pytest.mark.asyncio
@@ -138,6 +192,87 @@ async def test_exhausted_provider_token_budget_has_actionable_unverified_status(
                               client=ExhaustedReviewer())
     assert result.status == "unverified"
     assert "max_tokens" in result.summary
+    assert result.diagnostics["finish_reason"] == "length"
+    assert result.diagnostics["duration_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "finish_reason, expected", [("tool_calls", "passed"), ("length", "unverified")],
+)
+@pytest.mark.parametrize("options", [{}, {"thinking": {"type": "disabled"}}])
+async def test_owned_reviewer_passes_provider_options_and_records_transport_evidence(
+    tmp_path, monkeypatch, finish_reason, expected, options,
+):
+    from PIL import Image
+
+    from geoharness.cartography import quality
+
+    requests = []
+    sdk_options = []
+    closed = []
+
+    async def create(**params):
+        requests.append(params)
+        return SimpleNamespace(
+            model="provider-returned-model",
+            usage=SimpleNamespace(
+                prompt_tokens=80, completion_tokens=42, total_tokens=122,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=17),
+            ),
+            choices=[SimpleNamespace(
+                finish_reason=finish_reason,
+                message=SimpleNamespace(content=None, tool_calls=[SimpleNamespace(
+                    function=SimpleNamespace(name="record_map_review", arguments=json.dumps(PASS)),
+                )]),
+            )],
+        )
+
+    class Transport:
+        chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+        def with_options(self, **options):
+            sdk_options.append(options)
+            return self
+
+        async def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(quality, "OpenAICompatibleClient", lambda **kwargs: SimpleNamespace(
+        _client=Transport(),
+    ))
+    path = tmp_path / "map.png"
+    Image.new("RGB", (10, 10)).save(path)
+    config = GeoConfig(
+        model="configured-main-model", api_key="test-only",
+        map_review=MapReviewConfig(request_extra_body=options),
+    )
+    result = await review_map(path, config=config, task="Check", evidence={})
+    assert result.status == expected
+    assert requests[0]["model"] == config.model
+    assert requests[0]["stream"] is False
+    if options:
+        assert requests[0]["extra_body"] == options
+    else:
+        assert "extra_body" not in requests[0]
+    assert requests[0]["tool_choice"] == "required"
+    assert "diagnostics" not in requests[0]["tools"][0]["function"]["parameters"]["properties"]
+    assert sdk_options == [{"max_retries": 0}]
+    assert closed == [True]
+    assert result.diagnostics == {
+        "requested_model": config.model, "response_model": "provider-returned-model",
+        "input_tokens": 80, "output_tokens": 42, "total_tokens": 122,
+        "reasoning_tokens": 17, "finish_reason": finish_reason,
+        "duration_seconds": result.diagnostics["duration_seconds"],
+        **({"raw_review_status": "passed"} if finish_reason != "length" else {}),
+    }
+    if finish_reason == "length":
+        assert "unverified" in result.summary
+        assert "thinking" in result.summary
+
+
+def test_review_options_inherit_provider_defaults_unless_explicitly_configured():
+    assert MapReviewConfig().request_extra_body == {}
 
 
 @pytest.mark.asyncio

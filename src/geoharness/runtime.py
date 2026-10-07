@@ -135,12 +135,10 @@ async def build_geo_runtime(
             # are invisible at runtime even though they are bundled — which
             # made the model burn turns guessing skill names in the TUI.
             "extra_skill_dirs": all_skill_dirs,
-            # Dedicated review calls bypass text-only tool result serialization.
-            # Provider/model overrides are resolved by the review service itself.
-            **({"map_review_client": api_client} if config.api_key and "${" not in config.api_key
-               and not (
-                config.map_review.model or config.map_review.base_url or config.map_review.api_key
-            ) else {}),
+            # Visual review always owns its transport, even when it inherits the
+            # main provider/model: extra_body, forced review output and disabled
+            # SDK retries must not be lost through the agent's streaming client.
+            # Tests may still explicitly inject a review client at the tool seam.
         },
     )
 

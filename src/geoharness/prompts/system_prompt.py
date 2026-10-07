@@ -159,6 +159,8 @@ _TOOL_CATALOG = """\
 - **geo_deliver**: Copy selected files and a project_dir into workspace exports.
   - Use the returned delivery_dir and qgis_project paths in the final answer.
     Include map, editable project, analysis outputs, report and original Python script.
+    Supply primary_map and its review_path. A project must reference that exact image.
+    Respect quality_status=draft when visual verification is unavailable or issues remain.
 - **geo_db_data**: Load/inspect data from the PostGIS database (tables)
   - Actions: list, inspect, load
 - **geo_vector_data**: Load/inspect local vector files (Shapefile/GeoJSON/GPKG/CSV)
@@ -232,12 +234,29 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"image reviews and {config.map_review.total_timeout_seconds:g} seconds per user "
         f"request; each map allows {1 + config.map_review.max_repairs} versions.\n"
         "Prepare title, legend, layers, extent and readable labels before the first render. "
-        "Prefer native multi-layer cartography when it can express the requested map. "
+        "Use native cartography only when it preserves every required symbol class, "
+        "background and annotation. Do not replace a rich custom map with a simpler "
+        "native map to obtain an editable project. For custom Python maps use "
+        "geoharness.cartography.layout.create_map_figure, place_point_labels and "
+        "save_map_figure: main map, detail, legend and footer occupy separate panels. "
+        "Set final limits/aspect before measured label placement; never give all names "
+        "the same offset or put the detail panel over the main map. Provide a numbered "
+        "table for omitted labels. Inspect the saved layout report before visual review. "
         "Use one stable map_id across filenames, formats, Python and native tools. "
         "Fix a consolidated list of concrete errors/warnings; aesthetic preferences and "
-        "info-only suggestions do not justify another version. After passed, unverified "
-        "or budget exhaustion, deliver the latest map and editable project immediately "
-        "with remaining issues. A failed review is not a request to retry. "
+        "info-only suggestions do not justify another version. After passed stop refining. "
+        "On unverified or budget exhaustion stop repeated model calls, retain remaining "
+        "issues and label the delivery an unreviewed draft. A failed visual service is "
+        "not evidence that the map is correct. Known measured layout defects still "
+        "need a consolidated presentation repair if a render version remains; do not "
+        "change data or analysis to fix them. A failed review is not a request to retry. "
+        "Pixel/color counts (including colors inside a legend) and non-white ratios "
+        "cannot prove layer visibility, feature counts, correct colors or absence of "
+        "overlap. Never describe them as a substitute for visual review. Report "
+        "programmatic data checks, layout checks and visual model status separately. "
+        "For a Python map, create the project using action=project with that existing "
+        "output_path plus its actual sources and per-layer field/categories/colors; "
+        "fix missing arguments instead of rendering another map or changing map_id. "
         "Report passed, issues or unverified truthfully. Never claim to have seen a map "
         "from its path alone. Use geo_deliver for final artifacts in the current "
         "workspace; Python scripts only write RUN_DIR. "

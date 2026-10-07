@@ -63,7 +63,11 @@ Python 每次保留 analysis.py、stdout.txt、stderr.txt、manifest.json 和产
 
 geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，最多两轮，可配置为 0 或 1 轮。不会因为 info 提示或单纯审美建议再画一版。修正前地图、PNG 预览和 report.json 位于成图旁独立的 `.review-*` 目录；路径通过工具结果返回，不覆盖已有旁侧文件。
 
-原生工具、Python 制图及独立审查共享一次用户请求的预算。每张地图最多初版加两轮修正；所有地图合计默认最多4次模型审查、120秒审查时间窗口。各版本保持同一 map_id，改文件名不会重新获得相同地图的版本预算。相同图片的检查结果会缓存，服务失败也不会对未改变的图片反复重试。检查通过、无法验证或预算耗尽后交付最新版本并说明剩余问题；用户明确提出新修改要求后开启新预算。该时间预算针对图片审查，不包括空间分析和实际渲染耗时。
+原生工具、Python 制图及独立审查共享一次用户请求的预算。每张地图最多初版加两轮成功修正；执行失败会释放该次成图预留。所有地图合计默认最多4次模型审查、120秒实际调用耗时；不计空间分析、渲染、生成工程和写报告的间隔，并发调用预留可用时间，完成后按实际耗时结算。各版本保持同一 map_id，改文件名不会重新获得相同地图的版本预算。相同图片和审图配置的结果会缓存，失败也不会盲目重试；明确修正模型/token/provider参数后允许再次检查。用户提出新的修改要求后开启新预算。
+
+有放大图和密集重点点时，Python 可使用 `geoharness.cartography.layout` 的 create_map_figure、place_point_labels、save_map_figure。它预留主图、放大图、图例、说明的独立区域，按渲染后的文字边界避让；放不下的名字保留省略记录，使用编号对应名单。保存 `.layout.json` 记录分区相交、标签相交/裁切和图例/说明越界，与实际图片 SHA256 绑定。geo_map_review 先检查对应报告；明确的布局缺陷先修正，再调用视觉服务。
+
+数据核验、布局几何检查与视觉审查分别报告。颜色检出可能来自图例，非白像素比例也不能证明图层、分级或位置正确。视觉服务失败时交付标为 **draft**（未完成视觉审查的草稿），说明实际原因和剩余问题；不得用像素计数替代通过结论。已知布局缺陷仍可在剩余成图版本内统一修复，停止的是无效视觉重试。
 
 不会因图片建议自动更换数据、统计方法、字段或影响阈值。视觉检查不能证明数值正确，必须同时核验分析结果。
 
@@ -75,17 +79,19 @@ geo_cartography 显式读取成图，结合任务、预期图层、参数和源�
 
 PNG 是首期推荐输出。PDF/SVG 检查同参数 PNG 预览，导出文件本身的排版/字体需另行核验。HTML 没有实际网页截图时仍标为 unverified。Python 自定义地图用 geo_map_review，由 Agent 按问题修改呈现代码、重绘、再检查。
 
-map_review 可单独配置 model、base_url、api_key；留空时复用主配置。示例保持主 Agent 为 `cbcn/deepseek-v4.1-flash(max)`，图片审查使用同一服务的 `cbcn/deepseek-v4.1-flash`，单次45秒、4096 token，减少长思考造成的重复等待。本机一次合成图片检查约7秒返回有效结果，这不代表每张业务地图的耗时。推理模型的 token 预算包含思考消耗；预算耗尽时报告 unverified 和原因，不能当作检查通过。
+map_review 可单独配置 model、base_url、api_key；留空时复用主配置。主 Agent 保持 `cbcn/deepseek-v4.1-flash(max)`。本机 9Router 网关使用已实测的独立审图模型 `cbcn/deepseek-v4.1-flash(none)`，4096 token、45秒单次上限；这张业务地图一次返回完整审查约9秒、reasoning_tokens=0。仅传 thinking.type=disabled 或 reasoning_effort=low 时，网关仍把全部4096/8192 token用于推理，无完整结论；不能据此声称关闭思考。`request_extra_body` 用于服务支持的专用参数，默认空对象，其他服务按其实际能力配置。report.json 的 diagnostics 保留 response_model、finish_reason、reasoning_tokens、output_tokens 和 duration_seconds。预算耗尽时报告 unverified，即使附有部分 JSON 也不接受通过。
 
 ## 地图交付与手动修改
 
 默认地图和最终交付保存到当前工作目录的 `exports/`。geo_deliver 把明确选定的地图、结果数据、检查报告、脚本和工程复制到独立交付子目录，返回实际路径并保留之前的交付。delivery.outputs_dir 必须是工作目录的子目录；Python 脚本不负责跨目录复制，输出仍限于 RUN_DIR。
 
-原生制图同时生成可移植工程；Python 自定义地图可用 geo_cartography 的 project 动作，以现有成图和实际图层创建工程，不重新绘图。工程包含：
+原生制图同时生成可移植工程；Python 自定义地图可用 geo_cartography 的 project 动作，以已存在的原成图和实际图层创建工程，不重新绘图。分类层明确 column（兼容 field_name）、categories 和 colors，原生绘图与 QGIS 使用对应的分类颜色；map_extent 锁定主图范围。不能为创建工程而另画简化图或丢弃分类字段。工程包含：
 
 - `map.qgs`：QGIS 工程，真实图层、符号样式和可编辑打印布局。
 - `data/`：矢量 GeoPackage 和栅格 GeoTIFF 数据副本，使用相对路径，不依赖原始文件位置。
 - `project.json`、`redraw.py`：原生绘图参数及重绘入口；保留原始预览和使用说明。
+
+geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付时核对主图、工程 preview 与记录的 SHA256；不同地图或已替换的预览会拒绝交付。quality_status 只有在对应图片的有效审查为 passed 且没有错误/警告时才为 passed，其余为 draft。工程生成本身不代表质量验收。
 
 在 QGIS 3.x 打开 map.qgs；双击图层修改颜色、透明度、分级等，通过“项目 → 布局”打开 GeoHarness Map，修改标题、图例、地图框、比例尺后导出 PNG/PDF。QGIS 与 matplotlib 使用不同渲染引擎，基础布局可编辑，但不保证与原图逐像素一致；Python 的自定义注记可能需要参照预览和原始脚本补充。已使用本机 QGIS 3.44.7 实际读取工程并导出布局验证。
 

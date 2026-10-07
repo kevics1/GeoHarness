@@ -67,6 +67,10 @@ class MapReviewConfig(BaseModel):
     model: str = ""
     api_key: str = ""
     base_url: str = ""
+    request_extra_body: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional provider request extensions; empty inherits provider defaults.",
+    )
     max_repairs: int = Field(default=2, ge=0, le=2)
     max_reviews_per_request: int = Field(default=4, ge=0, le=20)
     total_timeout_seconds: float = Field(default=120, gt=0, le=900)

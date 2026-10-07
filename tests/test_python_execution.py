@@ -742,3 +742,30 @@ def test_names_cannot_escape_run_directory(name: str):
 def test_empty_tool_arguments_explain_no_script_was_executed():
     with pytest.raises(ValidationError, match="no script was executed"):
         GeoPythonInput.model_validate({})
+
+
+@pytest.mark.asyncio
+async def test_failed_python_render_does_not_block_the_first_successful_map(tmp_path, monkeypatch):
+    from geoharness.config.settings import GeoConfig, MapReviewConfig
+
+    replies = iter([
+        {"exit_code": 1, "timed_out": False, "stderr": "RuntimeError: setup failed"},
+        {"exit_code": 0, "timed_out": False, "stderr": ""},
+    ])
+
+    async def execute(**kwargs):
+        return next(replies)
+
+    monkeypatch.setattr("geoharness.tools.geo_python.execute_python", execute)
+    ctx = ToolExecutionContext(cwd=tmp_path, metadata={
+        "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=0)),
+    })
+    tool = GeoPythonTool()
+    args = GeoPythonInput(code="plt.savefig('map.png')", name="map", map_id="risk")
+    failure = await tool.execute(args, ctx)
+    assert failure.is_error
+    assert ctx.metadata["map_workflow_state"]["maps"]["risk"]["renders"] == 0
+    success = await tool.execute(args, ctx)
+    assert not success.is_error
+    assert success.metadata["status"] == "succeeded"
+    assert ctx.metadata["map_workflow_state"]["maps"]["risk"]["renders"] == 1

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field, model_validator
 
-from geoharness.cartography.workflow import reserve_python_render
+from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_python_render
 from geoharness.config.settings import CartographyConfig
 from geoharness.execution import execute_python
 
@@ -72,6 +73,9 @@ class GeoPythonTool(BaseTool):
                 output=f"Error: timeout exceeds configured maximum ({execution.timeout_seconds}s).",
                 is_error=True,
             )
+        identity = arguments.map_id or map_identity(arguments.name)
+        state = context.metadata.get("map_workflow_state", {})
+        previous_renders = state.get("maps", {}).get(identity, {}).get("renders", 0)
         budget_stop = reserve_python_render(
             code=arguments.code,
             name=arguments.name,
@@ -85,6 +89,9 @@ class GeoPythonTool(BaseTool):
                 is_error=False,
                 metadata={"render_budget_exhausted": True},
             )
+        reserved = context.metadata.get("map_workflow_state", {}).get("maps", {}).get(
+            identity, {}
+        ).get("renders", 0) > previous_renders
         file_dir = getattr(getattr(config, "data", None), "file_dir", "")
         directories = []
         for section in ("analysis", "cartography", "execution"):
@@ -106,7 +113,13 @@ class GeoPythonTool(BaseTool):
                 read_dirs=read_dirs,
             )
         except (OSError, ValueError) as exc:
+            if reserved:
+                refund_map_render(identity, context.metadata)
             return ToolResult(output=f"Error: Python analysis could not run: {exc}", is_error=True)
+        except asyncio.CancelledError:
+            if reserved:
+                refund_map_render(identity, context.metadata)
+            raise
         status = (
             "timed_out"
             if result["timed_out"]
@@ -114,6 +127,8 @@ class GeoPythonTool(BaseTool):
         )
         result = {"status": status, **result}
         if status != "succeeded":
+            if reserved:
+                refund_map_render(identity, context.metadata)
             lines = result["stderr"].strip().splitlines()
             result["error_summary"] = lines[-1][:500] if lines else status
         return ToolResult(

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
-from geoharness.cartography.quality import save_review
+from geoharness.cartography.quality import MapIssue, MapReview, save_review
 from geoharness.cartography.workflow import review_with_budget
 
 
@@ -54,16 +56,57 @@ class GeoMapReviewTool(BaseTool):
             return ToolResult(
                 output="Error: an existing PNG/JPEG/WebP map image is required.", is_error=True
             )
-        result, budget = await review_with_budget(
-            path,
-            config=config,
-            task=arguments.task,
-            evidence=arguments.evidence,
-            metadata=context.metadata,
-            map_id=arguments.map_id,
-            client=context.metadata.get("map_review_client"),
-        )
-        report = save_review(path, {"image_path": str(path), **result.model_dump(), **budget})
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        evidence = dict(arguments.evidence)
+        layout_status = "unverified"
+        layout_issues = []
+        layout_path = path.with_suffix(".layout.json")
+        if layout_path.is_file():
+            try:
+                layout = json.loads(layout_path.read_text(encoding="utf-8"))
+                if (
+                    layout.get("image_sha256") == digest
+                    and layout.get("scope") == "layout_geometry"
+                ):
+                    keys = (
+                        "panel_overlaps", "label_overlaps", "clipped_labels", "overflow_text",
+                        "figure_text_overlaps", "clipped_figure_text", "text_panel_overlaps",
+                        "panels_outside_canvas",
+                    )
+                    for key in keys:
+                        if layout.get(key):
+                            layout_issues.append(MapIssue(
+                                severity="error", location=key,
+                                description=(
+                                    f"Measured layout defect: {key}, count={len(layout[key])}."
+                                ),
+                            ))
+                    layout_status = "issues" if layout_issues else "passed"
+                    evidence["measured_layout"] = {
+                        "scope": "layout_geometry", "status": layout_status,
+                        **{key: layout.get(key, []) for key in keys},
+                    }
+            except (OSError, ValueError, TypeError, AttributeError):
+                layout_status = "unverified"
+        if layout_issues:
+            # Fix known collisions first; avoid paying for an image already known to fail.
+            result = MapReview(
+                status="issues", summary="Layout geometry has collisions or clipped content; "
+                "repair these before requesting visual review.", issues=layout_issues,
+            )
+            budget = {"review_cached": False, "review_budget_exhausted": False,
+                      "image_sha256": digest, "visual_review_status": "unverified"}
+            context.metadata.setdefault("map_workflow_state", {}).setdefault(
+                "cache", {}
+            )[digest] = result.model_dump()
+        else:
+            result, budget = await review_with_budget(
+                path, config=config, task=arguments.task, evidence=evidence,
+                metadata=context.metadata, map_id=arguments.map_id,
+                client=context.metadata.get("map_review_client"),
+            )
+        report = save_review(path, {"image_path": str(path), **result.model_dump(), **budget,
+                                    "layout_status": layout_status})
         return ToolResult(
             output=(
                 result.model_dump_json(indent=2)
@@ -74,7 +117,7 @@ class GeoMapReviewTool(BaseTool):
                     else ""
                 )
                 + (
-                    "STOP: deliver current outputs and editable project.\n"
+                    "STOP visual retries: deliver an unreviewed draft with remaining issues.\n"
                     if budget["review_budget_exhausted"]
                     else ""
                 )
@@ -83,6 +126,7 @@ class GeoMapReviewTool(BaseTool):
                 "review_status": result.status,
                 "review_path": str(report),
                 "image_path": str(path),
+                "layout_status": layout_status,
                 **budget,
             },
         )

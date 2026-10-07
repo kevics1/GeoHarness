@@ -26,9 +26,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
-from geoharness.cartography.workflow import reserve_map_render, review_with_budget
+from geoharness.cartography.workflow import (
+    refund_map_render,
+    reserve_map_render,
+    review_with_budget,
+)
 from geoharness.config.settings import CartographyConfig, MapLayout
 
 logger = logging.getLogger(__name__)
@@ -121,7 +125,13 @@ class GeoCartographyInput(BaseModel):
             '{"source_type":"file","source_name":"当前火场范围","color":"#d7301f"}]. '
             "Each spec: source_type (file/postgis/admin_kg) + source_name or "
             "file_path, optional label (legend text, defaults to source_name), "
-            "color, and optional geojson inline data. Layers draw in array "
+            "color, and optional geojson inline data. For per-feature styles use column "
+            "(or field_name alias), render_method (categorized/graduated/flow), color_scheme, "
+            "n_classes; categorized styles accept categories (ordered values or "
+            "{value,label,color} objects) and colors (matching list or value-to-color object). "
+            "These options may also be nested in style; unsupported styles are errors. "
+            "For example field_name=RiskTier, categories=[High,Low], colors=[#d73027,#1a9850]. "
+            "Layers draw in array "
             "order; output shows ONE combined map with a layer legend. Use "
             "this instead of calling export once per layer."
         ),
@@ -148,6 +158,17 @@ class GeoCartographyInput(BaseModel):
     layout: MapLayout | None = Field(
         default=None,
         description="Optional presentation settings; visual review may adjust these.",
+    )
+    map_extent: list[float] | None = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+        validation_alias=AliasChoices("map_extent", "project_extent"),
+        description=(
+            "Actual map-frame xmin,ymin,xmax,ymax in project/output CRS. "
+            "Locks multilayer rendering or action=project's editable map frame. "
+            "Use the existing map's bounds when context layers extend beyond its frame."
+        ),
     )
 
 
@@ -325,6 +346,9 @@ class GeoCartographyTool(BaseTool):
         for i, item in enumerate(parsed):
             if not isinstance(item, dict):
                 raise ValueError(f"layers[{i}] must be an object with source_type/source_name.")
+            from geoharness.cartography.renderer import _layer_style_options
+
+            _layer_style_options(item)
             out.append(item)
         return out
 
@@ -449,6 +473,7 @@ class GeoCartographyTool(BaseTool):
     ) -> ToolResult:
         """Resolve every layer spec and compose ONE multi-layer map."""
         from geoharness.cartography import render_layers
+        from geoharness.cartography.renderer import _layer_style_options
         from geoharness.cartography.sources import resolve_geodataframe
 
         layers: list[dict[str, Any]] = []
@@ -481,7 +506,7 @@ class GeoCartographyTool(BaseTool):
                 {
                     "gdf": gdf,
                     "label": str(spec.get("label") or name or f"layer_{i + 1}"),
-                    "color": str(spec.get("color", "") or ""),
+                    **_layer_style_options(spec),
                 }
             )
 
@@ -495,6 +520,7 @@ class GeoCartographyTool(BaseTool):
                 basemap_raster=str(args.basemap_raster or ""),
                 layout=args.layout,
                 raster_cache=source_cache,
+                extent=args.map_extent,
             )
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
@@ -687,11 +713,16 @@ class GeoCartographyTool(BaseTool):
         stopped = reserve_map_render(identity, context.metadata, config)
         if stopped:
             return ToolResult(output=stopped, metadata={"render_budget_exhausted": True})
-        result = await self._run_off_loop(
-            lambda: self._render_blocking(args, rule, outputs_dir, context),
-            what="map rendering",
-        )
+        try:
+            result = await self._run_off_loop(
+                lambda: self._render_blocking(args, rule, outputs_dir, context),
+                what="map rendering",
+            )
+        except BaseException:
+            refund_map_render(identity, context.metadata)
+            raise
         if result.is_error or not result.metadata.get("output_path"):
+            refund_map_render(identity, context.metadata)
             return result
         checked = await self._inspect_and_repair(args, rule, outputs_dir, context, result)
         return await self._attach_project(args, rule, context, checked)
@@ -794,16 +825,26 @@ class GeoCartographyTool(BaseTool):
             if stopped:
                 break
             snapshot = artifacts / f"attempt-{attempt}{written.suffix}"
-            await asyncio.to_thread(shutil.copyfile, written, snapshot)
-            history[-1]["map_snapshot"] = str(snapshot)
-            current = current.model_copy(update={"layout": patched})
-            next_result = await self._run_off_loop(
-                lambda: self._render_blocking(current, rule, outputs_dir, context),
-                what="map repair rendering",
-            )
-            if next_result.is_error:
+            previous = current
+            try:
+                await asyncio.to_thread(shutil.copyfile, written, snapshot)
+                history[-1]["map_snapshot"] = str(snapshot)
+                current = current.model_copy(update={"layout": patched})
+                next_result = await self._run_off_loop(
+                    lambda: self._render_blocking(current, rule, outputs_dir, context),
+                    what="map repair rendering",
+                )
+            except BaseException:
+                refund_map_render(args.map_id, context.metadata)
+                raise
+            if next_result.is_error or not next_result.metadata.get("output_path"):
+                refund_map_render(args.map_id, context.metadata)
                 await asyncio.to_thread(shutil.copyfile, snapshot, written)
-                checked = MapReview(status="unverified", summary="Map repair could not render.")
+                current = previous
+                checked = MapReview(
+                    status="unverified", summary="Map repair could not render.",
+                    issues=checked.issues,
+                )
                 history.append({"attempt": attempt + 1, **checked.model_dump()})
                 break
             result = next_result
@@ -811,8 +852,7 @@ class GeoCartographyTool(BaseTool):
             "output_path": str(written),
             "preview_path": str(preview) if preview else None,
             **budget,
-            "status": checked.status,
-            "summary": checked.summary,
+            **checked.model_dump(),
             "repair_count": max(0, len(history) - 1),
             "history": history,
             "evidence": evidence,
@@ -850,6 +890,7 @@ class GeoCartographyTool(BaseTool):
         result: ToolResult,
     ) -> ToolResult:
         from geoharness.cartography.project import export_map_project
+        from geoharness.cartography.renderer import _layer_style_options
         from geoharness.cartography.sources import resolve_geodataframe
 
         written = Path(result.metadata["output_path"])
@@ -898,11 +939,12 @@ class GeoCartographyTool(BaseTool):
                     {
                         "gdf": gdf,
                         "label": str(spec.get("label") or args.layer_name or f"layer{index}"),
-                        "color": str(spec.get("color") or ""),
-                        "column": args.field_name if not specs else "",
-                        "render_method": rule.get("render_method", "categorized"),
-                        "color_scheme": rule.get("color_scheme", "Set1"),
-                        "n_classes": rule.get("n_classes", 5),
+                        **(_layer_style_options(spec) if specs else {
+                            "column": args.field_name,
+                            "render_method": rule.get("render_method", "categorized"),
+                            "color_scheme": rule.get("color_scheme", "Set1"),
+                            "n_classes": rule.get("n_classes", 5),
+                        }),
                     }
                 )
             kwargs = {
@@ -943,6 +985,7 @@ class GeoCartographyTool(BaseTool):
                 layout=MapLayout.model_validate(
                     result.metadata.get("final_layout") or (args.layout or MapLayout()).model_dump()
                 ),
+                extent=args.map_extent,
             )
 
         try:
@@ -1006,7 +1049,10 @@ class GeoCartographyTool(BaseTool):
             ),
             self._get_bridge_rule(args.analysis_type, rules),
             context,
-            ToolResult(output=f"Map retained: {path}", metadata={"output_path": str(path)}),
+            ToolResult(output=f"Map retained: {path}", metadata={
+                "output_path": str(path), "review_status": "unverified",
+                "quality_status": "draft",
+            }),
         )
 
     async def _export(

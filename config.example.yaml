@@ -26,12 +26,15 @@ execution:
   max_output_chars: 12000
 map_review:
   enabled: true
-  model: cbcn/deepseek-v4.1-flash
+  model: cbcn/deepseek-v4.1-flash(none)
   max_repairs: 2
   max_reviews_per_request: 4
   total_timeout_seconds: 120
   timeout_seconds: 45
   max_tokens: 4096
+  request_extra_body:
+    thinking:
+      type: disabled
   layout:
     legend_outside: true
 delivery:

@@ -67,3 +67,12 @@
 - 实际本地模型完整流程核验影响数2，地图/报告/QGIS工程/交付成功；该次4096token审查耗尽，正确报告unverified并停止，无伪报passed。非max模型的空图探测约7秒返回有效检查，不能保证业务图每次通过。
 - 用户既有两张PNG/PDF哈希完全保留，补充实际图层与原分类工程到 F:/Desktop/Project/GeoHarness/example/exports/20261007-补充交付-18310bde，含原脚本/manifest、分析报告、诊断、QGIS真实布局预览。详细Python注记和特殊符号可能需参照原图手动补充，已说明。
 - wheel核对新模块/工具/技能完整，已更新D:/Python312全局安装与用户YAML审查/交付配置，主模型仍为指定max，其他配置与凭证保留。example中geoh version、dry-run、实际run --print退出成功，无.openharness再创建。真实安装包init在隔离home验证输出为相对exports；用户原.env.example改动不纳入提交。
+
+## 追加：test业务地图质量回归
+- 读取test实际地图、Python脚本、QGIS预览及对应会话，确认固定文字偏移、放大图压盖、失败绘图耗预算、审查token耗尽和工程预览降级。探测9Router真实业务图，确认独立(none)配置才能在本机返回有效审图结论。
+- 加入独立分区与真实文字边界避让、布局报告先检、失败绘图返还、累计有效调用时间和缓存配置指纹；实际视觉请求独立配置且关闭内部重试。错误/警告才触发修正，不因无对应问题的纯样式patch否定passed。
+- 主图、工程预览和审查绑定SHA256；按真实分类字段/配色打包工程，锁定范围，恢复旧工程兼容；交付明确passed/draft，不以像素或工程创建代替质量证据。
+- 整合全量554 passed；独立审查指出分类图例缺省/兼容、布局标题边界、运行时审图配置旁路，全部修复。最终相关108 passed，ruff和diff检查通过；不将较早全量运行误记为最后小改后的全量结果。
+- 沿用原风险输出重绘，分区、标签和文字检查全部通过，无重点编号省略。QGIS 3.44.7读取10个有效图层并导出基础布局，主图与工程预览SHA一致。视觉模型成功返回约9秒，仍有需判断的意见，交付如实保留draft。
+- 新交付位于 F:/Desktop/Project/GeoHarness/example/test/exports/西昌地图布局修复-z2rkt69i；风险GeoJSON、CSV与附图字节保持不变。完整Python分区图有可移植redraw-layout.py及数据副本，实际在该交付目录重绘成功，布局再次通过。
+- 构建wheel并更新D:/Python312全局安装，保留主模型max及凭证，独立审图为none；test目录全局geoh version/dry-run成功，加载site-packages版本，未创建.openharness。用户原.env.example未纳入提交。
