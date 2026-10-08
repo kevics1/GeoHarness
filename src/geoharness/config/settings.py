@@ -32,6 +32,20 @@ class ExecutionConfig(BaseModel):
     max_output_chars: int = Field(default=12000, ge=100, le=1000000)
 
 
+class QgisConfig(BaseModel):
+    """An independently installed QGIS runtime; never import it into the agent process."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    enabled: bool = True
+    install_dir: str = ""
+    python_executable: str = ""
+    prefix_path: str = ""
+    outputs_dir: str = ".geoharness/qgis"
+    timeout_seconds: float = Field(default=180, gt=0, le=3600)
+    max_output_chars: int = Field(default=12000, ge=100, le=1000000)
+    max_search_results: int = Field(default=20, ge=1, le=100)
+
+
 class AgentConfig(BaseModel):
     """Completion budget for reasoning and complete tool arguments."""
 
@@ -171,6 +185,7 @@ class GeoConfig:
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    qgis: QgisConfig = field(default_factory=QgisConfig)
     map_review: MapReviewConfig = field(default_factory=MapReviewConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
@@ -378,6 +393,7 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         permissions=permissions,
         analysis=AnalysisConfig.model_validate(_expand_vars(raw.get("analysis") or {})),
         execution=ExecutionConfig.model_validate(_expand_vars(raw.get("execution") or {})),
+        qgis=QgisConfig.model_validate(_expand_vars(raw.get("qgis") or {})),
         map_review=MapReviewConfig.model_validate(_expand_vars(raw.get("map_review") or {})),
         agent=AgentConfig.model_validate(_expand_vars(raw.get("agent") or {})),
         delivery=DeliveryConfig.model_validate(_expand_vars(raw.get("delivery") or {})),

@@ -85,7 +85,7 @@ async def build_geo_runtime(
     logger.info("MCP servers: %s", list(config.mcp_servers.keys()))
 
     # 4. Build tool registry with whitelist
-    tool_registry = _build_tool_registry()
+    tool_registry = _build_tool_registry(config)
     logger.info("Tools registered: %d", len(tool_registry.list_tools()))
 
     # 5. Build permission checker
@@ -276,8 +276,8 @@ def _build_mcp_manager(config: GeoConfig) -> McpClientManager:
     return McpClientManager(server_configs=server_configs)
 
 
-def _build_tool_registry() -> ToolRegistry:
-    """Build the GeoHarness tool registry (8 native + 5 whitelisted).
+def _build_tool_registry(config: GeoConfig | None = None) -> ToolRegistry:
+    """Build the GeoHarness tool registry with configured QGIS tools.
 
     MCP tools are registered later by geoharness.mcp.connect.activate_mcp()
     once servers have connected — registration mutates this same registry
@@ -285,7 +285,7 @@ def _build_tool_registry() -> ToolRegistry:
     """
     from geoharness.tools import build_geo_tool_registry
 
-    return build_geo_tool_registry()
+    return build_geo_tool_registry(config=config)
 
 
 def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
@@ -311,6 +311,8 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
     ])
     if config.execution.enabled:
         perm_settings.allowed_tools.append("geo_python")
+    if config.qgis.enabled:
+        perm_settings.allowed_tools.extend(["geo_qgis", "geo_qgis_project"])
     return PermissionChecker(settings=perm_settings)
 
 

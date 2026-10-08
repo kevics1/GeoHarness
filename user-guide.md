@@ -39,6 +39,82 @@ wheel 包含全部内置技能及其参考文件，安装后运行无需保留�
 
 配置、日志、会话及插件/自动任务状态统一保存到 `~/.geoharness/`，不同工作目录的状态分开保存。启动不会再在工作目录创建 `.openharness`。工作目录的 `.geoharness` 保存分析和 Python 运行记录，是有实际用途的目录。
 
+## 使用本机 QGIS
+
+QGIS 集成复用独立安装的 PyQGIS 和 Processing，不需要打开 QGIS 桌面，也不会把
+QGIS 的 Qt/GDAL/PROJ 导入主 Agent 的 Python 环境。安装 QGIS 后可在任意数据目录运行：
+
+```powershell
+geoh qgis-doctor
+```
+
+该命令实际启动 QGIS，返回版本、提供者和算法数量；`geoh dry-run` 只验证工具组装。
+配置中 `qgis.enabled` 默认为 true，Windows 优先自动发现安装记录与常规安装目录。
+无法发现时，在全局 config.yaml 增加实际路径：
+
+```yaml
+qgis:
+  enabled: true
+  install_dir: '你的QGIS安装目录'
+  outputs_dir: .geoharness/qgis
+  timeout_seconds: 180
+```
+
+也可显式设置 `python_executable` 和 `prefix_path`；前者必须是原生 Python 可执行文件，
+不接受批处理或 shell 脚本。其他系统使用明确配置的可用 PyQGIS 环境。设 enabled=false
+会移除两个 QGIS 工具，现有 geo_analysis、geo_cartography 和 geo_python 仍可使用。
+
+`geo_qgis` 提供 doctor、search、help、run、model 五个动作。先搜索本机实际算法，再查
+完整参数、枚举选项和默认值，最后执行；search 的 execution_allowed/restriction 表示
+当前集成是否支持执行该算法，注册数量不代表所有算法均已业务验收。
+
+```json
+{"action":"search","query":"buffer","limit":5}
+{"action":"help","algorithm_id":"native:buffer"}
+```
+
+确认输入使用米制投影后，例如调用：
+
+```json
+{"action":"run","algorithm_id":"native:buffer","parameters":{"INPUT":"points.gpkg","DISTANCE":500,"OUTPUT":"buffer.gpkg"}}
+```
+
+这里 OUTPUT 相对本次新任务目录，返回 outputs 中的真实绝对路径，供下一步分析或
+制图使用。不同算法按自身 CRS/单位解释距离，不自动把经纬度中的500换成500米。
+`model` 接受本地 .model3 与 parameters：模型必须使用已批准的内置算法，文件通过
+模型参数传入，输出由运行器控制；表达式生成文件路径、脚本提供者、数据库写入与自由
+命令参数不在支持范围。缺少提供者、参数或不支持的输入会返回失败原因。
+
+当前 QGIS 接口支持本地数据文件，数据库仍使用既有 PostGIS 工具。每个 QGIS 任务
+单独启动进程并保存 request.json、result.json、manifest.json、stdout.txt、stderr.txt
+和实际产物，默认位于工作目录 `.geoharness/qgis/`。任务间使用持久文件，不能传递上一
+进程的内存图层。取消或超时会结束任务及其 native 子进程。运行器使用独立临时配置，
+不继承 API 凭证或个人 QGIS 插件设置；文件保护用于可信本地算法，不是 OS 安全沙箱。
+
+`geo_qgis_project` 提供 create、inspect、export。create 的 layers 是结构化数组，
+按从底到顶排列；矢量可指定分类字段、类别颜色和 label_field，栅格保留实际数据。
+
+```json
+{"action":"create","title":"分析结果","crs":"EPSG:32647","map_id":"analysis-map","layers":[{"file_path":"affected.gpkg","name":"受影响对象","style":{"color":"#d73027"},"label_field":"name"}]}
+```
+
+创建真实 QGIS 工程及基础打印布局，并从该布局导出 preview.png；output_format=pdf
+时同时导出 PDF。数据副本采用 GPKG/TIFF，工程使用相对引用，project.json 记录
+文件、样式、布局及预览摘要。基础布局包含标题、地图、可选图例和比例尺；放大图、
+复杂注记和质量决策升级属于后续完善范围，不宣称已有完整复杂布局自动生成能力。
+
+打开返回的 project_file，修改样式或打印布局并保存。然后用 inspect 查看工程，或用
+export(project_path=...,layout_name=...) 导出选定的已保存布局；多个布局时需要指定名称。
+export 读取真实保存的图层和布局，生成新数据快照、工程和图片，保留原工程。
+本地图片/符号资源随工程复制，网络图层、嵌入工程及项目 Python 宏不支持。
+
+创建/导出只表示执行完成，视觉状态仍为 unverified。使用返回的 preview_path 进行
+geo_map_review，保留相同 map_id；用 project_dir 和 primary_map=preview_path 调用
+geo_deliver。PDF 可列入 files，主图摘要对应实际 PNG 预览。所有检查和交付仍使用
+既有预算与 draft/passed 规则，本轮没有重构质量判定或自动修改回退。
+
+详细的执行隔离与数据流见 [architecture.md](architecture.md)。
+
 ## 一个完整任务
 
 准备具有明确 CRS 的行政区、危险区、居民点或道路文件，向 Agent 提出：

@@ -58,5 +58,16 @@
 - 保持风险结果、原始图层与旧交付不变；必要时另建修复交付。
 - 验证：整合全量554 passed；最终审查修正后相关108 passed，ruff与diff检查通过。实际QGIS读取10层、导出基础布局；安装包与跨目录CLI、交付副本重绘均通过。修复图布局通过，实际模型仍报告issues，交付保留draft与原始意见，不伪报地图完全正确。
 
+## 当前任务：QGIS执行与工程集成（2026-10-08）
+1. 实现独立QGIS运行环境、算法发现/参数查询与Processing执行，隔离任务输出和日志 — complete。
+2. 使用PyQGIS创建、读取和导出真实工程，支持实际图层、样式与布局，接入交付 — complete。
+3. 接入工具注册、配置、模型使用说明和使用指南，保留既有无QGIS能力 — complete。
+4. 分阶段测试、本机QGIS流程验证、独立代码审查、构建安装与跨目录CLI验证 — complete。
+- 用户本轮明确先完善QGIS集成，之前五项质量控制/回退/评测改进延后；不扩大为质量系统重构。
+- 默认复用本机算法注册表，模型先搜索/查询参数再执行；不将全部算法注册为独立工具。
+- 不修改上游OpenHarness或AGENTS.md；原始数据只读，所有新产物在工作目录的受控子目录。
+- 用户原有.env.example修改不纳入提交；主模型及审图配置、凭证保持原有设置。
+- 最终全量636 passed，ruff与差异检查通过；独立审查发现均关闭。安装版真实buffer/clip/slope/model3、PNG/PDF工程、保存编辑后导出与交付通过，来源摘要不变。更新到D:/Python312全局环境，从F:/Desktop/Project/GeoHarness/example/test运行geoh dry-run为15个工具，默认发现QGIS3.44.7。
+
 - Git 读取全局 ignore 文件出现 Permission denied 警告；仓库状态和文件读取成功。
 - 查找上游 api/models.py 时路径不存在；改为按 openai_client.py 的真实导入追踪 engine/messages.py，不再假定消息模型目录。

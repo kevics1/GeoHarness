@@ -2,7 +2,7 @@
 
 当前首期聚焦多图层叠加与影响范围分析，支持原生 GIS 运算、可复现的自主 Python 分析，以及读取实际成图进行检查、有限自动修正和重绘。入口与配置保持 OpenHarness/GeoHarness 隔离。
 
-最新操作与检查状态说明见 [user-guide.md](user-guide.md)。本地聚合服务配置见 [config.example.yaml](config.example.yaml)。新增工具：geo_analysis、geo_python、geo_map_review、geo_deliver；基础工具为 8 个原生工具与 5 个辅助工具，MCP 工具按实际连接动态发现。地图同时提供可编辑 QGIS 工程，默认交付到当前工作目录。空间热点与栅格/地形列为后续重点。
+最新操作与检查状态说明见 [user-guide.md](user-guide.md)，执行架构见 [architecture.md](architecture.md)。本地聚合服务配置见 [config.example.yaml](config.example.yaml)。基础工具为 8 个原生工具与 5 个辅助工具；启用 QGIS 后增加 geo_qgis 和 geo_qgis_project，MCP 工具按实际连接动态发现。地图同时提供可编辑 QGIS 工程，默认交付到当前工作目录。空间热点与栅格/地形的完整业务验收列为后续重点。
 
 地理方向原生 Agent 系统 — 空间分析优先，制图为分析产物。
 
@@ -15,10 +15,11 @@
   GeoTIFF/IMG/ASC/VRT）— 每个工具只访问自己的后端，互不拖累
 - **多图层合成制图**：一次调用将行政区划/水系/道路/火场/居民点等多层
   叠加到一张 PNG/HTML，支持高程栅格底图、自动统一 CRS、图层图例
-- **原生渲染，无 QGIS 依赖**：matplotlib（Agg，无头安全）+ folium/Leaflet
+- **复用本机 QGIS**：动态发现 Processing 算法、查询参数、执行本地 .model3；通过 PyQGIS 创建和读取真实工程，从保存的打印布局导出 PNG/PDF
+- **保留原生渲染**：matplotlib（Agg，无头安全）+ folium/Leaflet，可独立运行
 - **认知级联**：L1 感知 → L2 理解 → L3 推理，建议制（模型可跳过）
 - **生产级鲁棒性**：逐工具超时预算、PostGIS 连接串行化+keepalive+断线重连、
-  目录扫描单飞锁、PROJ 环境自愈、371 项自动化测试
+  目录扫描单飞锁、PROJ 环境自愈、独立 QGIS 任务日志与取消清理
 
 ## 架构概览
 
@@ -26,9 +27,9 @@
 用户输入
   → GeoHarness 系统提示词（6地理原则 + 技能目录 + 工具目录 + 级联状态）
   → LLM 调用（OpenAI 兼容 API）
-  → 工具调度（7 原生 + 5 白名单；按配置接入 MCP）
+  → 工具调度（8 原生 + 2 可选 QGIS + 5 白名单；按配置接入 MCP）
   → 认知级联（L1感知 → L2理解 → L3推理，建议制，模型可跳过）
-  → 制图输出（桥接规则 → 原生渲染 → PNG/PDF/SVG/HTML）
+  → 制图输出（QGIS 工程/打印布局或原生渲染 → 图片/工程 → 检查与交付）
 ```
 
 **认知三级联**：
@@ -47,11 +48,11 @@
 
 - Python 3.10+
 - OpenHarness AI (`pip install openharness-ai>=0.1.9`)
-- Python 3.10+（原生制图渲染，无需安装 QGIS / PROJ / GDAL 桌面套件）
 - PostgreSQL 15+ with PostGIS 3.3+（空间数据存储）
 
 **可选但推荐**：
 
+- QGIS 桌面安装及其 PyQGIS 环境（Windows 可自动发现），用 `geoh qgis-doctor` 验证；执行时无需打开桌面
 - 高德开放平台 API Key（地理编码和行政区划服务，免费额度足够）
 - Node.js 18+（React TUI 前端，无则自动降级到打印模式）
 
@@ -339,7 +340,7 @@ GeoHarness/
 
 ## 工具清单
 
-**原生工具 (7)**：
+**原生工具 (8)，可选 QGIS 工具 (2)**：
 
 | 工具 | 功能 | 只读 |
 |------|------|------|
@@ -351,6 +352,8 @@ GeoHarness/
 | geo_python | 保存并执行自定义 GIS 分析脚本 | 源数据只读，写独立运行目录 |
 | geo_map_review | 读取实际成图，输出视觉检查与呈现修正建议 | 写独立检查报告 |
 | geo_deliver | 交付地图、结果、报告及可编辑 QGIS 工程 | 写当前工作目录 exports 子目录 |
+| geo_qgis | 本机算法发现/参数查询/Processing 执行/本地 .model3 | 视操作，产物写独立任务目录 |
+| geo_qgis_project | 创建、检查和导出真实可编辑 QGIS 工程 | inspect 只读，create/export 写新目录 |
 
 **MCP 工具 (27)**：
 

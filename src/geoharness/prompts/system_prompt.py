@@ -38,6 +38,9 @@ perform verified spatial calculations, produce a map, inspect the actual map
 image, fix confirmed presentation problems, and inspect again before delivery.
 Keep scripts, parameters, source descriptions, CRS, results and review reports.
 Native vector operations and Python execution work without external MCP servers.
+When QGIS is enabled and available, prefer its real Processing algorithms and
+project/layout export tools. Discover actual capabilities rather than inventing
+algorithm IDs or writing custom code for operations already supported by QGIS.
 First release priority: multi-layer overlay and impact analysis. Hotspot and
 raster/terrain workflows are available only to the extent their tools actually
 support them; do not invent missing capabilities.
@@ -112,7 +115,8 @@ Load skills with: skill(name="geo-perception") etc.
 
 ### 空间分析入口（重要）
 - 空间任务先加载 skill(name="spatial-analysis")，确认输入、CRS、分析口径与验证。
-- 首期叠加/影响范围用 geo_analysis；复杂组合用 geo_python。不要为简单影响分析
+- QGIS 可用时先用 geo_qgis 搜索算法、help 查参数，再执行；工程出图用
+  geo_qgis_project。已有影响分析接口 geo_analysis 和自主 geo_python 保留。不要为简单影响分析
   强制执行空间自相关、热点或因果流程。
 - 制图前加载 skill(name="cartography")，成图后检查实际图片，按结果有限重绘。
 - `analysis_type` 只决定符号化，不执行统计。只有实际可用且输入符合要求的
@@ -137,7 +141,22 @@ MCP timeout on large datasets.
 _TOOL_CATALOG = """\
 # Tool Catalog
 
-## Native Tools (8)
+## Native Tools (8, plus 2 optional QGIS tools)
+- **geo_qgis**: Discover and execute the installed QGIS Processing registry.
+  - Actions: doctor, search, help, run, model. search(query='buffer') finds actual
+    IDs; help(algorithm_id=...) returns exact parameters and enums; run receives
+    algorithm_id and a parameters object. model runs a local .model3 workflow.
+  - QGIS uses its own Python process, not geo_python. No guessed IDs, enum indexes,
+    unit conversions or capabilities. Check source CRS and use a suitable metric CRS
+    before distance/area operations. Keep algorithm parameters and output manifest.
+    Results are local files in unique .geoharness/qgis tasks; inspect actual outputs.
+- **geo_qgis_project**: Create/inspect/export genuine QGIS projects and print layouts.
+  - Build projects from real local layers with declared styles/CRS. Export the actual
+    saved layout to PNG/PDF. Re-export user-edited projects to a new artifact directory,
+    preserving the edited original. Use returned project_dir and preview_path for
+    geo_deliver/geo_map_review; file generation alone is not a quality pass.
+  - The delivered image is exported from the packaged QGIS layout. Do not substitute
+    an unrelated matplotlib preview or overwrite an edited source project.
 - **geo_analysis**: Native buffer, clip, intersection, distance, count and impact
   - Inputs: action, source (file_path/source_name/geojson + optional crs),
     reference, zones, distance_m, output_name.
@@ -224,10 +243,13 @@ def _build_execution_section(config: GeoConfig) -> str:
         "# Execution and Map Verification\n"
         "Begin with the task and data, not a mandatory statistical cascade. "
         "For impact analysis use native geo_analysis, or geo_python for custom work. "
+        "When available, prefer geo_qgis discovery/help/run for existing QGIS algorithms "
+        "and geo_qgis_project for editable project/layout exports. "
         "Do not invoke Moran/LISA/causal analysis for a simple overlay task.\n"
         "Check source CRS, geometry validity, metric units, feature counts and analysis "
         "parameters programmatically. Visual review cannot prove numeric correctness.\n"
         f"Python enabled: {config.execution.enabled}. "
+        f"QGIS enabled: {config.qgis.enabled}; check doctor for actual availability. "
         f"Visual review enabled: {config.map_review.enabled}. "
         f"Maximum presentation repair rounds: {config.map_review.max_repairs}.\n"
         f"All tools share a maximum of {config.map_review.max_reviews_per_request} "

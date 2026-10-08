@@ -74,5 +74,14 @@
 - 主图、工程预览和审查绑定SHA256；按真实分类字段/配色打包工程，锁定范围，恢复旧工程兼容；交付明确passed/draft，不以像素或工程创建代替质量证据。
 - 整合全量554 passed；独立审查指出分类图例缺省/兼容、布局标题边界、运行时审图配置旁路，全部修复。最终相关108 passed，ruff和diff检查通过；不将较早全量运行误记为最后小改后的全量结果。
 - 沿用原风险输出重绘，分区、标签和文字检查全部通过，无重点编号省略。QGIS 3.44.7读取10个有效图层并导出基础布局，主图与工程预览SHA一致。视觉模型成功返回约9秒，仍有需判断的意见，交付如实保留draft。
+
+## QGIS 执行与工程集成（2026-10-08）
+- 按用户当前范围优先复用PyQGIS/Processing，前期五项地图质量改进延后。
+- 新增geo_qgis doctor/search/help/run/model，geo_qgis_project create/inspect/export；配置、工具注册、权限、提示词及获授权的两份内置技能已接入，原有能力保留。
+- 本机真实buffer/clip/slope/model3及工程创建、PNG/PDF、读取、导出、交付已跑通。保存标题/分类色/布局名称后的再导出与输入不变验证通过。
+- 独立审查发现的源修改算法、extent/CRS隐式文件读取、模型来源类型和交付复制路径均已修复并针对性复核。QGIS内置SVG、旧资源格式及布局锁定样式经真实导出后重读验证通过。
+- 首次整合进程导入过时test helper产生7个FrozenInstanceError；当前构造式helper与config组合42项通过。全量首轮616 passed、6 failed，其中5项为目录rename访问错误，1项为旧提示词预期；预期已更新，系统临时目录中相关126项通过，最终全量636 passed。
+- 安装版诊断暴露worker把主site-packages置顶产生NumPy/GDAL ABI错误，改为只加载GeoHarness包。新增源码/wheel布局的真实子进程隔离回归，独立审查通过。
+- 最终wheel已构建并安装到现有D:/Python312环境，未更改模型、审查配置、凭证或主NumPy。安装版从F:/Desktop/Project/GeoHarness/example/test调用完整合成分析/工程/交付、model3与用户保存工程导出均通过，doctor无依赖stderr，geoh dry-run组装15工具；ruff全通过。
 - 新交付位于 F:/Desktop/Project/GeoHarness/example/test/exports/西昌地图布局修复-z2rkt69i；风险GeoJSON、CSV与附图字节保持不变。完整Python分区图有可移植redraw-layout.py及数据副本，实际在该交付目录重绘成功，布局再次通过。
 - 构建wheel并更新D:/Python312全局安装，保留主模型max及凭证，独立审图为none；test目录全局geoh version/dry-run成功，加载site-packages版本，未创建.openharness。用户原.env.example未纳入提交。

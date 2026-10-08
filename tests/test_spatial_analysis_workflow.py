@@ -125,9 +125,11 @@ class TestSystemPromptGuidance:
     def test_prompt_names_the_entry_skill(self, tmp_path: Path) -> None:
         assert "spatial-analysis" in self._prompt(tmp_path)
 
-    def test_prompt_prioritizes_native_impact_and_actual_map_review(self, tmp_path: Path) -> None:
+    def test_prompt_prioritizes_available_qgis_and_actual_map_review(self, tmp_path: Path) -> None:
         prompt = self._prompt(tmp_path)
-        assert "首期叠加/影响范围用 geo_analysis" in prompt
+        assert "QGIS 可用时先用 geo_qgis 搜索算法、help 查参数" in prompt
+        assert "geo_qgis_project" in prompt
+        assert "已有影响分析接口 geo_analysis" in prompt
         assert "geo_python" in prompt
         assert "geo_map_review" in prompt
         assert "Do not invoke Moran/LISA/causal analysis for a simple overlay task" in prompt

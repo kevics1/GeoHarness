@@ -103,6 +103,31 @@ def dry_run(
 
 
 @app.command()
+def qgis_doctor(
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="指定配置文件路径"),
+) -> None:
+    """实际检查 QGIS 环境和可用 Processing 提供者（不打开桌面）。"""
+    import asyncio
+    import json
+
+    from geoharness.config.settings import load_geo_config
+    from geoharness.qgis.runner import execute_qgis
+
+    settings = load_geo_config(config).qgis
+    if not settings.enabled:
+        console.print("[yellow]QGIS 集成已禁用。[/yellow]")
+        raise typer.Exit(1)
+    try:
+        result = asyncio.run(execute_qgis("doctor", {}, cwd=Path.cwd(), settings=settings))
+    except (OSError, ValueError, RuntimeError) as exc:
+        console.print(f"[red]QGIS 检查失败: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(json.dumps(result, ensure_ascii=False, indent=2), markup=False)
+    if result.get("status") != "succeeded":
+        raise typer.Exit(1)
+
+
+@app.command()
 def run(
     config: Optional[Path] = typer.Option(
         None, "--config", "-c", help="指定配置文件路径"
@@ -202,6 +227,17 @@ execution:
   outputs_dir: .geoharness/runs
   timeout_seconds: 120
   max_output_chars: 12000
+
+# 独立 QGIS 环境；留空自动发现，或在 install_dir 设置实际安装目录
+qgis:
+  enabled: true
+  install_dir: ""
+  python_executable: ""
+  prefix_path: ""
+  outputs_dir: .geoharness/qgis
+  timeout_seconds: 180
+  max_output_chars: 12000
+  max_search_results: 20
 
 # 实际成图视觉检查；空 model/base_url/api_key 复用主模型
 map_review:

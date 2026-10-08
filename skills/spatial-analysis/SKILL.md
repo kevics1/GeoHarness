@@ -15,6 +15,14 @@ description: 地理空间分析入口。首期聚焦叠加、缓冲、距离、�
 
 ## 执行空间运算
 
+QGIS 启用且可用时，优先复用其 Processing：先 `geo_qgis(action="doctor")` 确认运行环境，
+再 `search` 查实际算法、`help` 获取参数与枚举，最后 `run` 执行。常见算法可搜索
+buffer、clip、intersection、zonal、slope、hillshade、nearest；不猜测 ID 或选项索引。
+`parameters` 是参数对象，输入用真实本地数据路径，输出由工具放到新的任务目录。
+距离按所选算法的 CRS/单位解释；需要米制时先重投影，不能把经纬度上的500当作500米。
+`model` 可执行已存在的本地 `.model3` 多步骤模型；缺少算法、外部提供者或参数时报告实际错误。
+保留结果、参数、CRS、日志和 manifest，算法完成不等于分析方法得到证明。
+
 首期 geo_analysis 不依赖 MCP 或 PostGIS。source、reference、zones 使用结构化 SpatialSource，每个来源恰好提供 file_path、source_name 或 geojson 中的一项。
 
 | action | 运算与输入 |
@@ -43,6 +51,10 @@ affected 表示相交或最短距离不超过阈值，不是未经验证的风�
 源数据默认只读；修改数据时生成新文件。不使用网络、shell、子进程或读取凭证。应用级保护用于可信分析脚本，不是 OS 沙箱。
 
 ## 结果制图与检查
+
+QGIS 分析结果可直接作为 `geo_qgis_project` 的真实图层创建可编辑工程和布局。
+检查该工程实际导出的 PNG（preview_path），用返回的 project_dir 交付；
+需要编辑后重新出图时，inspect/export 原工程，导出到新目录，保留用户的原工程。
 
 加载 skill(name="cartography")。将 geo_analysis 返回的 layers 序列化后传给 geo_cartography，突出真正的影响选集，不要把全部资产画成受影响对象。
 

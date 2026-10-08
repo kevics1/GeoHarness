@@ -8,6 +8,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import AliasChoices, BaseModel, Field
@@ -16,6 +17,16 @@ from geoharness.cartography.project import MapProject
 from geoharness.cartography.quality import MapReview
 
 _MAP_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".pdf", ".svg", ".html"}
+
+
+class _QgisDeliveryProject(BaseModel):
+    """Portable files exported by the independent QGIS worker."""
+
+    backend: Literal["qgis"]
+    project_file: str = Field(pattern=r"(?i)^.+\.qg[sz]$")
+    preview: str
+    preview_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    files: list[str] = Field(min_length=1, max_length=1000)
 
 
 class GeoDeliverInput(BaseModel):
@@ -101,7 +112,7 @@ class GeoDeliverTool(BaseTool):
                 is_error=True,
             )
         roots = [workspace]
-        for section in ("analysis", "execution", "cartography"):
+        for section in ("analysis", "execution", "cartography", "qgis"):
             path = Path(getattr(config, section).outputs_dir).expanduser()
             roots.append((path if path.is_absolute() else workspace / path).resolve())
 
@@ -121,13 +132,26 @@ class GeoDeliverTool(BaseTool):
                 files.append(report_file)
             project_files: list[tuple[Path, Path]] = []
             project_digest = None
+            project_file = "map.qgs"
             if arguments.project_dir:
                 project_root = Path(arguments.project_dir).expanduser()
                 project_root = (
                     project_root if project_root.is_absolute() else workspace / project_root
                 ).resolve()
                 manifest = resolve(str(project_root / "project.json"))
-                project = MapProject.model_validate_json(manifest.read_text(encoding="utf-8"))
+                recorded_project = json.loads(manifest.read_text(encoding="utf-8"))
+                if isinstance(recorded_project, dict) and recorded_project.get("backend") == "qgis":
+                    project = _QgisDeliveryProject.model_validate(recorded_project)
+                    project_file = project.project_file
+                    relative_files = {
+                        "project.json", project_file, project.preview, *project.files,
+                    }
+                else:
+                    project = MapProject.model_validate(recorded_project)
+                    relative_files = {
+                        "project.json", "map.qgs", "redraw.py", "README.md", project.preview,
+                        *(layer.file for layer in project.layers),
+                    }
                 preview = (project_root / project.preview).resolve()
                 if not preview.is_relative_to(project_root):
                     raise ValueError("Project preview reference must stay inside its folder.")
@@ -153,19 +177,21 @@ class GeoDeliverTool(BaseTool):
                     primary.read_bytes()
                 ).hexdigest() != project_digest:
                     raise ValueError("Primary map differs from the project's preview SHA256.")
-                relative_files = {
-                    "project.json",
-                    "map.qgs",
-                    "redraw.py",
-                    "README.md",
-                    project.preview,
-                    *(layer.file for layer in project.layers),
-                }
                 for relative in sorted(relative_files):
-                    target = (project_root / relative).resolve()
+                    relative_path = Path(relative)
+                    if (
+                        relative_path.is_absolute() or relative_path.drive
+                        or ".." in relative_path.parts
+                    ):
+                        raise ValueError(
+                            "Project references must stay inside its folder as relative paths."
+                        )
+                    target = (project_root / relative_path).resolve()
                     if not target.is_relative_to(project_root):
                         raise ValueError("Project references must stay inside its folder.")
-                    project_files.append((resolve(str(target)), Path("project") / relative))
+                    project_files.append((
+                        resolve(str(target)), Path("project") / target.relative_to(project_root),
+                    ))
             if not files and not project_files:
                 raise ValueError("Select at least one artifact or a portable project.")
             if primary is None:
@@ -219,7 +245,11 @@ class GeoDeliverTool(BaseTool):
                 if source == primary:
                     delivered_primary = str(target)
             for source, relative in project_files:
-                target = destination / relative
+                target = (destination / relative).resolve()
+                if not target.is_relative_to(destination):
+                    raise ValueError(
+                        "Project copy destination must stay inside its delivery folder."
+                    )
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 copied.append(str(target))
@@ -238,7 +268,9 @@ class GeoDeliverTool(BaseTool):
             payload = {
                 "delivery_dir": str(destination),
                 "files": copied,
-                "qgis_project": str(destination / "project" / "map.qgs") if project_files else None,
+                "qgis_project": (
+                    str(destination / "project" / project_file) if project_files else None
+                ),
                 "primary_map": delivered_primary,
                 "primary_map_sha256": digest,
                 "project_preview_sha256": project_digest,

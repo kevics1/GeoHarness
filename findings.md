@@ -88,4 +88,15 @@
 - 本机9Router 0.5.95实测：flash配thinking.disabled或reasoning_effort.low仍耗尽4096/8192推理token；独立flash(none)配thinking.disabled返回reasoning_tokens=0、完整工具报告，业务图约9秒。主模型max保持不变；其他网关不假定具有相同后缀语义。
 - 布局辅助模块按实际文字边界检查独立区域、标签避让、标题/说明裁切；结构通过只证明布局几何。视觉请求独立拥有SDK配置，预算计实际调用时间，缓存绑定图片和审查配置；执行失败返还自己预留的绘图版本。
 - 地图、工程预览和审查绑定SHA256；分类配色、缺省类及锁定范围同步到原生/QGIS，禁止生成工程时偷偷换简化图。QGIS基础布局可编辑，但复杂Python放大图与编号需使用完整重绘脚本或在QGIS补充，不能声称逐像素复现。
+
+## QGIS 原生执行与工程集成（2026-10-08）
+- 本机QGIS 3.44.7具有独立Python环境，默认自动发现无需写入机器路径；真实registry为440个算法。查询目录不等于全部算法已业务验收，执行限制随help返回。
+- Processing算法会存在源文件修改行为，不能仅检查最终输出路径。独立审查真实复现了属性索引、投影侧文件及metadata保存模式，现执行前拒绝；extent/CRS必须显式声明，模型参数来源也检查类型。
+- 主进程不导入PyQGIS；每次任务通过独立Python/JSON和文件交换，Windows Job Object用于超时及取消清理，profile和环境不继承用户插件或API凭证。
+- 真实合成流程：500米buffer+clip得到2个对象；梯度DEM的内层坡度约45度；本地.model3产生1个EPSG:32647缓冲对象、宽度1000米。源数据SHA256保持不变。
+- QGIS创建真实工程及同布局PNG/PDF；用户保存标题、紫色分类及布局名后的再导出保留修改，输入工程摘要不变。基础布局不代表已实现前期复杂布局与质量决策升级。
+- 交付必须验证规范相对路径和最终目的目录，不能只验证源resolve后的路径；回归覆盖源路径重新进入、absolute和preview路径变体。
+- Windows受管工作区测试临时目录出现间歇性WinError5目录rename失败；60次独立合成rename未复现，改系统临时目录后相关126项通过。原因尚未确定，未据此改动既有分析/工程发布逻辑。
+- wheel环境验证发现将主site-packages放入worker.sys.path会使QGIS导入主NumPy2、产生GDAL ABI错误。改为importlib限定加载GeoHarness包、不改sys.path；源码/wheel两种真实子进程回归与最终安装版完整流程通过，QGIS doctor stderr为空。
+- 原生资源验证：内置SVG按QGIS官方资源目录解析，现代Option和旧prop格式兼容。真实导出后活动符号及打印布局锁定样式引用包内SVG，副本摘要和其他符号属性保持一致。
 - 修复图实际模型报告issues，其中水体名称和北箭头样式意见需要结合任务/实际参数判断；保留原始报告及draft，不为了样式建议无限重画。原风险GeoJSON、两个CSV及附图字节保留，原始234点风险分类未重算。

@@ -11,6 +11,13 @@ description: 分析结果制图与图片检查。生成单图层或多图层 PNG
 
 ## 原生制图
 
+QGIS 启用且可用时，优先使用 `geo_qgis_project` 创建真实工程与打印布局，
+由该布局直接导出 PNG/PDF。输入为真实本地图层及明确样式/字段/CRS；
+inspect 可查看已有工程，export 读取用户保存的布局与样式并另建导出，不覆盖原工程。
+preview_path 是实际布局导出的 PNG；用 geo_map_review 检查它，再用 project_dir 交付。
+工程生成/导出成功仅表示执行成功，视觉状态仍需独立报告，不宣称 passed。
+无法保留任务要求的复杂布局时说明具体缺项，不能悄悄换成简化图。
+
 geo_cartography 的 export/full 渲染并生成可编辑 QGIS 工程，symbolize/compose 仅返回方案。首期优先 PNG。绘图前一次准备好标题、图例、范围和字号；普通多图层地图优先使用原生工具。多图层一次传 layers JSON 字符串，按数组顺序由下到上绘制；每层可带 label 和 color。geo_analysis 返回的 layers 可直接序列化使用。
 
 ```json

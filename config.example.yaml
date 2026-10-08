@@ -24,6 +24,16 @@ execution:
   outputs_dir: .geoharness/runs
   timeout_seconds: 120
   max_output_chars: 12000
+qgis:
+  enabled: true
+  # Empty paths discover an independently installed QGIS; set install_dir if needed.
+  install_dir: ""
+  python_executable: ""
+  prefix_path: ""
+  outputs_dir: .geoharness/qgis
+  timeout_seconds: 180
+  max_output_chars: 12000
+  max_search_results: 20
 map_review:
   enabled: true
   model: cbcn/deepseek-v4.1-flash(none)
