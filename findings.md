@@ -141,3 +141,5 @@
 - 新project_output_dir要求未创建目录，旧output_path输入语义保留；不删除已有空目录，也不通过删目的目录规避发布错误。
 - 发布与审查/参数改动已整合；相关348项通过，另统一PRE_TOOL_USE实际零副作用guard回归通过。独立审查发现发布重试等候期间deadline/cancel会触发通用清理删除完整stage，正在保留该中断的发布诊断和产物，维持TimeoutError语义。
 - 受管工作区pytest临时目录ACL错误改为明确系统TEMP子目录后测试正常；未据此改变产品权限。一次文档patch匹配失败未写入，使用实际段落重新应用成功。
+
+- QGIS模板保存重开会归一化比例尺尺寸；最终PNG改为由已保存并读回的布局导出。applyDefaultSize需显式Kilometers，避免默认米配km标签；NULL category value不能被exclude_none序列化丢掉。仅模板自身区域互压受结构检查约束，用户地图内新增注记保留。

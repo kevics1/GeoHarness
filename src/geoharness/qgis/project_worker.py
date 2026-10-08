@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import re
 import shutil
 import xml.etree.ElementTree as ET
@@ -19,6 +21,8 @@ _VECTOR_SUFFIXES = {".gpkg", ".shp", ".geojson", ".json", ".fgb"}
 _RASTER_SUFFIXES = {".tif", ".tiff", ".img", ".asc", ".dem", ".png", ".jpg", ".jpeg"}
 _ASSET_SUFFIXES = {".svg", ".png", ".jpg", ".jpeg", ".webp"}
 _ASSET_KEYS = {"picturepath", "svgfile", "imagefile", "name", "file", "path"}
+_FONT_SUFFIXES = {".ttf", ".ttc", ".otf"}
+_FONT_PROPERTIES = {"geoharness/font", "geoharness/label_font"}
 
 
 def _local_source(source: str, context: Any, *, base: Path | None = None) -> tuple[Path, str]:
@@ -114,6 +118,9 @@ def _preflight_project(
             raise ValueError("Only local OGR vector and GDAL raster project layers are supported")
         _local_source(layer.findtext("datasource") or "", context, base=path.parent)
     assets: list[Path] = []
+    for font in _project_font_resources(root, path, context).values():
+        if font not in assets:
+            assets.append(font)
     for item in root.iter():
         if item.tag.lower() in {"pythonmacros", "pythonfunctions", "pythoncode"}:
             if "".join(item.itertext()).strip():
@@ -144,6 +151,81 @@ def _preflight_project(
     return assets
 
 
+def _project_font_resources(root: ET.Element, project_path: Path, context: Any) -> dict[str, Path]:
+    """Only declared packaged font resources are admitted, before native project read."""
+    resources = {}
+    for item in root.iter():
+        if item.get("name") not in _FONT_PROPERTIES or "value" not in item.attrib:
+            continue
+        info = json.loads(item.attrib["value"])
+        if not isinstance(info, dict) or not info.get("packaged"):
+            continue
+        value = info.get("file", "")
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts or (
+            relative.suffix.lower() not in _FONT_SUFFIXES
+        ):
+            raise ValueError("Packaged font resources must be project-relative TTF, TTC or OTF")
+        font = context.read_path(str(project_path.parent / relative))
+        if not font.is_relative_to(project_path.parent.resolve()):
+            raise PermissionError("Packaged font must remain inside its project directory")
+        expected = info.get("sha256")
+        if expected and hashlib.sha256(font.read_bytes()).hexdigest() != expected:
+            raise ValueError("Packaged font checksum does not match its saved metadata")
+        resources[value] = font
+    return resources
+
+
+def _register_project_fonts(project_path: Path, context: Any) -> None:
+    from qgis.PyQt.QtGui import QFontDatabase
+
+    database = QFontDatabase()
+    for path in _project_font_resources(_project_xml(project_path), project_path, context).values():
+        if database.addApplicationFont(str(path)) < 0:
+            raise ValueError(f"QGIS could not register packaged font: {path.name}")
+
+
+def _snapshot_font(path: Path, context: Any) -> tuple[Path, str]:
+    """Snapshot only explicitly selected fonts; a content hash deduplicates layers/layouts."""
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    relative = f"assets/fonts/{digest}{path.suffix.lower()}"
+    target = context.run_dir / relative
+    if not target.exists():
+        target = Path(context.output_path(None, relative))
+        shutil.copy2(path, target)
+    elif hashlib.sha256(context.read_path(str(target)).read_bytes()).hexdigest() != digest:
+        raise ValueError("Existing packaged font does not match its resource hash")
+    return target, digest
+
+
+def _restore_font_metadata(
+    project: Any, source_project: Path, context: Any, *, package: bool
+) -> None:
+    """Record actual font registration and relocate resource metadata for new packages."""
+    from qgis.PyQt.QtGui import QFont, QRawFont
+
+    owners = [*project.mapLayers().values(), *project.layoutManager().printLayouts()]
+    resources = _project_font_resources(_project_xml(source_project), source_project, context)
+    for owner in owners:
+        for key in _FONT_PROPERTIES:
+            value = owner.customProperty(key, "")
+            if not value:
+                continue
+            info = json.loads(value)
+            if not info.get("packaged"):
+                continue
+            path = resources[info["file"]]
+            raw = QRawFont.fromFont(QFont(info["family"]))
+            loaded = raw.isValid() and all(raw.supportsCharacter(char) for char in "地图说明")
+            if not loaded:
+                raise ValueError("Saved project's packaged Chinese font could not be restored")
+            if package:
+                path, digest = _snapshot_font(path, context)
+                info.update(file=path.relative_to(context.run_dir).as_posix(), sha256=digest)
+            info.update(loaded=loaded, registered=True)
+            owner.setCustomProperty(key, json.dumps(info))
+
+
 def _color(value: str) -> Any:
     from qgis.PyQt.QtGui import QColor
 
@@ -153,39 +235,157 @@ def _color(value: str) -> Any:
     return color
 
 
-def _style_vector(layer: Any, spec: dict[str, Any]) -> None:
+def _font(spec: dict[str, Any], context: Any) -> tuple[Any, dict[str, Any]]:
+    """Load configured fonts, or the OS's ordinary static CJK font collection."""
+    from qgis.PyQt.QtGui import QFont, QFontDatabase, QRawFont
+
+    database = QFontDatabase()
+    requested = spec.get("font_family", "Microsoft YaHei")
+    configured = spec.get("font_file")
+    font_file = ""
+    packaged = False
+    digest = ""
+    if configured:
+        path = context.read_path(configured)
+        if path.suffix.lower() not in _FONT_SUFFIXES:
+            raise ValueError("font_file must be a local TTF, TTC or OTF font")
+        index = database.addApplicationFont(str(path))
+        families = database.applicationFontFamilies(index) if index >= 0 else []
+        if not families:
+            raise ValueError(f"QGIS could not load configured font: {path.name}")
+        requested = requested if requested in families else families[0]
+        path, digest = _snapshot_font(path, context)
+        font_file = path.relative_to(context.run_dir).as_posix()
+        packaged = True
+    else:
+        # Native worker bootstrap registers system fonts; these bounded candidates
+        # also make the selected file verifiable without recording a host path in code.
+        system_root = os.environ.get("WINDIR", os.environ.get("SystemRoot", ""))
+        if system_root:
+            root = Path(system_root) / "Fonts"
+            for filename in ("msyh.ttc", "simhei.ttf", "simsun.ttc"):
+                path = root / filename
+                if not path.is_file():
+                    continue
+                index = database.addApplicationFont(str(path))
+                families = database.applicationFontFamilies(index) if index >= 0 else []
+                if requested in families or requested not in database.families():
+                    if families:
+                        requested = requested if requested in families else families[0]
+                        font_file = str(path)
+                        break
+    available = database.families()
+    if requested not in available:
+        requested = next(
+            (name for name in ("Microsoft YaHei", "微软雅黑", "SimHei", "Noto Sans CJK SC")
+             if name in available),
+            requested,
+        )
+    font = QFont(requested)
+    raw = QRawFont.fromFont(font)
+    loaded = raw.isValid() and all(raw.supportsCharacter(char) for char in "地图说明")
+    if not loaded:
+        raise ValueError("QGIS requires a loaded Chinese font; configure font_file/font_family")
+    info = {
+        "family": font.family(), "file": font_file, "loaded": loaded,
+        "packaged": packaged, "registered": True,
+    }
+    if digest:
+        info["sha256"] = digest
+    return font, info
+
+
+def _text_format(font: Any, size: float, color: str = "#222222") -> Any:
+    from qgis.core import Qgis, QgsTextFormat
+
+    result = QgsTextFormat()
+    result.setFont(font)
+    result.setSize(size)
+    result.setSizeUnit(Qgis.RenderUnit.Points)
+    result.setColor(_color(color))
+    return result
+
+
+def _symbol(layer: Any, style: dict[str, Any], entry: dict[str, Any]) -> Any:
+    from qgis.core import Qgis, QgsFillSymbol, QgsLineSymbol, QgsMarkerSymbol, QgsSymbol
+
+    symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    if symbol is None:
+        raise ValueError("Project maps require a spatial vector layer")
+    symbol.setColor(_color(entry.get("color", style.get("color", "#4c78a8"))))
+    width = entry.get("width_mm", style.get("width_mm", 0.3))
+    size = entry.get("size_mm", style.get("size_mm", 3))
+    if isinstance(symbol, QgsMarkerSymbol):
+        symbol.setSize(size)
+        symbol.setSizeUnit(Qgis.RenderUnit.Millimeters)
+    elif isinstance(symbol, QgsLineSymbol):
+        symbol.setWidth(width)
+        symbol.setWidthUnit(Qgis.RenderUnit.Millimeters)
+    for symbol_layer in symbol.symbolLayers():
+        if isinstance(symbol, (QgsMarkerSymbol, QgsFillSymbol)):
+            symbol_layer.setStrokeColor(_color(style.get("outline_color", "#ffffff")))
+            symbol_layer.setStrokeWidth(width)
+            symbol_layer.setStrokeWidthUnit(Qgis.RenderUnit.Millimeters)
+    return symbol
+
+
+def _symbol_metadata(symbol: Any) -> dict[str, Any]:
+    from qgis.core import QgsLineSymbol, QgsMarkerSymbol
+
+    result = {"color": symbol.color().name()}
+    if isinstance(symbol, QgsMarkerSymbol):
+        result["size_mm"] = symbol.size()
+    if isinstance(symbol, QgsLineSymbol):
+        result["width_mm"] = symbol.width()
+    else:
+        stroke_width = getattr(symbol.symbolLayer(0), "strokeWidth", None)
+        if callable(stroke_width):
+            result["width_mm"] = stroke_width()
+    return result
+
+
+def _style_vector(layer: Any, spec: dict[str, Any], context: Any) -> None:
     from qgis.core import (
+        Qgis,
         QgsCategorizedSymbolRenderer,
+        QgsGraduatedSymbolRenderer,
         QgsPalLayerSettings,
         QgsRendererCategory,
+        QgsRendererRange,
         QgsSingleSymbolRenderer,
-        QgsSymbol,
-        QgsTextFormat,
+        QgsTextBufferSettings,
         QgsVectorLayerSimpleLabeling,
     )
 
     style = spec.get("style") or {}
     renderer = style.get("renderer", "single")
-    if renderer == "categorized":
+    if renderer in {"categorized", "graduated"}:
         field = style.get("field", "")
         if layer.fields().indexFromName(field) < 0:
-            raise ValueError(f"Categorized field does not exist: {field}")
+            raise ValueError(f"Renderer field does not exist: {field}")
+    if renderer == "categorized":
         categories = []
         for category in style.get("categories", []):
-            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            symbol.setColor(_color(category["color"]))
+            symbol = _symbol(layer, style, category)
             value = category["value"]
             label = category.get("label") or ("NULL" if value is None else str(value))
             categories.append(QgsRendererCategory(value, symbol, label))
         if not categories:
             raise ValueError("Categorized styling requires explicit categories/colors")
         layer.setRenderer(QgsCategorizedSymbolRenderer(field, categories))
+    elif renderer == "graduated":
+        ranges = [
+            QgsRendererRange(
+                item["lower"], item["upper"], _symbol(layer, style, item),
+                item.get("label") or f"{item['lower']:g} – {item['upper']:g}",
+            )
+            for item in style.get("ranges", [])
+        ]
+        if not ranges:
+            raise ValueError("Graduated styling requires explicit ranges/colors")
+        layer.setRenderer(QgsGraduatedSymbolRenderer(field, ranges))
     elif renderer == "single":
-        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-        if symbol is None:
-            raise ValueError("Project maps require a spatial vector layer")
-        symbol.setColor(_color(style.get("color", "#4c78a8")))
-        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        layer.setRenderer(QgsSingleSymbolRenderer(_symbol(layer, style, {})))
     else:
         raise ValueError("Unsupported vector renderer")
     layer.setOpacity(float(style.get("opacity", 1.0)))
@@ -195,11 +395,27 @@ def _style_vector(layer: Any, spec: dict[str, Any]) -> None:
             raise ValueError(f"Label field does not exist: {field}")
         settings = QgsPalLayerSettings()
         settings.fieldName = field
-        text_format = QgsTextFormat()
-        text_format.setSize(10)
+        label_spec = spec.get("label_style") or {}
+        font, font_info = _font(label_spec, context)
+        text_format = _text_format(
+            font, label_spec.get("size_pt", 9), label_spec.get("color", "#222222")
+        )
+        buffer = QgsTextBufferSettings()
+        buffer.setEnabled(label_spec.get("buffer_size_mm", 0.8) > 0)
+        buffer.setSize(label_spec.get("buffer_size_mm", 0.8))
+        buffer.setSizeUnit(Qgis.RenderUnit.Millimeters)
+        buffer.setColor(_color(label_spec.get("buffer_color", "#ffffff")))
+        text_format.setBuffer(buffer)
         settings.setFormat(text_format)
+        placement = settings.placementSettings()
+        placement.setOverlapHandling(Qgis.LabelOverlapHandling.PreventOverlap)
+        placement.setAllowDegradedPlacement(False)
+        settings.setPlacementSettings(placement)
+        settings.displayAll = False
+        settings.obstacle = True
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
+        layer.setCustomProperty("geoharness/label_font", json.dumps(font_info))
 
 
 def _new_layer(spec: dict[str, Any], context: Any) -> Any:
@@ -227,7 +443,18 @@ def _new_layer(spec: dict[str, Any], context: Any) -> Any:
     if not layer.crs().isValid():
         raise ValueError(f"Layer has no valid declared CRS: {name}")
     if kind == "vector":
-        _style_vector(layer, spec)
+        _style_vector(layer, spec, context)
+    else:
+        style = spec.get("raster_style") or {}
+        if style.get("renderer", "default") == "hillshade":
+            from qgis.core import QgsHillshadeRenderer
+
+            band = style.get("band", 1)
+            if not 1 <= band <= layer.bandCount():
+                raise ValueError(f"Hillshade band {band} does not exist: {name}")
+            layer.setRenderer(QgsHillshadeRenderer(
+                layer.dataProvider(), band, style.get("azimuth", 315), style.get("altitude", 45),
+            ))
     return layer
 
 
@@ -300,81 +527,168 @@ def _extent(project: Any, layers: list[Any], requested: list[float] | None) -> A
     return combined
 
 
-def _create_layout(project: Any, layers: list[Any], extent: Any, payload: dict[str, Any]) -> Any:
+def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
+    """Allocate fixed millimetre rectangles once; never retry page composition."""
+    width, height = spec.get("width_mm", 297), spec.get("height_mm", 210)
+    margin, gap = spec.get("margin_mm", 12), spec.get("gap_mm", 5)
+    inner_width = width - 2 * margin
+    title_height = spec.get("title_height_mm", 16) if title else 0
+    footer_height = spec.get("footer_height_mm", 18)
+    top = margin + title_height + (gap if title else 0)
+    footer_y = height - margin - footer_height
+    map_height = footer_y - gap - top
+    sidebar = spec.get("legend", True) or spec.get("detail_extent") is not None
+    sidebar_width = spec.get("sidebar_width_mm", 60) if sidebar else 0
+    map_width = inner_width - sidebar_width - (gap if sidebar else 0)
+    if map_width < 40 or map_height < 40:
+        raise ValueError("Structured layout requires at least 40mm for main map width/height")
+    regions = {
+        "main_map": [margin, top, map_width, map_height],
+        "footer": [margin, footer_y, inner_width, footer_height],
+    }
+    if title:
+        regions["title"] = [margin, margin, inner_width, title_height]
+    sidebar_x = width - margin - sidebar_width
+    if spec.get("detail_extent") is not None:
+        detail_height = map_height * 0.4 if spec.get("legend", True) else map_height
+        regions["detail_map"] = [sidebar_x, top, sidebar_width, detail_height]
+        top += detail_height + gap
+    if spec.get("legend", True):
+        legend_height = footer_y - gap - top
+        if legend_height < 20:
+            raise ValueError("Structured layout requires at least 20mm for the legend")
+        regions["legend"] = [sidebar_x, top, sidebar_width, legend_height]
+    return regions
+
+
+def _place_item(layout: Any, item: Any, name: str, rect: list[float]) -> None:
+    from qgis.core import QgsLayoutPoint, QgsLayoutSize
+
+    item.setId(name)
+    layout.addLayoutItem(item)
+    item.attemptMove(QgsLayoutPoint(rect[0], rect[1]))
+    item.attemptResize(QgsLayoutSize(rect[2], rect[3]))
+
+
+def _create_layout(
+    project: Any, layers: list[Any], extent: Any, payload: dict[str, Any], context: Any
+) -> Any:
     from qgis.core import (
         Qgis,
+        QgsBasicNumericFormat,
         QgsLayoutItemLabel,
         QgsLayoutItemLegend,
         QgsLayoutItemMap,
         QgsLayoutItemScaleBar,
-        QgsLayoutPoint,
         QgsLayoutSize,
         QgsPrintLayout,
+        QgsRectangle,
     )
-    from qgis.PyQt.QtGui import QFont
+    from qgis.PyQt.QtCore import Qt
 
     spec = payload.get("layout") or {}
     width, height = spec.get("width_mm", 297), spec.get("height_mm", 210)
-    margin = spec.get("margin_mm", 12)
-    legend_enabled = spec.get("legend", True)
-    legend_width = min(55, (width - 2 * margin) / 4) if legend_enabled else 0
     title = payload.get("title", "")
-    title_height = 16 if title else 0
+    regions = _layout_regions(spec, title)
+    font, font_info = _font(spec, context)
+    body_format = _text_format(font, spec.get("body_font_size_pt", 9))
     layout = QgsPrintLayout(project)
     layout.initializeDefaults()
     layout.setName(payload.get("layout_name") or spec.get("name", "Map"))
     layout.pageCollection().page(0).setPageSize(QgsLayoutSize(width, height))
     layout.renderContext().setDpi(payload.get("dpi", 150))
-    map_item = QgsLayoutItemMap(layout)
-    map_item.setId("main_map")
-    layout.addLayoutItem(map_item)
-    map_item.attemptMove(QgsLayoutPoint(margin, margin + title_height))
-    map_item.attemptResize(
-        QgsLayoutSize(
-            width - 2 * margin - legend_width - (5 if legend_enabled else 0),
-            height - 2 * margin - title_height - 14,
-        )
-    )
-    map_item.setCrs(project.crs())
-    map_item.setLayers(list(reversed(layers)))
-    map_item.setKeepLayerSet(True)
-    map_item.zoomToExtent(extent)
-    map_item.setFrameEnabled(True)
+    layout.setCustomProperty("geoharness/template", "structured-v1")
+    layout.setCustomProperty("geoharness/regions", json.dumps(regions))
+    layout.setCustomProperty("geoharness/font", json.dumps(font_info))
+
+    def add_map(name: str, rect: Any) -> Any:
+        item = QgsLayoutItemMap(layout)
+        _place_item(layout, item, name, regions[name])
+        item.setCrs(project.crs())
+        item.setLayers(list(reversed(layers)))
+        item.setKeepLayerSet(True)
+        item.zoomToExtent(rect)
+        item.setFrameEnabled(True)
+        return item
+
+    map_item = add_map("main_map", extent)
     layout.setReferenceMap(map_item)
+    if spec.get("detail_extent") is not None:
+        detail = spec["detail_extent"]
+        add_map(
+            "detail_map",
+            QgsRectangle(*(detail[key] for key in ("xmin", "ymin", "xmax", "ymax"))),
+        )
     if title:
         label = QgsLayoutItemLabel(layout)
         label.setText(title)
-        font = QFont()
-        font.setPointSize(18)
-        label.setFont(font)
-        layout.addLayoutItem(label)
-        label.attemptMove(QgsLayoutPoint(margin, margin))
-        label.attemptResize(QgsLayoutSize(width - 2 * margin, title_height))
-    if legend_enabled:
+        label.setTextFormat(_text_format(font, spec.get("title_font_size_pt", 18)))
+        label.setMargin(0)
+        label.setVAlign(Qt.AlignVCenter)
+        _place_item(layout, label, "title", regions["title"])
+    if spec.get("legend", True):
         legend = QgsLayoutItemLegend(layout)
-        legend.setTitle("")
+        legend.setTitle("图例")
         legend.setLinkedMap(map_item)
-        layout.addLayoutItem(legend)
-        legend.attemptMove(QgsLayoutPoint(width - margin - legend_width, margin + title_height))
-        legend.attemptResize(QgsLayoutSize(legend_width, height - 2 * margin - title_height))
+        legend.setResizeToContents(False)
+        legend.setAutoUpdateModel(False)
+        root = legend.model().rootGroup()
+        root.removeAllChildren()
+        for layer in reversed(layers):
+            root.addLayer(layer)
+        legend.setWrapString("\n")
+        for component in (
+            Qgis.LegendComponent.Title, Qgis.LegendComponent.Group,
+            Qgis.LegendComponent.Subgroup, Qgis.LegendComponent.SymbolLabel,
+        ):
+            style = legend.style(component)
+            style.setTextFormat(body_format)
+            legend.setStyle(component, style)
+        _place_item(layout, legend, "legend", regions["legend"])
+    footer = regions["footer"]
+    text_x = footer[0]
     if spec.get("scale_bar", True):
         scale = QgsLayoutItemScaleBar(layout)
         scale.setStyle("Single Box")
         scale.setLinkedMap(map_item)
         scale.setUnits(Qgis.DistanceUnit.Kilometers)
-        scale.setUnitsPerSegment(max(0.001, map_item.scale() * 0.02 / 1000))
-        scale.setUnitLabel("km")
         scale.setNumberOfSegments(2)
         scale.setNumberOfSegmentsLeft(0)
-        scale.applyDefaultSize()
-        layout.addLayoutItem(scale)
-        scale.attemptMove(QgsLayoutPoint(margin, height - margin - 10))
+        scale.applyDefaultSize(Qgis.DistanceUnit.Kilometers)
+        scale.setTextFormat(body_format)
+        target = map_item.scale() * 0.02 / 1000
+        magnitude = 10 ** math.floor(math.log10(target))
+        distance = max(value for value in (1, 2, 5) if value * magnitude <= target) * magnitude
+        scale.setUnitsPerSegment(distance)
+        numeric = QgsBasicNumericFormat()
+        numeric.setNumberDecimalPlaces(max(0, -math.floor(math.log10(distance))))
+        numeric.setShowTrailingZeros(False)
+        scale.setNumericFormat(numeric)
+        scale.setUnitLabel("km")
+        _place_item(layout, scale, "scale_bar", [footer[0], footer[1], 1, 1])
+        text_x += scale.rect().width() + spec.get("gap_mm", 5)
+    if spec.get("footer_text"):
+        text_width = footer[0] + footer[2] - text_x
+        if text_width < 20:
+            raise ValueError("Scale bar leaves less than 20mm for footer_text")
+        label = QgsLayoutItemLabel(layout)
+        label.setText(spec["footer_text"])
+        label.setTextFormat(body_format)
+        label.setMargin(0)
+        label.setVAlign(Qt.AlignTop)
+        _place_item(layout, label, "footer_text", [text_x, footer[1], text_width, footer[3]])
     project.layoutManager().addLayout(layout)
+    _validate_layout_bounds(layout)
     return layout
 
 
 def _layer_metadata(layer: Any) -> dict[str, Any]:
-    from qgis.core import QgsCategorizedSymbolRenderer, QgsVectorLayer
+    from qgis.core import (
+        QgsCategorizedSymbolRenderer,
+        QgsGraduatedSymbolRenderer,
+        QgsHillshadeRenderer,
+        QgsVectorLayer,
+    )
 
     metadata = {
         "id": layer.id(),
@@ -398,19 +712,131 @@ def _layer_metadata(layer: Any) -> dict[str, Any]:
                 {
                     "value": category.value(),
                     "label": category.label(),
-                    "color": category.symbol().color().name(),
+                    **_symbol_metadata(category.symbol()),
                 }
                 for category in renderer.categories()
             ]
+        elif isinstance(renderer, QgsGraduatedSymbolRenderer):
+            metadata["range_field"] = renderer.classAttribute()
+            metadata["ranges"] = [
+                {
+                    "lower": item.lowerValue(), "upper": item.upperValue(),
+                    "label": item.label(), **_symbol_metadata(item.symbol()),
+                }
+                for item in renderer.ranges()
+            ]
+        elif renderer is not None and renderer.type() == "singleSymbol":
+            metadata["symbol"] = _symbol_metadata(renderer.symbol())
+        if layer.labelsEnabled() and layer.labeling() is not None:
+            settings = layer.labeling().settings()
+            text_format = settings.format()
+            metadata["label_style"] = {
+                "field": settings.fieldName,
+                "font": json.loads(layer.customProperty("geoharness/label_font", "{}")),
+                "size_pt": text_format.size(),
+                "buffer_enabled": text_format.buffer().enabled(),
+                "buffer_size_mm": text_format.buffer().size(),
+                "overlap_handling": settings.placementSettings().overlapHandling().name,
+            }
     else:
         metadata["kind"] = "raster"
+        renderer = layer.renderer()
+        metadata["renderer"] = renderer.type() if renderer is not None else None
+        metadata["band_count"] = layer.bandCount()
+        if isinstance(renderer, QgsHillshadeRenderer):
+            metadata["raster_style"] = {
+                "renderer": "hillshade", "band": renderer.inputBand(),
+                "azimuth": renderer.azimuth(), "altitude": renderer.altitude(),
+            }
     return metadata
 
 
+def _rectangle_problems(
+    rectangles: dict[str, list[float]], width: float, height: float
+) -> list[str]:
+    problems = []
+    tolerance = 0.05
+    for name, (x, y, w, h) in rectangles.items():
+        if not all(math.isfinite(value) for value in (x, y, w, h)) or w <= 0 or h <= 0:
+            problems.append(f"{name}: invalid rectangle")
+        elif x < -tolerance or y < -tolerance or x + w > width + tolerance or (
+            y + h > height + tolerance
+        ):
+            problems.append(f"{name}: rectangle exceeds page bounds")
+    entries = list(rectangles.items())
+    for index, (name, (x, y, w, h)) in enumerate(entries):
+        for other, (ox, oy, ow, oh) in entries[index + 1:]:
+            if min(x + w, ox + ow) - max(x, ox) > tolerance and (
+                min(y + h, oy + oh) - max(y, oy) > tolerance
+            ):
+                problems.append(f"{name}/{other}: rectangles overlap")
+    return problems
+
+
+def _layout_bounds(layout: Any) -> dict[str, Any]:
+    from qgis.core import (
+        QgsLayoutItem,
+        QgsLayoutItemLabel,
+        QgsLayoutItemLegend,
+        QgsLayoutItemPage,
+        QgsLegendRenderer,
+    )
+
+    if layout.customProperty("geoharness/template", "") != "structured-v1":
+        return {"checked": False, "valid": None, "problems": []}
+    page = layout.pageCollection().page(0).pageSize()
+    regions = json.loads(layout.customProperty("geoharness/regions", "{}"))
+    rectangles = {}
+    user_items = {}
+    problems = []
+    for item in layout.items():
+        if not isinstance(item, QgsLayoutItem) or isinstance(item, QgsLayoutItemPage):
+            continue
+        name = item.id() or item.uuid()
+        rect = item.mapRectToScene(item.rect())
+        if name not in {*regions, "scale_bar", "footer_text"}:
+            # User annotations, north arrows and inset decorations legitimately
+            # overlap maps. Preserve them; pixel review assesses their placement.
+            user_items[name] = [rect.x(), rect.y(), rect.width(), rect.height()]
+            continue
+        rectangles[name] = [rect.x(), rect.y(), rect.width(), rect.height()]
+        owner = regions.get("footer") if name in {"scale_bar", "footer_text"} else regions.get(name)
+        if owner is not None:
+            x, y, width, height = owner
+            if rect.left() < x - 0.05 or rect.top() < y - 0.05 or (
+                rect.right() > x + width + 0.05 or rect.bottom() > y + height + 0.05
+            ):
+                problems.append(f"{name}: item exceeds its reserved rectangle")
+        if isinstance(item, QgsLayoutItemLegend):
+            minimum = QgsLegendRenderer(item.model(), item.legendSettings()).minimumSize()
+            if minimum.width() > item.rect().width() + 0.05 or (
+                minimum.height() > item.rect().height() + 0.05
+            ):
+                problems.append(f"{name}: legend content exceeds its reserved rectangle")
+        elif isinstance(item, QgsLayoutItemLabel):
+            minimum = item.sizeForText()
+            if minimum.width() > item.rect().width() + 0.05 or (
+                minimum.height() > item.rect().height() + 0.05
+            ):
+                problems.append(f"{name}: label text exceeds its reserved rectangle")
+    problems.extend(_rectangle_problems(rectangles, page.width(), page.height()))
+    return {
+        "checked": True, "valid": not problems, "problems": problems,
+        "items": rectangles, "user_items": user_items,
+    }
+
+
+def _validate_layout_bounds(layout: Any) -> None:
+    result = _layout_bounds(layout)
+    if result["problems"]:
+        raise ValueError("Structured layout validation failed: " + "; ".join(result["problems"]))
+
+
 def _layout_metadata(layout: Any) -> dict[str, Any]:
-    from qgis.core import QgsLayoutItemMap
+    from qgis.core import QgsLayoutItemMap, QgsLayoutItemScaleBar
 
     maps = []
+    scale_bars = []
     for item in layout.items():
         if isinstance(item, QgsLayoutItemMap):
             extent = item.extent()
@@ -429,18 +855,33 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                     "layers": [layer.id() for layer in item.layers()],
                 }
             )
-    return {"name": layout.name(), "pages": layout.pageCollection().pageCount(), "map_frames": maps}
+        elif isinstance(item, QgsLayoutItemScaleBar):
+            scale_bars.append({
+                "id": item.id(), "units": item.units().name,
+                "units_per_segment": item.unitsPerSegment(), "segments": item.numberOfSegments(),
+            })
+    return {
+        "name": layout.name(), "pages": layout.pageCollection().pageCount(), "map_frames": maps,
+        "map_extents": {item["id"]: item["extent"] for item in maps},
+        "scale_bars": scale_bars,
+        "template": layout.customProperty("geoharness/template", ""),
+        "regions": json.loads(layout.customProperty("geoharness/regions", "{}")),
+        "font": json.loads(layout.customProperty("geoharness/font", "{}")),
+        "bounds_check": _layout_bounds(layout),
+    }
 
 
-def _validate_project_coordinates(project: Any, layouts: list[Any]) -> None:
+def _validate_project_coordinates(
+    project: Any, layouts: list[Any], *, strict_layout: bool = False
+) -> None:
     """A readable project with valid layers can still have projection disabled."""
-    import math
-
     if not project.crs().isValid():
         raise ValueError(
             "Project CRS is invalid; verify projection is enabled in the saved project"
         )
     for layout in layouts:
+        if strict_layout:
+            _validate_layout_bounds(layout)
         for frame in _layout_metadata(layout)["map_frames"]:
             if not frame["crs_valid"]:
                 raise ValueError(f"Layout map {frame['id']} has an invalid CRS")
@@ -457,6 +898,8 @@ def _export_layout(layout: Any, payload: dict[str, Any], context: Any) -> tuple[
     from qgis.core import QgsLayoutExporter
 
     exporter = QgsLayoutExporter(layout)
+    if payload.get("strict_layout", False):
+        _validate_layout_bounds(layout)
     preview = Path(context.output_path(None, "preview.png"))
     image_settings = QgsLayoutExporter.ImageExportSettings()
     image_settings.dpi = payload.get("dpi", 150)
@@ -468,6 +911,8 @@ def _export_layout(layout: Any, payload: dict[str, Any], context: Any) -> tuple[
         preview.with_stem("preview_1").rename(preview)
     if not preview.is_file():
         raise ValueError("QGIS did not write the layout preview")
+    if payload.get("strict_layout", False):
+        _validate_layout_bounds(layout)
     output_format = payload.get("output_format", "png")
     if output_format == "png":
         requested = payload.get("output_path")
@@ -517,14 +962,29 @@ def _save_package(
 
     reopened = QgsProject()
     try:
+        _register_project_fonts(project_path, context)
         if not reopened.read(str(project_path)):
             raise ValueError(f"QGIS could not reopen its packaged project: {reopened.error()}")
         if not all(layer.isValid() for layer in reopened.mapLayers().values()):
             raise ValueError("Packaged project contains invalid data references")
-        _validate_project_coordinates(reopened, reopened.layoutManager().printLayouts())
+        _restore_font_metadata(reopened, project_path, context, package=False)
+        _validate_project_coordinates(
+            reopened, reopened.layoutManager().printLayouts(),
+            strict_layout=payload.get("strict_layout", False),
+        )
+        saved_layout = next(
+            (item for item in reopened.layoutManager().printLayouts()
+             if item.name() == layout.name()),
+            None,
+        )
+        if saved_layout is None:
+            raise ValueError("Packaged project did not preserve the selected print layout")
+        # Native save/read normalizes floating coordinates and scale-bar metrics.
+        # Export the saved layout so preview pixels correspond to the delivered QGS.
+        preview, output = _export_layout(saved_layout, payload, context)
+        layout_info = _layout_metadata(saved_layout)
     finally:
         reopened.clear()
-    preview, output = _export_layout(layout, payload, context)
     digest = hashlib.sha256(preview.read_bytes()).hexdigest()
     readme = Path(context.output_path(None, "README.md"))
     readme.write_text(
@@ -532,7 +992,13 @@ def _save_package(
         "styles are local snapshots; source files were not changed. Edit the saved print "
         "layout, save it, then use geo_qgis_project export to create a new package.\n\n"
         "`preview.png` is the first page exported from that same layout. This is an "
-        "unverified draft; successful QGIS export does not certify visual or analytical quality.\n",
+        "unverified draft; successful QGIS export does not certify visual or analytical "
+        "quality.\n\n"
+        "Explicit custom fonts, when present, are copied into `assets/fonts/` and registered "
+        "by GeoHarness before re-export. QGIS desktop does not automatically register font "
+        "files from GeoHarness custom properties. If a custom font is absent on another "
+        "computer, select an installed font in QGIS or install the supplied font yourself. "
+        "GeoHarness does not install fonts into the operating system.\n",
         encoding="utf-8",
     )
     manifest_path = Path(context.output_path(None, "project.json"))
@@ -552,7 +1018,7 @@ def _save_package(
         "quality_status": "draft",
         "visual_review_status": "unverified",
         "layers": layer_info,
-        "layout": _layout_metadata(layout),
+        "layout": layout_info,
         "files": sorted({path.relative_to(context.run_dir).as_posix() for path in files}),
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -650,6 +1116,7 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
 
     project = QgsProject.instance()
     project.clear()
+    payload = {**payload, "strict_layout": action == "project_create"}
     preprocessor_id = None
     try:
         if action == "project_create":
@@ -671,18 +1138,24 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             project.layerTreeRoot().setCustomLayerOrder(list(reversed(layers)))
             extent = _extent(project, layers, payload.get("map_extent"))
             project.viewSettings().setDefaultViewExtent(QgsReferencedRectangle(extent, crs))
-            layout = _create_layout(project, layers, extent, payload)
+            layout = _create_layout(project, layers, extent, payload, context)
             return _save_package(project, layout, layers, payload, context)
         if action not in {"project_inspect", "project_export"}:
             raise ValueError(f"Unsupported QGIS project action: {action}")
         source_project = context.read_path(payload["project_path"])
         asset_sources: dict[str, Path] = {}
         assets = _preflight_project(source_project, context, asset_sources)
+        _register_project_fonts(source_project, context)
         if action == "project_export" and assets:
             replacements = {}
             for index, asset in enumerate(assets):
-                target = Path(context.output_path(None, f"assets/{index}{asset.suffix.lower()}"))
-                shutil.copy2(asset, target)
+                if asset.suffix.lower() in _FONT_SUFFIXES:
+                    target, _ = _snapshot_font(asset, context)
+                else:
+                    target = Path(
+                        context.output_path(None, f"assets/{index}{asset.suffix.lower()}")
+                    )
+                    shutil.copy2(asset, target)
                 replacements[str(asset)] = str(target)
             aliases = {name: replacements[str(asset)] for name, asset in asset_sources.items()}
 
@@ -697,6 +1170,9 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             preprocessor_id = QgsPathResolver.setPathPreprocessor(relocate_asset)
         if not project.read(str(source_project)):
             raise ValueError(f"QGIS could not read project: {project.error()}")
+        _restore_font_metadata(
+            project, source_project, context, package=action == "project_export"
+        )
         if action == "project_export" and assets:
             _relocate_project_assets(project, relocate_asset)
         layers = _project_layers(project)

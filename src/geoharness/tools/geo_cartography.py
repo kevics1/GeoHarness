@@ -9,11 +9,11 @@ Two modes:
   the agent to reason about styling before loading data.
 * **Render mode (a data source is given)** — resolves the source to a
   ``GeoDataFrame`` and renders it natively via
-  :mod:`geoharness.cartography` (matplotlib → PNG/PDF/SVG, folium → HTML).
+  :mod:`geoharness.cartography` (QGIS → PNG/PDF, matplotlib → SVG, folium → HTML).
 
 Bridge rules (analysis type → symbolization) stay config-driven: adding a new
-analysis type is a YAML edit, not a code change. No external desktop GIS and
-no ``.qgs``/``.qpt`` dependency — rendering is pure Python.
+analysis type is a YAML edit, not a code change. The native QGIS worker runs
+in its separate installed runtime; an explicit matplotlib compatibility path remains.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from geoharness.cartography.workflow import (
     review_with_budget,
 )
 from geoharness.config.settings import CartographyConfig, MapLayout
+from geoharness.tools.geo_qgis_project import QgisProjectLayout
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,14 @@ class GeoCartographyInput(BaseModel):
         default="",
         description="New editable project directory within the workspace; never overwrites data.",
     )
+    renderer: Literal["", "qgis", "matplotlib"] = Field(
+        default="",
+        description="Static renderer override; default QGIS. HTML/SVG keep their renderer.",
+    )
+    map_crs: str = Field(default="", description="Explicit display CRS; map_extent uses this CRS.")
+    qgis_layout: QgisProjectLayout | None = Field(
+        default=None, description="Native layout: main map, optional detail, legend and footer.",
+    )
     map_extent: list[float] | None = Field(
         default=None,
         min_length=4,
@@ -185,8 +194,8 @@ class GeoCartographyTool(BaseTool):
 
     name: str = "geo_cartography"
     description: str = (
-        "Cartography pipeline — render maps natively (PNG/PDF/SVG + interactive "
-        "HTML) via matplotlib/geopandas/folium: symbolize → compose → export. "
+        "Cartography pipeline — static PNG/PDF uses the same QGIS layout and editable project. "
+        "Explicit matplotlib and SVG/HTML remain available: symbolize → compose → export. "
         "Reads bridge rules from config to auto-select symbolization by analysis "
         "type. Provide a data source (file_path/source_type+source_name/geojson) "
         "to actually render; omit it to get a symbolization plan only. "
@@ -718,6 +727,11 @@ class GeoCartographyTool(BaseTool):
             ).hexdigest()[:16]
         )
         args = args.model_copy(update={"map_id": identity})
+        renderer = args.renderer or config.cartography.static_renderer
+        if renderer == "qgis" and desired.suffix.lower() in {".png", ".pdf"}:
+            from geoharness.cartography.qgis_bridge import render_qgis_map
+
+            return await render_qgis_map(self, args, rule, context)
         stopped = reserve_map_render(identity, context.metadata, config)
         if stopped:
             return ToolResult(output=stopped, metadata={"render_budget_exhausted": True})

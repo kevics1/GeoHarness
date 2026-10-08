@@ -6,6 +6,11 @@
 
 ## QGIS 数据流
 
+`geo_cartography` 的默认 PNG/PDF 路径先复用已有数据解析与分类配色，将图层准备为
+本地快照，再调用独立 QGIS 工程工具。主图、可选详图、图例和说明栏使用结构化布局，
+工程保存后读回验证，图片从同一份打印布局导出。`cartography.static_renderer=matplotlib`
+可显式保留旧静态渲染，HTML/SVG继续使用原有实现。QGIS路径不可用时返回实际错误。
+
 ```mermaid
 flowchart LR
     T[geo_qgis / geo_qgis_project] --> R[独立任务与 JSON 请求]

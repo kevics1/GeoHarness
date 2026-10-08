@@ -150,7 +150,12 @@ class CartographyConfig:
 
     default_template: str = ""
     outputs_dir: str = "exports"
+    static_renderer: str = "qgis"
     bridge_rules: dict[str, BridgeRule] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.static_renderer not in {"qgis", "matplotlib"}:
+            raise ValueError("cartography.static_renderer must be qgis or matplotlib")
 
 
 @dataclass(frozen=True)
@@ -287,6 +292,7 @@ def _parse_cartography(raw: dict[str, Any] | None) -> CartographyConfig:
     return CartographyConfig(
         default_template=template,
         outputs_dir=outputs_dir,
+        static_renderer=raw.get("static_renderer", "qgis"),
         bridge_rules=rules,
     )
 

@@ -318,7 +318,7 @@ class TestNonBlockingTools:
             ],
         }
         cfg = GeoConfig(
-            cartography=CartographyConfig(outputs_dir=str(tmp_path))
+            cartography=CartographyConfig(static_renderer="matplotlib", outputs_dir=str(tmp_path))
         )
         ctx = ToolExecutionContext(
             cwd=tmp_path,

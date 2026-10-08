@@ -19,6 +19,7 @@ agent:
 data:
   file_dir: .
 cartography:
+  static_renderer: qgis
   outputs_dir: exports
   bridge_rules:
     impact:

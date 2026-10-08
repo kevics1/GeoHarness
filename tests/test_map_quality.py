@@ -24,7 +24,13 @@ from geoharness.cartography.renderer import (
     render_layers,
     render_static,
 )
-from geoharness.config.settings import GeoConfig, MapLayout, MapReviewConfig, load_geo_config
+from geoharness.config.settings import (
+    CartographyConfig,
+    GeoConfig,
+    MapLayout,
+    MapReviewConfig,
+    load_geo_config,
+)
 from geoharness.tools.geo_cartography import GeoCartographyInput, GeoCartographyTool
 from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
 
@@ -100,7 +106,10 @@ def data() -> str:
 
 def context(tmp_path, reviewer=None, *, repairs=2):
     return ToolExecutionContext(cwd=tmp_path, metadata={
-        "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=repairs)),
+        "geoharness_config": GeoConfig(
+            cartography=CartographyConfig(static_renderer="matplotlib"),
+            map_review=MapReviewConfig(max_repairs=repairs),
+        ),
         **({"map_review_client": reviewer} if reviewer else {}),
     })
 
@@ -310,7 +319,10 @@ async def test_default_map_export_can_be_read_as_python_input(tmp_path, monkeypa
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    cfg = GeoConfig(map_review=MapReviewConfig(enabled=False))
+    cfg = GeoConfig(
+        cartography=CartographyConfig(static_renderer="matplotlib"),
+        map_review=MapReviewConfig(enabled=False),
+    )
     ctx = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": cfg})
     mapped = await GeoCartographyTool().execute(GeoCartographyInput(
         action="export", geojson=data(), output_format="png",
@@ -465,7 +477,10 @@ async def test_relative_vector_file_uses_execution_workspace(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_disabled_review_skips_unused_preview(tmp_path):
     ctx = context(tmp_path)
-    ctx.metadata["geoharness_config"] = GeoConfig(map_review=MapReviewConfig(enabled=False))
+    ctx.metadata["geoharness_config"] = GeoConfig(
+        cartography=CartographyConfig(static_renderer="matplotlib"),
+        map_review=MapReviewConfig(enabled=False),
+    )
     result = await GeoCartographyTool().execute(GeoCartographyInput(
         action="export", geojson=data(), output_format="pdf", output_path="map.pdf",
     ), ctx)

@@ -190,15 +190,18 @@ _TOOL_CATALOG = """\
   - Actions: list, inspect, load
 - **geo_raster_data**: Load/inspect local raster files (GeoTIFF/IMG/ASC/VRT)
   - Actions: list, inspect, stats
-- **geo_cartography**: Render maps natively — PNG/PDF/SVG + interactive HTML
+- **geo_cartography**: Default PNG/PDF uses a structured QGIS layout and editable project
   - Actions: symbolize, compose, export, full, project
   - Follows bridge rules for analysis→symbolization mapping
   - Rendered maps are visually reviewed and presentation repairs are bounded by
     config.map_review.max_repairs. Pass review_task to preserve the user's map goal.
     PNG is preferred for the first workflow. PDF/SVG are checked via PNG previews;
     interactive HTML requires its own screenshot and stays unverified without one.
-    Native rendering also returns a portable editable QGIS project. For Python maps,
-    action=project with existing output_path and actual layer sources creates the
+    Prefer qgis_layout for main map, detail_extent, legend and footer_text. Declare map_crs
+    when supplying map_extent; bounds are xmin,ymin,xmax,ymax in that display CRS.
+    The QGIS PNG is exported from the packaged print layout. Renderer=matplotlib is
+    an explicit compatibility option; HTML/SVG retain their existing renderer. For Python maps,
+    action=project with existing map_path and actual layer sources creates the
     engineering files without redrawing. Custom Python annotations may need QGIS edits.
   - Single layer: provide file_path, source_type+source_name, or geojson.
   - **MULTI-LAYER (thematic maps like 火灾态势总图)**: pass `layers` as a JSON

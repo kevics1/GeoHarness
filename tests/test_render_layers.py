@@ -146,7 +146,9 @@ class TestLayersToolParam:
     @pytest.fixture
     def context(self, tmp_path: Path) -> ToolExecutionContext:
         cfg = GeoConfig(
-            cartography=CartographyConfig(outputs_dir=str(tmp_path / "out"))
+            cartography=CartographyConfig(
+                static_renderer="matplotlib", outputs_dir=str(tmp_path / "out"),
+            )
         )
         return ToolExecutionContext(
             cwd=tmp_path,

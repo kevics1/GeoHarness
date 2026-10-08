@@ -229,3 +229,13 @@ geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付�
 ## 后续方向
 
 下一阶段补充空间分布与热点分析，再做栅格/地形分析。认知技能保留领域参考价值，简单叠加任务无需强制进入空间自相关或因果流程。
+
+## 默认静态制图
+
+PNG/PDF 默认使用 QGIS。配置 `cartography.static_renderer: qgis`，调用 `geo_cartography` 时可指定 `map_crs` 和 `qgis_layout`。`qgis_layout.detail_extent` 使用 `{xmin,ymin,xmax,ymax}`，与主图范围同属显示坐标系；`footer_text` 提供说明。主图、可选详图、图例和底栏分区生成，类别颜色复用已有桥接规则，中文字体、标注缓冲与避让由 QGIS 处理。
+
+返回的 `project_file` 是真实 QGIS 工程，`preview_path` 是从它的打印布局导出的 PNG。修改工程的图层、样式或打印布局并保存后，使用 `geo_qgis_project(action="export",project_path="...")` 导出新工程和图片。交付以返回的 `primary_map` PNG 与 `project_dir` 为主，PDF 可附加。视觉审查未完成时仍为草稿。
+
+需要旧静态路径时指定 `renderer="matplotlib"` 或配置 `cartography.static_renderer: matplotlib`；HTML/SVG 保留原有渲染入口。QGIS 禁用或启动失败时，默认路径会给出具体错误。
+
+QGIS 新建模板会在导出前检查自身分区与内容溢出。对用户已保存的工程，inspect/export 保留真实布局并在 bounds_check 中记录问题，允许合法的地图内注记或手动移动图例；有问题时按草稿处理。显式 font_file 会随工程打包并由 GeoHarness 重导出时加载。QGIS 桌面需使用已安装字体，或由用户自行安装工程携带的自定义字体；系统默认中文字体无需另行打包。
