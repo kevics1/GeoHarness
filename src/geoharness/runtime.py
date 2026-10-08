@@ -33,6 +33,7 @@ from geoharness.hooks.cascade import (
     build_cascade_manager,
     register_cascade_hooks,
 )
+from geoharness.hooks.executor import GeoHookExecutor
 from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
 from geoharness.workspace_isolation import install_workspace_isolation
 
@@ -354,7 +355,7 @@ def _build_hook_executor(
         api_client=api_client,
         default_model=config.model,
     )
-    return HookExecutor(registry=registry, context=context)
+    return GeoHookExecutor(registry=registry, context=context)
 
 
 def _build_system_prompt(

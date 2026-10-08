@@ -24,11 +24,31 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _runtime_error_detail(exc: Exception, bundle: Any) -> str:
+    """Display the cause without echoing configured authentication or DSNs."""
+    metadata = getattr(getattr(bundle, "engine", None), "tool_metadata", {})
+    config = metadata.get("geoharness_config")
+    secrets = [
+        getattr(config, "api_key", ""),
+        getattr(getattr(config, "map_review", None), "api_key", ""),
+        getattr(getattr(config, "data", None), "postgis_dsn", ""),
+    ]
+    for server in (getattr(config, "mcp_servers", None) or {}).values():
+        secrets.extend(value for key, value in server.env.items() if any(
+            marker in key.upper() for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET", "DSN")
+        ))
+    detail = str(exc)
+    for secret in sorted((str(value) for value in secrets if value), key=len, reverse=True):
+        detail = detail.replace(secret, "[redacted]")
+    return " ".join(detail.split())[:1200]
+
+
 def _geo_backend_host_class():
     from openharness.ui.backend_host import ReactBackendHost
+    from openharness.ui.protocol import BackendEvent
 
     class GeoReactBackendHost(ReactBackendHost):
-        """Emit each error once while preserving unrelated status messages."""
+        """Keep request failures visible and leave the frontend ready for input."""
 
         _last_error_message: str | None = None
 
@@ -44,6 +64,21 @@ def _geo_backend_host_class():
             if event.type == "error":
                 self._last_error_message = event.message
             await super()._emit(event)
+
+        async def _run_active_request(self, awaitable):
+            try:
+                return await super()._run_active_request(awaitable)
+            except Exception as exc:
+                detail = _runtime_error_detail(exc, self._bundle)
+                await self._emit(BackendEvent(
+                    type="error", message=(
+                        f"本轮运行异常终止（{type(exc).__name__}）：{detail}。"
+                        "可继续输入；已完成的工具不会自动重执行。"
+                    ),
+                ))
+                # assistant_complete alone does not clear the React frontend's busy state.
+                await self._emit(BackendEvent(type="line_complete"))
+                return True
 
     return GeoReactBackendHost
 

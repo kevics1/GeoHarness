@@ -112,3 +112,12 @@
 - 全量681项通过；最后初始化模板改为空MCP（不再生成不存在的模块入口）后，CLI/配置/会话36项通过。真实Geo MCP注册后共33工具，map-making实际读取cartography，rasterio EPSG:4326正常。
 - 真实geo_python一次执行print(17*23)，成功结果391进入历史，随后模型正确回答。后续gateway请求出现HTTP502，原始SDK的1024token合成请求也复现；无正文/推理，不属于空消息丢历史缺陷，不盲目重复相同请求。
 - 原全局配置的独立postgres_mcp_server未安装，保留已有配置与凭证；原生geo_db_data仍注册。全局Geo MCP改为实际入口、主模型仍max，空回复仅配置一次none恢复，配置已备份。
+
+# 2026-10-08 TUI 首回复与上下文回收回归
+
+- 跨任务关闭与跨 Context 继续生成器均准确复现 Token was created in a different Context；API请求状态的token原先跨yield持有，后台asyncgen finalizer任务无法reset。现每次推进/关闭时局部set/reset，yield前恢复context。
+- 仅关闭上游外层生成器不能同步关闭SDK连接；真实close spy复现边界，现登记实际transport并显式关闭，观察流与外层共享一次关闭机制。
+- 实际用户目录提交“根据数据文件夹制图”，4.16秒复现AttributeError: ApiRetryEvent has no attribute text。USER_PROMPT_SUBMIT认知Hook max_tokens512触发恢复，上游Hook把所有非final事件误当正文；以前测试用MagicMock Hook绕过了此路径。
+- 本地Hook API代理只过滤重试状态，继续复用上游JSON解析；普通失败返回尊重block_on_failure的HookResult，取消不吞掉。Hook调用纳入engine既有finally，取消时仍结算已确认用量。
+- 上游React后端只捕获取消，普通异常会丢error/line_complete并退出；前端assistant_complete本身不清busy。本地后端补普通异常唯一error及结束事件，返回输入循环。异常详情先对已配置凭证脱敏。
+- 修复后实际用户目录源码首回复5.64秒、安装版首回复8.88秒，均为assistant_delta；随后停止、再输入和exit0正常，stderr无Context和Task回收异常。真实探测停止于首段正文，未据此声称完整业务制图通过。

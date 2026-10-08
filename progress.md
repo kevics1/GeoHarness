@@ -93,3 +93,15 @@
 - 全量681项通过；最后init模板更新后相关36项通过，ruff与diff检查通过；独立评审意见复核关闭。
 - 已构建并更新D:/Python312全局安装，用户example/test目录geoh version/dry-run加载GeoOpenAICompatibleClient与GeoQueryEngine。全局配置备份并保留主模型/凭证/独立postgres配置。
 - 真实geo_python一次计算391，结果保存且模型正确回复；后段聚合服务HTTP502原始SDK也复现，未将其宣称为通过。旧版本漏存的会话内容不伪造补齐，运行目录stdout/script/manifest保留。
+
+# 2026-10-08：TUI无回复回归修复
+
+- 已复现两条Token跨Context失败与SDK未及时关闭，最小本地修复后27项API/TUI通过，后端普通异常5项consumer通过。
+- 增加SDK关闭spy和异常前无回复/下一输入覆盖，37项针对性回归通过；ruff通过。
+- 实际用户目录探测揭示更早的触发源：认知PromptHook把ApiRetryEvent当正文；首轮失败后新的异常收尾使下一条输入正常，退出没有Context或后台Task异常。
+- 新增真实Hook链回归已先失败；Hook兼容层及取消结算已落盘，相关回归与真实目录重新验证进行中。较早全量测试因新根因发现而停止，不作为最终验证。
+- 包含实际Hook的最终相关回归108 passed；ruff通过。本地模型服务当前可返回正常正文。
+- 源码后端在用户目录同一句制图请求5.64秒开始正文；stop后下一输入正常、exit0、无Context或unhandled Task异常。wheel五个修复模块与源码字节一致，内置技能在包内。
+- 已更新D:/Python312全局wheel；移除PYTHONPATH后从用户目录核对所有五模块site-packages路径及SHA256匹配，geoh version/dry-run通过。安装版同请求8.88秒首回复，stop/新输入/exit0通过，主模型max及Default权限保持原有。
+- 此次真实探测在首段正文后停止，未完成业务地图重绘；只验证用户报告的首回复和终端生命周期。最终全量回归仍在执行。
+- 最终全量695 passed（540.26秒）；ruff和diff检查通过，独立复核费用边界关闭。全局安装及真实目录验证完成，本轮修复与使用说明提交，保留用户原有.env.example修改。

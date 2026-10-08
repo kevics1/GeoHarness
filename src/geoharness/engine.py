@@ -27,26 +27,26 @@ class GeoQueryEngine(QueryEngine):
         ):
             remember_user_goal(self._tool_metadata, user_message.text)
         self._messages.append(user_message)
-        if self._hook_executor is not None:
-            await self._hook_executor.execute(
-                HookEvent.USER_PROMPT_SUBMIT,
-                {"event": HookEvent.USER_PROMPT_SUBMIT.value, "prompt": user_message.text},
-            )
-        context = QueryContext(
-            api_client=self._api_client, tool_registry=self._tool_registry,
-            permission_checker=self._permission_checker, cwd=self._cwd,
-            model=self._model, system_prompt=self._system_prompt, max_tokens=self._max_tokens,
-            context_window_tokens=self._context_window_tokens,
-            auto_compact_threshold_tokens=self._auto_compact_threshold_tokens,
-            max_turns=self._max_turns, permission_prompt=self._permission_prompt,
-            ask_user_prompt=self._ask_user_prompt, hook_executor=self._hook_executor,
-            tool_metadata=self._tool_metadata,
-        )
         query_messages = list(self._messages)
-        coordinator_context = self._build_coordinator_context_message()
-        if coordinator_context is not None:
-            query_messages.append(coordinator_context)
         try:
+            if self._hook_executor is not None:
+                await self._hook_executor.execute(
+                    HookEvent.USER_PROMPT_SUBMIT,
+                    {"event": HookEvent.USER_PROMPT_SUBMIT.value, "prompt": user_message.text},
+                )
+            context = QueryContext(
+                api_client=self._api_client, tool_registry=self._tool_registry,
+                permission_checker=self._permission_checker, cwd=self._cwd,
+                model=self._model, system_prompt=self._system_prompt, max_tokens=self._max_tokens,
+                context_window_tokens=self._context_window_tokens,
+                auto_compact_threshold_tokens=self._auto_compact_threshold_tokens,
+                max_turns=self._max_turns, permission_prompt=self._permission_prompt,
+                ask_user_prompt=self._ask_user_prompt, hook_executor=self._hook_executor,
+                tool_metadata=self._tool_metadata,
+            )
+            coordinator_context = self._build_coordinator_context_message()
+            if coordinator_context is not None:
+                query_messages.append(coordinator_context)
             async for event, usage in run_query(context, query_messages):
                 # Tool results are appended between events, and an empty follow-up
                 # has no AssistantTurnComplete. Persist every mutation, including

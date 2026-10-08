@@ -355,3 +355,63 @@ async def test_repeated_cumulative_usage_chunks_are_not_double_counted(monkeypat
     assert pending.input_tokens == 12
     assert pending.output_tokens == 5
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_generator_can_be_closed_from_another_task(monkeypatch):
+    client, calls = mock_client(monkeypatch, [
+        streamed(chunk(reasoning="analysis", finish="length", usage=(23, 16384))),
+    ], empty_response_fallback_model="configured-alternative")
+    stream = client.stream_message(request())
+    assert isinstance(await anext(stream), ApiRetryEvent)
+    # asyncio finalizes abandoned generators in a new task after a UI loop exits.
+    await asyncio.create_task(stream.aclose())
+    assert len(calls) == 1
+    assert client._request_state.get() is None
+
+
+@pytest.mark.asyncio
+async def test_retry_generator_resumes_in_a_new_context_without_losing_recovery(monkeypatch):
+    client, calls = mock_client(monkeypatch, [
+        streamed(chunk(reasoning="analysis", finish="length", usage=(23, 16384))),
+        streamed(chunk(text="Recovered", finish="stop", usage=(24, 5))),
+    ], empty_response_fallback_model="configured-alternative")
+    stream = client.stream_message(request())
+    assert isinstance(await asyncio.create_task(anext(stream)), ApiRetryEvent)
+    events = [event async for event in stream]
+    assert events[-1].message.text == "Recovered"
+    assert len(calls) == 2
+    assert client._request_state.get() is None
+
+
+@pytest.mark.asyncio
+async def test_closing_partial_text_in_another_task_closes_sdk_transport_immediately(monkeypatch):
+    class Transport:
+        close_calls = 0
+
+        def __init__(self):
+            self.chunks = iter([chunk(text="Partial answer"), chunk(finish="stop")])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.chunks)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+        async def close(self):
+            self.close_calls += 1
+
+    transport = Transport()
+    client, calls = mock_client(monkeypatch, [transport])
+    stream = client.stream_message(request())
+    assert (await anext(stream)).text == "Partial answer"
+    assert client._request_state.get() is None
+    await asyncio.create_task(stream.aclose())
+    assert transport.close_calls == 1
+    # Nested upstream finalizers must not close a second time after local cleanup.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert transport.close_calls == 1 and len(calls) == 1

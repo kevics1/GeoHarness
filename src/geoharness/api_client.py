@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
@@ -31,6 +32,7 @@ class _RequestState:
     reported_usage: UsageSnapshot = field(default_factory=UsageSnapshot)
     include_stream_usage: bool = True
     record_usage: Callable[[UsageSnapshot], None] | None = None
+    active_streams: list[Any] = field(default_factory=list)
 
 
 def _add_usage(left: UsageSnapshot, right: UsageSnapshot) -> UsageSnapshot:
@@ -38,6 +40,16 @@ def _add_usage(left: UsageSnapshot, right: UsageSnapshot) -> UsageSnapshot:
         input_tokens=left.input_tokens + right.input_tokens,
         output_tokens=left.output_tokens + right.output_tokens,
     )
+
+
+async def _close_provider_stream(stream: Any, state: _RequestState | None) -> None:
+    if state is not None:
+        if stream not in state.active_streams:
+            return
+        state.active_streams.remove(stream)
+    close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+    if close is not None:
+        await close()
 
 
 class _CompletionProxy:
@@ -62,6 +74,8 @@ class _CompletionProxy:
             else:
                 params.pop("stream_options", None)
         stream = await self._completions.create(**params)
+        if state is not None:
+            state.active_streams.append(stream)
 
         async def observed_stream() -> AsyncIterator[Any]:
             previous_usage = UsageSnapshot()
@@ -93,9 +107,7 @@ class _CompletionProxy:
                         state.raw_content_chars += len(delta.content or "")
                     yield chunk
             finally:
-                close = getattr(stream, "close", None)
-                if close is not None:
-                    await close()
+                await _close_provider_stream(stream, state)
 
         return observed_stream()
 
@@ -185,6 +197,39 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
             return False
         return super()._is_retryable(exc)
 
+    async def _stream_request(
+        self, request: ApiMessageRequest, state: _RequestState,
+    ) -> AsyncIterator[ApiStreamEvent]:
+        """Scope provider state to each advancement, never to a suspended yield.
+
+        An async generator may be resumed or finalized by a different task. Tokens
+        must be reset in the same context that created them, before handing control
+        back to the consumer. Closing the upstream iterator follows the same rule.
+        """
+        stream = super().stream_message(request)
+        try:
+            while True:
+                token = self._request_state.set(state)
+                try:
+                    event = await anext(stream)
+                except StopAsyncIteration:
+                    return
+                finally:
+                    self._request_state.reset(token)
+                yield event
+        finally:
+            token = self._request_state.set(state)
+            try:
+                try:
+                    await stream.aclose()
+                finally:
+                    # The upstream outer iterator does not explicitly close its
+                    # nested parser; release HTTP resources before returning.
+                    for provider_stream in list(state.active_streams):
+                        await _close_provider_stream(provider_stream, state)
+            finally:
+                self._request_state.reset(token)
+
     async def stream_message(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
         self._empty_diagnostic.set(None)
         self._response_diagnostic.set(None)
@@ -195,21 +240,17 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         fallback_model = self.settings.empty_response_fallback_model.strip() or request.model
         alternative = fallback_model != request.model or fallback_extras != extras
         attempts = 1 + (self.settings.empty_response_retries if alternative else 0)
-        state_token = None
         last_empty: ApiMessageCompleteEvent | None = None
         last_diagnostic = ""
-        try:
-            for attempt in range(attempts):
-                state = _RequestState(
-                    extra_body=extras, include_stream_usage=self.settings.include_stream_usage,
-                    record_usage=self._record_usage,
-                )
-                if state_token is not None:
-                    self._request_state.reset(state_token)
-                state_token = self._request_state.set(state)
-                final: ApiMessageCompleteEvent | None = None
-                try:
-                    async for event in super().stream_message(current):
+        for attempt in range(attempts):
+            state = _RequestState(
+                extra_body=extras, include_stream_usage=self.settings.include_stream_usage,
+                record_usage=self._record_usage,
+            )
+            final: ApiMessageCompleteEvent | None = None
+            try:
+                async with aclosing(self._stream_request(current, state)) as stream:
+                    async for event in stream:
                         if isinstance(event, ApiMessageCompleteEvent):
                             final = event
                         else:
@@ -217,70 +258,67 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                                 state.visible_chars += len(event.text)
                                 state.visible_text.append(event.text)
                             yield event
-                except Exception as exc:
-                    usage = _add_usage(usage, state.reported_usage)
-                    if state.visible_chars:
-                        self._response_diagnostic.set(
-                            f"模型 {current.model} 的回答传输中断（{type(exc).__name__}）；"
-                            "已保留收到的部分正文，回答尚未完成，未完成的工具调用不会执行"
-                        )
-                        yield ApiMessageCompleteEvent(
-                            message=ConversationMessage(role="assistant", content=[
-                                TextBlock(text="".join(state.visible_text)),
-                            ]),
-                            usage=usage, stop_reason="transport_error",
-                        )
-                        return
-                    if last_empty is None:
-                        raise
-                    # Keep the billed first response even if the recovery transport fails.
-                    self._set_empty_diagnostic(
-                        f"{last_diagnostic}；恢复请求失败（{type(exc).__name__}），"
-                        "工具结果已保留，可继续处理"
+            except Exception as exc:
+                usage = _add_usage(usage, state.reported_usage)
+                if state.visible_chars:
+                    self._response_diagnostic.set(
+                        f"模型 {current.model} 的回答传输中断（{type(exc).__name__}）；"
+                        "已保留收到的部分正文，回答尚未完成，未完成的工具调用不会执行"
                     )
-                    yield replace(last_empty, usage=usage)
+                    yield ApiMessageCompleteEvent(
+                        message=ConversationMessage(role="assistant", content=[
+                            TextBlock(text="".join(state.visible_text)),
+                        ]),
+                        usage=usage, stop_reason="transport_error",
+                    )
                     return
-                if final is None:
-                    raise RuntimeError("Model stream finished without a final message")
-                # Normally the proxy observes these tokens before the parser's final event.
-                # Retain compatibility if an upstream stream adapter reports usage only here.
-                unobserved = UsageSnapshot(
-                    input_tokens=max(
-                        final.usage.input_tokens - state.reported_usage.input_tokens, 0,
-                    ),
-                    output_tokens=max(
-                        final.usage.output_tokens - state.reported_usage.output_tokens, 0,
-                    ),
+                if last_empty is None:
+                    raise
+                # Keep the billed first response even if the recovery transport fails.
+                self._set_empty_diagnostic(
+                    f"{last_diagnostic}；恢复请求失败（{type(exc).__name__}），"
+                    "工具结果已保留，可继续处理"
                 )
-                self._record_usage(unobserved)
-                usage = _add_usage(usage, _add_usage(state.reported_usage, unobserved))
-                empty = final.message.is_effectively_empty()
-                if not empty:
-                    yield replace(final, usage=usage)
-                    return
-                diagnostic = self._diagnostic(current, final, state, attempt + 1)
-                last_empty = final
-                last_diagnostic = diagnostic
-                if state.visible_chars or attempt + 1 >= attempts:
-                    self._set_empty_diagnostic(diagnostic)
-                    yield replace(final, usage=usage)
-                    return
-                yield ApiRetryEvent(
-                    message=(
-                        f"{diagnostic}；仅重试模型请求，临时使用 {fallback_model}，"
-                        "已完成的工具不会再次执行"
-                    ),
-                    attempt=attempt + 1, max_attempts=attempts, delay_seconds=0,
-                )
-                recovery_limit = self.settings.empty_response_max_tokens or request.max_tokens
-                current = replace(
-                    request, model=fallback_model,
-                    max_tokens=min(request.max_tokens, recovery_limit),
-                )
-                extras = fallback_extras
-        finally:
-            if state_token is not None:
-                self._request_state.reset(state_token)
+                yield replace(last_empty, usage=usage)
+                return
+            if final is None:
+                raise RuntimeError("Model stream finished without a final message")
+            # Normally the proxy observes these tokens before the parser's final event.
+            # Retain compatibility if an upstream stream adapter reports usage only here.
+            unobserved = UsageSnapshot(
+                input_tokens=max(
+                    final.usage.input_tokens - state.reported_usage.input_tokens, 0,
+                ),
+                output_tokens=max(
+                    final.usage.output_tokens - state.reported_usage.output_tokens, 0,
+                ),
+            )
+            self._record_usage(unobserved)
+            usage = _add_usage(usage, _add_usage(state.reported_usage, unobserved))
+            empty = final.message.is_effectively_empty()
+            if not empty:
+                yield replace(final, usage=usage)
+                return
+            diagnostic = self._diagnostic(current, final, state, attempt + 1)
+            last_empty = final
+            last_diagnostic = diagnostic
+            if state.visible_chars or attempt + 1 >= attempts:
+                self._set_empty_diagnostic(diagnostic)
+                yield replace(final, usage=usage)
+                return
+            yield ApiRetryEvent(
+                message=(
+                    f"{diagnostic}；仅重试模型请求，临时使用 {fallback_model}，"
+                    "已完成的工具不会再次执行"
+                ),
+                attempt=attempt + 1, max_attempts=attempts, delay_seconds=0,
+            )
+            recovery_limit = self.settings.empty_response_max_tokens or request.max_tokens
+            current = replace(
+                request, model=fallback_model,
+                max_tokens=min(request.max_tokens, recovery_limit),
+            )
+            extras = fallback_extras
 
     @staticmethod
     def _diagnostic(
