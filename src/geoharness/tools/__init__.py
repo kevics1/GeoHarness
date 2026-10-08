@@ -106,6 +106,10 @@ def _register_whitelist_tools(registry: ToolRegistry) -> None:
     registered = 0
     for tool in default_registry.list_tools():
         if tool.name in _WHITELIST_TOOL_NAMES:
+            if tool.name == "skill":
+                from geoharness.tools.geo_skill import GeoSkillTool
+
+                tool = GeoSkillTool()
             registry.register(tool)
             registered += 1
 

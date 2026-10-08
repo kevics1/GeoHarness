@@ -78,8 +78,9 @@ async def connect_mcp_servers(
             _safe_disconnect(manager, name)
             continue
         except Exception as e:  # noqa: BLE001 — report and continue
-            results[name] = f"failed: {e}"
-            logger.warning("MCP server '%s' failed to connect: %s", name, e)
+            detail = _safe_error_text(str(e), cfg)
+            results[name] = f"failed: {detail}"
+            logger.warning("MCP server '%s' failed to connect: %s", name, detail)
             _safe_disconnect(manager, name)
             continue
 
@@ -88,9 +89,11 @@ async def connect_mcp_servers(
             # The handshake returned but never reached "connected":
             # pending = registration incomplete, failed/disabled = error.
             # Do not advertise tools from a server in this state.
-            results[name] = f"failed (post-connect state: {state})"
+            detail = _status_detail(manager, name, cfg)
+            suffix = f": {detail}" if detail else ""
+            results[name] = f"failed (post-connect state: {state}){suffix}"
             logger.warning(
-                "MCP server '%s' did not reach connected state: %s", name, state
+                "MCP server '%s' did not reach connected state: %s%s", name, state, suffix
             )
             _safe_disconnect(manager, name)
         else:
@@ -111,6 +114,30 @@ def _status_state(manager: Any, name: str) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _safe_error_text(detail: str, config: Any) -> str:
+    """Keep the cause visible without exposing configured credentials."""
+    env = getattr(config, "env", None) or {}
+    if isinstance(env, dict):
+        for key, value in env.items():
+            if value and any(
+                token in str(key).upper()
+                for token in ("KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "DSN")
+            ):
+                detail = detail.replace(str(value), "[redacted]")
+    return " ".join(detail.split())[:1200]
+
+
+def _status_detail(manager: Any, name: str, config: Any) -> str:
+    """Read the diagnostic swallowed by the upstream connection method."""
+    try:
+        for status in manager.list_statuses():
+            if getattr(status, "name", None) == name:
+                return _safe_error_text(str(getattr(status, "detail", "") or ""), config)
+    except Exception:
+        pass
+    return ""
 
 
 def _safe_disconnect(manager: Any, name: str) -> None:

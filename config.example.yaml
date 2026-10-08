@@ -6,6 +6,16 @@ api_key: local
 mcp: {}
 agent:
   max_tokens: 16384
+  # Set false only if the provider rejects stream_options.include_usage.
+  include_stream_usage: true
+  request_extra_body: {}
+  # Only an empty model response triggers this explicitly configured, single retry.
+  # The main model remains (max); this local gateway's (none) alias disables reasoning.
+  empty_response_retries: 1
+  empty_response_fallback_model: cbcn/deepseek-v4.1-flash(none)
+  empty_response_fallback_extra_body: {}
+  # Recovery does not increase the main request's token limit.
+  empty_response_max_tokens: 8192
 data:
   file_dir: .
 cartography:

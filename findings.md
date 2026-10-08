@@ -100,3 +100,15 @@
 - wheel环境验证发现将主site-packages放入worker.sys.path会使QGIS导入主NumPy2、产生GDAL ABI错误。改为importlib限定加载GeoHarness包、不改sys.path；源码/wheel两种真实子进程回归与最终安装版完整流程通过，QGIS doctor stderr为空。
 - 原生资源验证：内置SVG按QGIS官方资源目录解析，现代Option和旧prop格式兼容。真实导出后活动符号及打印布局锁定样式引用包内SVG，副本摘要和其他符号属性保持一致。
 - 修复图实际模型报告issues，其中水体名称和北箭头样式意见需要结合任务/实际参数判断；保留原始报告及draft，不为了样式建议无限重画。原风险GeoJSON、两个CSV及附图字节保留，原始234点风险分类未重算。
+# 2026-10-08 启动与会话诊断
+
+- 用户实际 `.geoharness/runs` 中 check_analysis_dir、tree_check、tree_check2 均有成功脚本输出；并非工具返回为空。
+- 上游 QueryEngine.submit_message 只在 AssistantTurnComplete 同步 query_messages；工具结果在该事件之后追加，下一次空模型消息直接返回时，刚完成的 tool_result 丢失。真实工具循环回归先失败，修复后结果留存与继续不重执行通过。
+- 连续失败会话的 output_tokens 每次约增加16,384；本机9Router模型后缀优先于 reasoning_effort，max模式低参数仍产生推理。none别名真实请求有正文且reasoning_tokens=0；64token合成算术请求真实触发一次恢复，返回333833500，合计67输出token。
+- MCP错误模块不存在；本机实际 D:/Python312/python.exe -m src.server、cwd E:/Administrator/hermes/geo-mcp-server，18工具握手及CRS转换成功。
+- PostGIS数据库layout2与rasterio自带layout6不兼容，pyproj使用自己layout4正常。修复按rasterio实际数据库选择，成功使用debug日志，机器环境与PostGIS数据不改。
+- React ErrorEvent同时发送error与同文system transcript，前端都会渲染；本地后端只抑制紧邻重复文本，错误仍保留在历史。
+- 独立评审要求补充取消恢复时费用结算、带工具的stream_options.include_usage及部分流式答案中断诊断；已修复并复核关闭，API21项和引擎/模型26项测试通过。
+- 全量681项通过；最后初始化模板改为空MCP（不再生成不存在的模块入口）后，CLI/配置/会话36项通过。真实Geo MCP注册后共33工具，map-making实际读取cartography，rasterio EPSG:4326正常。
+- 真实geo_python一次执行print(17*23)，成功结果391进入历史，随后模型正确回答。后续gateway请求出现HTTP502，原始SDK的1024token合成请求也复现；无正文/推理，不属于空消息丢历史缺陷，不盲目重复相同请求。
+- 原全局配置的独立postgres_mcp_server未安装，保留已有配置与凭证；原生geo_db_data仍注册。全局Geo MCP改为实际入口、主模型仍max，空回复仅配置一次none恢复，配置已备份。

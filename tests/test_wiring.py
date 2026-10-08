@@ -114,6 +114,24 @@ class TestConnectMcpServers:
         manager = FakeMcpManager()
         assert await connect_mcp_servers(manager) == {}
 
+    async def test_failed_state_reports_status_detail(self, caplog) -> None:
+        manager = FakeMcpManager(behaviors={"geo": "silent"})
+        manager._statuses["geo"].state = "failed"
+        manager._statuses["geo"].detail = "No module named geo_mcp_server"
+        results = await connect_mcp_servers(manager)
+        assert "No module named geo_mcp_server" in results["geo"]
+        assert "No module named geo_mcp_server" in caplog.text
+
+    async def test_status_detail_redacts_configured_credentials(self, caplog) -> None:
+        manager = FakeMcpManager(behaviors={"geo": "silent"})
+        manager._statuses["geo"].state = "failed"
+        manager._statuses["geo"].detail = "connect rejected SECRET-MCP-KEY"
+        manager._server_configs["geo"].env = {"API_KEY": "SECRET-MCP-KEY"}
+        results = await connect_mcp_servers(manager)
+        assert "[redacted]" in results["geo"]
+        assert "SECRET-MCP-KEY" not in results["geo"]
+        assert "SECRET-MCP-KEY" not in caplog.text
+
 
 # ── register_mcp_tools ────────────────────────────────────────────
 

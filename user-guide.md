@@ -37,6 +37,43 @@ wheel 包含全部内置技能及其参考文件，安装后运行无需保留�
 
 若启动提示配置的 MCP 模块不存在，系统会继续运行原生工具；需要相应扩展时，为该服务配置实际可用的 command/args。
 
+MCP 配置必须对应真实安装入口，不能按服务名猜 Python 模块名。本机 Geo MCP 服务已验证
+使用 `D:/Python312/python.exe -m src.server`，cwd 为
+`E:/Administrator/hermes/geo-mcp-server`。其他机器应配置自己的 Python 和服务目录。
+连接失败会显示具体原因；原生空间分析和 PostGIS 数据工具仍可使用。
+新执行 `geoh init` 默认不启用外部 MCP；安装服务后再配置真实入口。已有用户配置不自动删除。
+
+继承的 PostGIS PROJ 数据目录可能与 rasterio wheel 不兼容。启动时只在当前进程选择
+与 rasterio 自带数据库兼容的目录，成功修复不显示警告，不修改机器环境或 PostGIS 文件；
+pyproj 仍使用自己的数据目录。
+
+`skill name=map-making` 兼容映射到项目的 `cartography`；用户实际安装的同名技能优先。
+项目五个技能为 `spatial-analysis`、`cartography`、`geo-perception`、
+`geo-comprehension`、`geo-reasoning`，未知名称会返回当前实际可用的技能名称。
+
+工具运行成功后，即使模型下一次回复为空，已完成的调用和结果也会保存到会话。
+恢复请求沿用结果，不重新执行该工具。空回复与工具失败分别处理，终端同一错误只显示一次。
+已保存的完整工具对话可恢复；旧版本已经漏存的结果不会凭空补回，但 Python 运行目录的
+脚本、stdout 和 manifest 仍在，可以按路径重新读取。
+
+本机主模型仍为 `cbcn/deepseek-v4.1-flash(max)`。聚合服务的 `(max)` 后缀优先于
+低推理请求参数；当推理耗尽输出额度时可能没有正文或工具调用。可在 `agent` 中明确配置
+一次空回复恢复，临时使用已经验证的同模型 `(none)` 模式，界面会显示恢复模式：
+
+```yaml
+agent:
+  max_tokens: 16384
+  empty_response_retries: 1
+  empty_response_fallback_model: cbcn/deepseek-v4.1-flash(none)
+  empty_response_max_tokens: 8192
+```
+
+未配置恢复模式时不会自动换模型或盲目扩大预算。持续空回复会说明结束原因、token 消耗
+和推理长度；失败请求的 token 也计入会话用量。升级后退出旧进程，重新执行 `geoh run`。
+默认 `agent.include_stream_usage: true` 明确请求流式用量；不支持该参数的服务可设为 false，
+服务没有返回用量时无法准确统计。恢复期间取消仍结算服务已经返回的用量；正文传输中断
+会保留收到的部分内容，并明确提示回答尚未完成，残缺的工具调用不会执行。
+
 配置、日志、会话及插件/自动任务状态统一保存到 `~/.geoharness/`，不同工作目录的状态分开保存。启动不会再在工作目录创建 `.openharness`。工作目录的 `.geoharness` 保存分析和 Python 运行记录，是有实际用途的目录。
 
 ## 使用本机 QGIS

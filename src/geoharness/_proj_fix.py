@@ -1,9 +1,10 @@
 """Early PROJ environment repair.
 
-A system-wide ``PROJ_LIB`` pointing at a stale ``proj.db`` (commonly the copy
-inside ``PostgreSQL\\..\\postgis-3.6\\proj``, layout version 2) poisons every
-EPSG lookup in the process — and PROJ initialises ONCE, on first use, so
-whatever database is configured at that moment wins for the whole session.
+A system-wide ``PROJ_DATA``/``PROJ_LIB`` can point at a database belonging to
+another PROJ installation. Repair that inherited path before GDAL/rasterio
+creates its PROJ context. Different wheels can bundle different PROJ versions:
+pyproj selects its own internal data directory, while rasterio needs an
+environment path compatible with its bundled database.
 
 Import this module as early as possible (every geoharness module that touches
 geopandas/rasterio imports it at load time). It must stay dependency-free:
@@ -20,10 +21,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# PROJ requires its SQLite database to use layout version >= 6. Older ones
-# (PostgreSQL's PostGIS bundle = 2, pyproj's wheel = 4) make every EPSG lookup
-# fail. rasterio ships a current copy of its own.
-_PROJ_DB_MIN_LAYOUT_MINOR = 6
 _fixed = False
 
 
@@ -35,7 +32,7 @@ def _proj_db_layout_minor(directory: str | None) -> int | None:
     if not db.exists():
         return None
     try:
-        con = sqlite3.connect(str(db))
+        con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             row = con.execute(
                 "SELECT value FROM metadata "
@@ -63,29 +60,36 @@ def _rasterio_proj_dir() -> str | None:
 
 
 def ensure_proj_data() -> None:
-    """Point ``PROJ_LIB``/``PROJ_DATA`` at a usable ``proj.db`` (idempotent)."""
+    """Repair stale inherited data using this rasterio wheel's database.
+
+    PROJ_DATA takes precedence over the older PROJ_LIB. A successful repair is
+    normal environment setup, so it does not produce a user-facing warning.
+    No system environment, PostGIS data, or pyproj data directory is modified.
+    """
     global _fixed
     if _fixed:
         return
     _fixed = True
 
-    current = os.environ.get("PROJ_LIB")
-    current_minor = _proj_db_layout_minor(current)
-    if current_minor is not None and current_minor >= _PROJ_DB_MIN_LAYOUT_MINOR:
-        return  # already usable
-
     bundled = _rasterio_proj_dir()
     if not bundled:
         return
-    if (_proj_db_layout_minor(bundled) or 0) < _PROJ_DB_MIN_LAYOUT_MINOR:
-        return  # nothing better to fall back to
+    bundled_minor = _proj_db_layout_minor(bundled)
+    if bundled_minor is None:
+        logger.warning("Cannot read rasterio's bundled PROJ database at %s", bundled)
+        return
 
-    logger.warning(
-        "PROJ_LIB (%s) uses proj.db layout %s (< %d); using rasterio's data "
-        "at %s",
+    current = os.environ.get("PROJ_DATA") or os.environ.get("PROJ_LIB")
+    current_minor = _proj_db_layout_minor(current)
+    if current_minor is not None and current_minor >= bundled_minor:
+        return
+
+    logger.debug(
+        "PROJ data (%s) uses proj.db layout %s; selecting rasterio's bundled "
+        "layout %s at %s",
         current or "<unset>",
         current_minor,
-        _PROJ_DB_MIN_LAYOUT_MINOR,
+        bundled_minor,
         bundled,
     )
     os.environ["PROJ_LIB"] = bundled

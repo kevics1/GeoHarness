@@ -99,10 +99,12 @@ suitable metric CRS for distances, and report source and target CRS.
 _SKILLS_CATALOG = """\
 # Cognitive Skills
 
-Three skills provide structured workflows for each cognitive level:
+Five geography skills are available. Use their exact names when loading:
 
 | Skill | Level | Purpose |
 |-------|-------|---------|
+| spatial-analysis | Entry | Spatial analysis and input validation |
+| cartography | Entry | Map creation and image review |
 | geo-perception | L1 | 5-step perception flow |
 | geo-comprehension | L2 | 6-step comprehension flow |
 | geo-reasoning | L3 | 6-step reasoning flow |
@@ -112,6 +114,8 @@ L2 tools: geo_moran_global, geo_moran_local, geo_getis_ord
 L3 tools: geo_cluster_detect, geo_od_flow, geo_causal_check
 
 Load skills with: skill(name="geo-perception") etc.
+For map-making use skill(name="cartography"). If a name is unavailable, the
+skill tool returns the actual available names; choose from that list.
 
 ### 空间分析入口（重要）
 - 空间任务先加载 skill(name="spatial-analysis")，确认输入、CRS、分析口径与验证。

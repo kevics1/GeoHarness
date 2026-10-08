@@ -25,6 +25,7 @@ from openharness.state.store import AppStateStore
 from openharness.tools.base import ToolRegistry
 from openharness.ui.runtime import RuntimeBundle
 
+from geoharness.api_client import GeoOpenAICompatibleClient
 from geoharness.config.settings import GeoConfig, load_geo_config
 from geoharness.engine import GeoQueryEngine
 from geoharness.hooks.cascade import (
@@ -260,9 +261,10 @@ def _build_api_client(config: GeoConfig) -> OpenAICompatibleClient:
     if not config.api_key:
         logger.warning("No API key configured — agent will fail on LLM calls")
 
-    return OpenAICompatibleClient(
+    return GeoOpenAICompatibleClient(
         api_key=config.api_key,
         base_url=config.base_url if config.base_url else None,
+        settings=config.agent,
     )
 
 

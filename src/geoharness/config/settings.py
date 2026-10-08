@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AnalysisConfig(BaseModel):
@@ -51,6 +51,24 @@ class AgentConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     max_tokens: int = Field(default=16384, ge=1024, le=65536)
+    include_stream_usage: bool = True
+    request_extra_body: dict[str, Any] = Field(default_factory=dict)
+    empty_response_retries: int = Field(default=1, ge=0, le=1)
+    empty_response_fallback_model: str = ""
+    empty_response_fallback_extra_body: dict[str, Any] = Field(default_factory=dict)
+    empty_response_max_tokens: int | None = Field(default=None, ge=256, le=65536)
+
+    @field_validator("request_extra_body", "empty_response_fallback_extra_body")
+    @classmethod
+    def validate_provider_extensions(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Extensions must not silently replace the configured model or tool context."""
+        reserved = {
+            "model", "messages", "tools", "stream", "stream_options",
+            "max_tokens", "max_completion_tokens",
+        }
+        if reserved.intersection(value):
+            raise ValueError("Use explicit agent settings for model and token limits")
+        return value
 
 
 class DeliveryConfig(BaseModel):

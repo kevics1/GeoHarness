@@ -85,3 +85,11 @@
 - 最终wheel已构建并安装到现有D:/Python312环境，未更改模型、审查配置、凭证或主NumPy。安装版从F:/Desktop/Project/GeoHarness/example/test调用完整合成分析/工程/交付、model3与用户保存工程导出均通过，doctor无依赖stderr，geoh dry-run组装15工具；ruff全通过。
 - 新交付位于 F:/Desktop/Project/GeoHarness/example/test/exports/西昌地图布局修复-z2rkt69i；风险GeoJSON、CSV与附图字节保持不变。完整Python分区图有可移植redraw-layout.py及数据副本，实际在该交付目录重绘成功，布局再次通过。
 - 构建wheel并更新D:/Python312全局安装，保留主模型max及凭证，独立审图为none；test目录全局geoh version/dry-run成功，加载site-packages版本，未创建.openharness。用户原.env.example未纳入提交。
+# 2026-10-08：启动与工具后空回复修复
+
+- 复现真实工具成功后空消息漏存结果；会话现在保存最终失败前完成的工具结果，完整会话可恢复，继续处理不自动重执行工具。
+- 主模型保留max；显式一次none空回复恢复已实测。用量在SDK chunk确认，取消补记，成功确认后不重复计费；部分正文中断保存并显示未完成，残缺工具不执行。
+- Geo MCP真实模块入口握手18工具、CRS转换与rasterio EPSG读取通过；map-making兼容读取实际cartography。新init不再生成不存在模块入口。
+- 全量681项通过；最后init模板更新后相关36项通过，ruff与diff检查通过；独立评审意见复核关闭。
+- 已构建并更新D:/Python312全局安装，用户example/test目录geoh version/dry-run加载GeoOpenAICompatibleClient与GeoQueryEngine。全局配置备份并保留主模型/凭证/独立postgres配置。
+- 真实geo_python一次计算391，结果保存且模型正确回复；后段聚合服务HTTP502原始SDK也复现，未将其宣称为通过。旧版本漏存的会话内容不伪造补齐，运行目录stdout/script/manifest保留。
