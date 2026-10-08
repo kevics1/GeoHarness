@@ -107,4 +107,3 @@ def test_geo_registry_uses_skill_adapter_without_changing_tool_count():
     assert isinstance(tool, GeoSkillTool)
     assert tool.is_read_only(SkillToolInput(name="cartography"))
     assert len(registry.list_tools()) == 15
-
