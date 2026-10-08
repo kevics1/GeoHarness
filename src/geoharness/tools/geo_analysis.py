@@ -100,6 +100,7 @@ class GeoAnalysisTool(BaseTool):
                     arguments,
                     cwd=Path(context.cwd).resolve(),
                     catalog=context.metadata.get("data_catalog"),
+                    publication_settings=getattr(config, "publication", None),
                     outputs_dir=outputs_dir,
                     metric_crs=metric_crs,
                     timeout_seconds=timeout,
@@ -126,21 +127,30 @@ class GeoAnalysisTool(BaseTool):
                 ),
                 metadata={**manifest, "output_path": output_path},
             )
-        except (asyncio.TimeoutError, TimeoutError):
+        except (asyncio.TimeoutError, TimeoutError) as exc:
             cancelled.set()
+            diagnostic = getattr(exc, "diagnostics", None)
+            retained = (
+                f" Prepared results retained at {diagnostic['source']}; publication interrupted."
+                if diagnostic else ""
+            )
             return ToolResult(
                 output=(
                     f"Error: spatial analysis timed out after {timeout}s; "
-                    "no result returned. Worker cancellation requested."
+                    "no published result returned. Worker cancellation requested." + retained
                 ),
                 is_error=True,
+                metadata={"publication": diagnostic} if diagnostic else {},
             )
         except asyncio.CancelledError:
             cancelled.set()
             raise
         except Exception as exc:
             logger.exception("geo_analysis failed")
-            return ToolResult(output=f"Error: {arguments.action} failed — {exc}", is_error=True)
+            return ToolResult(
+                output=f"Error: {arguments.action} failed — {exc}", is_error=True,
+                metadata=({"publication": exc.diagnostics} if hasattr(exc, "diagnostics") else {}),
+            )
 
     def is_read_only(self, arguments: BaseModel) -> bool:
         return False

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
 import tempfile
 import time
 import uuid
@@ -13,6 +14,8 @@ from threading import Event
 from typing import Any
 
 from geoharness.cartography.sources import resolve_geodataframe
+from geoharness.config.settings import PublicationConfig
+from geoharness.files.publication import DirectoryPublicationError, publish_directory
 
 _COUNT_SEMANTICS = (
     "A source feature counts once in each zone it intersects, including boundaries. "
@@ -257,6 +260,7 @@ def analyze_vectors(
     metric_crs: str = "",
     timeout_seconds: float = 120,
     cancelled: Event | None = None,
+    publication_settings: PublicationConfig | None = None,
 ) -> dict[str, Any]:
     """Run one operation and publish GeoJSON, CSV and a JSON manifest atomically.
 
@@ -304,8 +308,9 @@ def analyze_vectors(
                  if item["file_path"]}
     _check_deadline(deadline, cancelled)
     root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=root, prefix=".staging-") as stage_name:
-        stage = Path(stage_name)
+    stage = Path(tempfile.mkdtemp(dir=root, prefix=".staging-"))
+    publication_ready = False
+    try:
         for label, frame in artifacts.items():
             _check_deadline(deadline, cancelled)
             exported = frame.to_crs("EPSG:4326")
@@ -355,6 +360,28 @@ def analyze_vectors(
         (stage / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        _check_deadline(deadline, cancelled)
-        stage.rename(directory)
+        publication_ready = True
+        manifest["publication"] = publish_directory(
+            stage, directory, settings=publication_settings,
+            before_attempt=lambda: _check_deadline(deadline, cancelled),
+        )
+    except BaseException as error:
+        diagnostics = getattr(error, "diagnostics", None)
+        retain_stage = publication_ready and (
+            isinstance(error, DirectoryPublicationError)
+            or (isinstance(diagnostics, dict) and diagnostics.get("status") == "interrupted")
+        )
+        if retain_stage:
+            # Exports are complete. A blocked or interrupted publication does
+            # not require rerunning GIS; preserve the original exception type.
+            try:
+                (stage / "publication.json").write_text(
+                    json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except OSError:
+                # Diagnostic writes must not hide the publication/timeout error.
+                pass
+        else:
+            shutil.rmtree(stage, ignore_errors=True)
+        raise
     return manifest

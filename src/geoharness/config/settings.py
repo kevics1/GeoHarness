@@ -32,6 +32,14 @@ class ExecutionConfig(BaseModel):
     max_output_chars: int = Field(default=12000, ge=100, le=1000000)
 
 
+class PublicationConfig(BaseModel):
+    """Bounded recovery for transient Windows directory publication failures."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    max_attempts: int = Field(default=4, ge=1, le=10)
+    retry_delay_seconds: float = Field(default=0.1, ge=0, le=1)
+
+
 class QgisConfig(BaseModel):
     """An independently installed QGIS runtime; never import it into the agent process."""
 
@@ -109,6 +117,8 @@ class MapReviewConfig(BaseModel):
     timeout_seconds: float = Field(default=90, gt=0, le=300)
     max_tokens: int = Field(default=8192, ge=256, le=65536)
     max_image_side: int = Field(default=1800, ge=256, le=4096)
+    diagnostics_max_chars: int = Field(default=2048, ge=128, le=8192)
+    max_validation_errors: int = Field(default=12, ge=1, le=50)
     layout: MapLayout = Field(default_factory=MapLayout)
 
 # Pattern for ${VAR} expansion in config values
@@ -203,6 +213,7 @@ class GeoConfig:
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    publication: PublicationConfig = field(default_factory=PublicationConfig)
     qgis: QgisConfig = field(default_factory=QgisConfig)
     map_review: MapReviewConfig = field(default_factory=MapReviewConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
@@ -411,6 +422,7 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         permissions=permissions,
         analysis=AnalysisConfig.model_validate(_expand_vars(raw.get("analysis") or {})),
         execution=ExecutionConfig.model_validate(_expand_vars(raw.get("execution") or {})),
+        publication=PublicationConfig.model_validate(_expand_vars(raw.get("publication") or {})),
         qgis=QgisConfig.model_validate(_expand_vars(raw.get("qgis") or {})),
         map_review=MapReviewConfig.model_validate(_expand_vars(raw.get("map_review") or {})),
         agent=AgentConfig.model_validate(_expand_vars(raw.get("agent") or {})),

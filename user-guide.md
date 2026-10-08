@@ -180,6 +180,10 @@ Python 每次保留 analysis.py、stdout.txt、stderr.txt、manifest.json 和产
 
 运行器清理凭证环境，限制通常的文件/GIS 接口、网络和子进程；原始数据默认只读，修改时生成新文件。它用于可信 Agent 分析脚本，不能隔离恶意 native 代码，**不是 OS 安全沙箱**。
 
+工具定义公开当前 Python 超时上限；通常省略 timeout_seconds。超过上限的参数在执行前拒绝，并显示请求值和允许值，这与实际运行超时不同。工具参数截断、非对象 JSON 与缺少必填字段分别记录错误类别和位置，拒绝的调用不会执行；其它合法调用与已完成结果保留，模型可继续修正参数。
+
+分析和工程发布遇到 Windows 临时访问/共享冲突时，仅重试最后的目录重命名，不重复计算。publication.max_attempts（默认4）与 retry_delay_seconds（默认0.1）控制有限重试；仍失败时保留暂存结果及恢复路径，不自动关闭占用进程或修改权限。
+
 ## 成图检查与自动重绘
 
 geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，最多两轮，可配置为 0 或 1 轮。不会因为 info 提示或单纯审美建议再画一版。修正前地图、PNG 预览和 report.json 位于成图旁独立的 `.review-*` 目录；路径通过工具结果返回，不覆盖已有旁侧文件。
@@ -203,6 +207,10 @@ PNG 是首期推荐输出。PDF/SVG 检查同参数 PNG 预览，导出文件本
 map_review 可单独配置 model、base_url、api_key；留空时复用主配置。主 Agent 保持 `cbcn/deepseek-v4.1-flash(max)`。本机 9Router 网关使用已实测的独立审图模型 `cbcn/deepseek-v4.1-flash(none)`，4096 token、45秒单次上限；这张业务地图一次返回完整审查约9秒、reasoning_tokens=0。仅传 thinking.type=disabled 或 reasoning_effort=low 时，网关仍把全部4096/8192 token用于推理，无完整结论；不能据此声称关闭思考。`request_extra_body` 用于服务支持的专用参数，默认空对象，其他服务按其实际能力配置。report.json 的 diagnostics 保留 response_model、finish_reason、reasoning_tokens、output_tokens 和 duration_seconds。预算耗尽时报告 unverified，即使附有部分 JSON 也不接受通过。
 
 ## 地图交付与手动修改
+
+审图 diagnostics 区分网络、服务响应、JSON、schema、预算和缓存；schema 失败保留字段位置/类型/说明及有界脱敏 JSON。缓存命中明确 request_sent=false，不能写成服务又失败一次。仅 JSON/schema 失败可用 geo_map_review 的 retry_invalid_response=true 显式恢复一次，仍受原预算约束。layout_patch=null 可按空补丁处理，其它错误字段仍拒绝。
+
+已有 Python 地图打包使用 geo_cartography(action="project", map_path="已有地图.png", project_output_dir="exports/工程目录", layers=...)。旧 output_path 作为已有地图输入继续兼容。工程目录必须留在工作区，且必须是尚不存在的新目录；已有空目录也不删除。QGIS 工程检查除图层有效外，也验证项目/地图框 CRS、范围和比例尺；打包成功不表示视觉审查通过。
 
 默认地图和最终交付保存到当前工作目录的 `exports/`。geo_deliver 把明确选定的地图、结果数据、检查报告、脚本和工程复制到独立交付子目录，返回实际路径并保留之前的交付。delivery.outputs_dir 必须是工作目录的子目录；Python 脚本不负责跨目录复制，输出仍限于 RUN_DIR。
 

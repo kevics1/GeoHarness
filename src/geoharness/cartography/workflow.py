@@ -18,12 +18,16 @@ from geoharness.config.settings import GeoConfig
 # Runtime synchronization belongs outside JSON-persisted tool metadata. Weak
 # references release locks after active calls finish; cache entries stay in state.
 _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
+# Bump only when the response contract/compatibility changes. Legacy failed
+# cache entries can then recover without repeatedly resending unchanged images.
+REVIEW_CONTRACT_VERSION = 2
 
 
 def reset_map_workflow(metadata: dict[str, Any]) -> None:
     state = metadata.setdefault("map_workflow_state", {})
     state.clear()
-    state.update(reviews=0, seconds=0.0, reserved_seconds=0.0, maps={}, cache={}, cache_settings={})
+    state.update(reviews=0, seconds=0.0, reserved_seconds=0.0, maps={}, cache={}, cache_settings={},
+                 validation_retries={})
 
 
 def _state(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -36,6 +40,7 @@ def _state(metadata: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("maps", {})
     state.setdefault("cache", {})
     state.setdefault("cache_settings", {})
+    state.setdefault("validation_retries", {})
     return state
 
 
@@ -154,6 +159,7 @@ async def review_with_budget(
     metadata: dict[str, Any],
     map_id: str = "",
     client: Any = None,
+    retry_invalid_response: bool = False,
 ) -> tuple[MapReview, dict[str, Any]]:
     state = _state(metadata)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -172,6 +178,7 @@ async def review_with_budget(
             evidence=evidence,
             map_id=map_id,
             client=client,
+            retry_invalid_response=retry_invalid_response,
         )
 
 
@@ -185,9 +192,11 @@ async def _review_once(
     evidence: dict[str, Any],
     map_id: str,
     client: Any,
+    retry_invalid_response: bool,
 ) -> tuple[MapReview, dict[str, Any]]:
     settings = config.map_review
     fingerprint = hashlib.sha256(json.dumps({
+        "contract_version": REVIEW_CONTRACT_VERSION,
         "enabled": settings.enabled,
         "model": settings.model or config.model,
         "base_url": settings.base_url or config.base_url,
@@ -199,11 +208,30 @@ async def _review_once(
         "max_image_side": settings.max_image_side,
         "request_extra_body": settings.request_extra_body,
     }, sort_keys=True, default=str).encode()).hexdigest()
-    flags = {"image_sha256": digest, "review_cached": False, "review_budget_exhausted": False}
+    flags = {
+        "image_sha256": digest, "review_cached": False, "review_budget_exhausted": False,
+        "request_sent": False, "invalid_response_retry": False,
+        "invalid_response_retry_exhausted": False,
+    }
+    retry_key = f"{digest}:{fingerprint}"
+    recovery = False
     if digest in state["cache"] and state["cache_settings"].get(digest) == fingerprint:
-        return MapReview.model_validate(state["cache"][digest]), {
-            **flags, "review_cached": True,
-        }
+        cached = MapReview.model_validate(state["cache"][digest])
+        failed_contract = cached.diagnostics.get("failure_stage") in {"json", "schema"}
+        already_retried = bool(state["validation_retries"].get(retry_key))
+        recovery = retry_invalid_response and failed_contract and not already_retried
+        if not recovery:
+            cached.diagnostics = {
+                **cached.diagnostics, "stage": "cache", "outcome": "hit",
+                "cached_stage": cached.diagnostics.get("stage", "unknown"),
+                "cached_outcome": cached.diagnostics.get("outcome", "unknown"),
+                "request_sent": False,
+            }
+            return cached, {
+                **flags, "review_cached": True,
+                "review_failure_stage": cached.diagnostics.get("failure_stage", ""),
+                "invalid_response_retry_exhausted": failed_contract and already_retried,
+            }
     identity = map_id or image_map_identity(path)
     entry = state["maps"].setdefault(identity, {"renders": 0, "reviews": 0})
     remaining_seconds = (
@@ -220,7 +248,12 @@ async def _review_once(
                 "Visual review budget reached. Do not retry or create more previews; "
                 "deliver the current map and editable project with this limitation."
             ),
-        ), {**flags, "review_budget_exhausted": True}
+            diagnostics={"stage": "budget", "outcome": "failed", "failure_stage": "budget",
+                         "request_sent": False},
+        ), {**flags, "review_budget_exhausted": True, "review_failure_stage": "budget"}
+    if recovery:
+        state["validation_retries"][retry_key] = True
+        flags["invalid_response_retry"] = True
     # Reserve before yielding, so parallel tool calls cannot overspend the count.
     state["reviews"] += 1
     entry["reviews"] += 1
@@ -246,6 +279,9 @@ async def _review_once(
         state["seconds"] += time.monotonic() - started
         state["reserved_seconds"] = max(0.0, state["reserved_seconds"] - timeout)
     # Cache failures too. Unchanged images should never trigger blind API retries.
+    result.diagnostics["review_contract_version"] = REVIEW_CONTRACT_VERSION
+    flags["request_sent"] = result.diagnostics.get("request_sent", True)
+    flags["review_failure_stage"] = result.diagnostics.get("failure_stage", "")
     state["cache"][digest] = result.model_dump()
     state["cache_settings"][digest] = fingerprint
     return result, flags

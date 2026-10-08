@@ -418,6 +418,7 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                 {
                     "id": item.id(),
                     "crs": item.crs().authid(),
+                    "crs_valid": item.crs().isValid(),
                     "scale": item.scale(),
                     "extent": [
                         extent.xMinimum(),
@@ -429,6 +430,27 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                 }
             )
     return {"name": layout.name(), "pages": layout.pageCollection().pageCount(), "map_frames": maps}
+
+
+def _validate_project_coordinates(project: Any, layouts: list[Any]) -> None:
+    """A readable project with valid layers can still have projection disabled."""
+    import math
+
+    if not project.crs().isValid():
+        raise ValueError(
+            "Project CRS is invalid; verify projection is enabled in the saved project"
+        )
+    for layout in layouts:
+        for frame in _layout_metadata(layout)["map_frames"]:
+            if not frame["crs_valid"]:
+                raise ValueError(f"Layout map {frame['id']} has an invalid CRS")
+            xmin, ymin, xmax, ymax = frame["extent"]
+            if not all(math.isfinite(value) for value in frame["extent"]):
+                raise ValueError(f"Layout map {frame['id']} has a nonfinite extent")
+            if xmin >= xmax or ymin >= ymax:
+                raise ValueError(f"Layout map {frame['id']} has a zero or reversed extent")
+            if not math.isfinite(frame["scale"]) or frame["scale"] <= 0:
+                raise ValueError(f"Layout map {frame['id']} has an invalid scale")
 
 
 def _export_layout(layout: Any, payload: dict[str, Any], context: Any) -> tuple[Path, Path]:
@@ -491,6 +513,17 @@ def _save_package(
     project.setFileName(str(project_path))
     if not project.write():
         raise ValueError(f"QGIS could not save the packaged project: {project.error()}")
+    from qgis.core import QgsProject
+
+    reopened = QgsProject()
+    try:
+        if not reopened.read(str(project_path)):
+            raise ValueError(f"QGIS could not reopen its packaged project: {reopened.error()}")
+        if not all(layer.isValid() for layer in reopened.mapLayers().values()):
+            raise ValueError("Packaged project contains invalid data references")
+        _validate_project_coordinates(reopened, reopened.layoutManager().printLayouts())
+    finally:
+        reopened.clear()
     preview, output = _export_layout(layout, payload, context)
     digest = hashlib.sha256(preview.read_bytes()).hexdigest()
     readme = Path(context.output_path(None, "README.md"))
@@ -670,11 +703,13 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
         if not layers or not all(layer.isValid() for layer in layers):
             raise ValueError("Project has invalid or missing local layers")
         layouts = project.layoutManager().printLayouts()
+        _validate_project_coordinates(project, layouts)
         if action == "project_inspect":
             return {
                 "backend": "qgis",
                 "project_file": str(source_project),
                 "crs": project.crs().authid(),
+                "crs_valid": project.crs().isValid(),
                 "layers": [_layer_metadata(layer) for layer in layers],
                 "layouts": [_layout_metadata(layout) for layout in layouts],
                 "quality_status": "unverified",

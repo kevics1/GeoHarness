@@ -22,6 +22,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -158,6 +159,13 @@ class GeoCartographyInput(BaseModel):
     layout: MapLayout | None = Field(
         default=None,
         description="Optional presentation settings; visual review may adjust these.",
+    )
+    map_path: str = Field(
+        default="", description="For action=project: existing rendered map input."
+    )
+    project_output_dir: str = Field(
+        default="",
+        description="New editable project directory within the workspace; never overwrites data.",
     )
     map_extent: list[float] | None = Field(
         default=None,
@@ -897,7 +905,7 @@ class GeoCartographyTool(BaseTool):
         cache = context.metadata.get("_map_source_cache", {})
         catalog = context.metadata.get("data_catalog")
 
-        def export() -> dict[str, str]:
+        def export() -> dict[str, Any]:
             specs = self._parse_layers(args.layers)
             layers = []
             for index, spec in enumerate(
@@ -971,12 +979,15 @@ class GeoCartographyTool(BaseTool):
                         )
                     }
                 )
-            directory = Path(
-                tempfile.mkdtemp(
-                    prefix=f"{written.stem}.project-",
-                    dir=written.parent,
-                )
-            )
+            if args.project_output_dir:
+                directory = Path(args.project_output_dir).expanduser()
+                directory = (
+                    directory if directory.is_absolute() else context.cwd / directory
+                ).resolve()
+                if not directory.is_relative_to(context.cwd.resolve()):
+                    raise ValueError("project_output_dir must remain inside the workspace")
+            else:
+                directory = written.parent / f"{written.stem}.project-{uuid.uuid4().hex[:12]}"
             return export_map_project(
                 directory,
                 layers=layers,
@@ -986,6 +997,7 @@ class GeoCartographyTool(BaseTool):
                     result.metadata.get("final_layout") or (args.layout or MapLayout()).model_dump()
                 ),
                 extent=args.map_extent,
+                publication_settings=context.metadata["geoharness_config"].publication,
             )
 
         try:
@@ -994,7 +1006,10 @@ class GeoCartographyTool(BaseTool):
             return ToolResult(
                 output=f"{result.output}\nEditable project export failed: {exc}",
                 is_error=True,
-                metadata={**result.metadata, "project_status": "failed"},
+                metadata={
+                    **result.metadata, "project_status": "failed",
+                    **({"publication": exc.diagnostics} if hasattr(exc, "diagnostics") else {}),
+                },
             )
         return ToolResult(
             output=(
@@ -1015,7 +1030,9 @@ class GeoCartographyTool(BaseTool):
         outputs_dir: str,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        path = self._resolve_output_path(args, outputs_dir)
+        path = (
+            Path(args.map_path) if args.map_path else self._resolve_output_path(args, outputs_dir)
+        )
         path = (path if path.is_absolute() else context.cwd / path).resolve()
         root = Path(outputs_dir).expanduser()
         root = (root if root.is_absolute() else context.cwd / root).resolve()

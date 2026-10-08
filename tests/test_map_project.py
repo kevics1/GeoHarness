@@ -24,6 +24,57 @@ from geoharness.cartography.renderer import render_layers, render_map
 from geoharness.config.settings import MapLayout
 
 
+async def test_project_input_and_output_directory_are_independent(tmp_path):
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.config.settings import GeoConfig
+    from geoharness.tools.geo_cartography import GeoCartographyInput, GeoCartographyTool
+
+    source = tmp_path / "source.geojson"
+    _polygons().to_file(source, driver="GeoJSON")
+    preview = tmp_path / "original.png"
+    Image.new("RGB", (64, 64), "white").save(preview)
+    before = hashlib.sha256(preview.read_bytes()).hexdigest()
+    context = ToolExecutionContext(
+        cwd=tmp_path, metadata={"geoharness_config": GeoConfig()},
+    )
+    result = await GeoCartographyTool().execute(
+        GeoCartographyInput(
+            action="project", map_path=str(preview),
+            project_output_dir="exports/editable",
+            layers=json.dumps([{"file_path": str(source), "label": "Actual layers"}]),
+        ), context,
+    )
+    assert not result.is_error, result.output
+    assert Path(result.metadata["project_dir"]) == tmp_path / "exports/editable"
+    assert Path(result.metadata["qgis_project"]).is_file()
+    assert result.metadata["output_path"] == str(preview)
+    assert hashlib.sha256(preview.read_bytes()).hexdigest() == before
+
+    rejected = await GeoCartographyTool().execute(
+        GeoCartographyInput(
+            action="project", map_path=str(preview),
+            project_output_dir=str(tmp_path.parent / "outside-project"),
+            layers=json.dumps([{"file_path": str(source)}]),
+        ), context,
+    )
+    assert rejected.is_error
+    assert "inside the workspace" in rejected.output
+    empty_target = tmp_path / "exports/existing-empty"
+    empty_target.mkdir()
+    identity = empty_target.stat().st_ino
+    refused = await GeoCartographyTool().execute(
+        GeoCartographyInput(
+            action="project", map_path=str(preview),
+            project_output_dir=str(empty_target),
+            layers=json.dumps([{"file_path": str(source)}]),
+        ), context,
+    )
+    assert refused.is_error and "already exists" in refused.output
+    assert empty_target.stat().st_ino == identity
+    assert not list(empty_target.iterdir())
+
+
 def _polygons() -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(
         {"name": ["A", "B", "C", "D"], "value": [1.0, 2.0, 8.0, 10.0]},

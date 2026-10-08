@@ -1,6 +1,7 @@
 """Exercise the real upstream streaming parser with synthetic SDK chunks."""
 
 import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from pydantic import ValidationError
 from geoharness.api_client import GeoOpenAICompatibleClient
 from geoharness.config.settings import AgentConfig, GeoConfig
 from geoharness.runtime import _build_api_client
+from geoharness.tools.geo_python import GeoPythonInput
 
 
 def chunk(*, text=None, reasoning=None, finish=None, usage=None, tool_calls=None):
@@ -415,3 +417,202 @@ async def test_closing_partial_text_in_another_task_closes_sdk_transport_immedia
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert transport.close_calls == 1 and len(calls) == 1
+
+
+def tool_delta(arguments, *, index=0, name="geo_python", tool_id="call-invalid"):
+    return SimpleNamespace(index=index, id=tool_id, function=SimpleNamespace(
+        name=name, arguments=arguments,
+    ))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("arguments", "category", "finish"), [
+    ('{"code":"print(', "invalid_json", "length"),
+    ("{}", "missing_required_arguments", "tool_calls"),
+    ("[]", "non_object_json", "tool_calls"),
+    ("null", "non_object_json", "tool_calls"),
+])
+async def test_invalid_tool_arguments_are_rejected_before_tools_can_execute(
+    monkeypatch, arguments, category, finish,
+):
+    client, calls = mock_client(monkeypatch, [streamed(chunk(
+        tool_calls=[tool_delta(arguments)], finish=finish, usage=(12, 16384),
+    ))], empty_response_fallback_model="configured-alternative")
+    events = [event async for event in client.stream_message(request())]
+    final = events[-1]
+    assert isinstance(final, ApiMessageCompleteEvent)
+    assert len(final.message.tool_uses) == 1
+    with pytest.raises(ValidationError, match="no script was executed"):
+        GeoPythonInput.model_validate(final.message.tool_uses[0].input)
+    assert category in client.last_response_diagnostic
+    assert f"argument_chars={len(arguments)}" in client.last_response_diagnostic
+    assert f"finish_reason={finish}" in client.last_response_diagnostic
+    assert "print(" not in client.last_response_diagnostic
+    assert final.usage.total_tokens == 16396
+    assert client.last_empty_response_diagnostic is None
+    assert len(calls) == 1
+    assert not any(isinstance(event, ApiRetryEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_rejecting_invalid_parallel_call_keeps_valid_calls_and_streamed_text(monkeypatch):
+    client, calls = mock_client(monkeypatch, [streamed(
+        chunk(text="Checking ", tool_calls=[tool_delta(
+            '{"code":"private incomplete script',
+        )]),
+        chunk(text="data", tool_calls=[tool_delta(
+            json.dumps({"code": "print(1)"}), index=1, tool_id="call-valid",
+        )], finish="length", usage=(12, 40)),
+    )])
+    events = [event async for event in client.stream_message(request())]
+    assert [event.text for event in events[:-1]] == ["Checking ", "data"]
+    assert len(events[-1].message.tool_uses) == 2
+    invalid, valid = events[-1].message.tool_uses
+    with pytest.raises(ValidationError, match="invalid_json"):
+        GeoPythonInput.model_validate(invalid.input)
+    assert valid.id == "call-valid"
+    assert valid.input == {"code": "print(1)"}
+    assert "private incomplete script" not in events[-1].message.text
+    assert events[-1].usage.total_tokens == 52
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_argument_tool_keeps_explicit_empty_object(monkeypatch):
+    client, calls = mock_client(monkeypatch, [streamed(chunk(
+        tool_calls=[tool_delta("{}", name="doctor")], finish="tool_calls",
+    ))])
+    req = replace(request(), tools=[{
+        "name": "doctor", "description": "Check environment", "input_schema": {
+            "type": "object", "properties": {},
+        },
+    }])
+    events = [event async for event in client.stream_message(req)]
+    assert events[-1].message.tool_uses[0].input == {}
+    assert client.last_response_diagnostic is None
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_arguments_at_budget_limit_remain_executable(monkeypatch):
+    client, calls = mock_client(monkeypatch, [streamed(chunk(
+        reasoning="private reasoning", tool_calls=[tool_delta('{"code":"print(1)"}')],
+        finish="length", usage=(4, 16384),
+    ))])
+    events = [event async for event in client.stream_message(request())]
+    final = events[-1]
+    assert final.message.tool_uses[0].input == {"code": "print(1)"}
+    assert final.message._reasoning == "private reasoning"
+    assert client.last_tool_argument_diagnostics == []
+    assert client.last_response_diagnostic is None
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_object_arguments_keep_complete_sibling_and_private_reasoning(monkeypatch):
+    client, calls = mock_client(monkeypatch, [streamed(chunk(
+        text="Checking", reasoning="private", tool_calls=[
+            tool_delta("[]"),
+            tool_delta('{"code":"print(1)"}', index=1, tool_id="call-valid"),
+        ], finish="tool_calls", usage=(3, 5),
+    ))])
+    events = [event async for event in client.stream_message(request())]
+    invalid, valid = events[-1].message.tool_uses
+    assert invalid.input["_geoharness_argument_error"]["category"] == "non_object_json"
+    assert valid.input == {"code": "print(1)"}
+    assert events[-1].message.text == "Checking"
+    assert events[-1].message._reasoning == "private"
+    assert "private" not in json.dumps(client.last_tool_argument_diagnostics)
+    assert events[-1].usage.total_tokens == 8
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_rejection_closes_provider_once_and_settles_usage(monkeypatch):
+    class Transport:
+        close_calls = 0
+
+        def __init__(self):
+            self.chunks = iter([chunk(
+                tool_calls=[tool_delta("{}")], finish="tool_calls", usage=(4, 2),
+            )])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.chunks)
+            except StopIteration:
+                raise StopAsyncIteration from None
+
+        async def close(self):
+            self.close_calls += 1
+
+    transport = Transport()
+    client, calls = mock_client(monkeypatch, [transport])
+    events = [event async for event in client.stream_message(request())]
+    with pytest.raises(ValidationError, match="missing_required_arguments"):
+        GeoPythonInput.model_validate(events[-1].message.tool_uses[0].input)
+    assert transport.close_calls == 1
+    client.ack_usage(events[-1].usage)
+    assert client.consume_unsettled_usage().total_tokens == 0
+    assert client._request_state.get() is None
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_arguments_continue_through_error_result_without_repeating_valid_tools(
+    monkeypatch, tmp_path,
+):
+    from openharness.config.settings import PermissionSettings
+    from openharness.engine.messages import ToolResultBlock
+    from openharness.permissions.checker import PermissionChecker
+    from openharness.tools.base import ToolRegistry, ToolResult
+
+    from geoharness.engine import GeoQueryEngine
+    from geoharness.tools.geo_python import GeoPythonTool
+
+    class RecordingPythonTool(GeoPythonTool):
+        calls = []
+
+        async def execute(self, arguments, context):
+            self.calls.append(arguments.code)
+            return ToolResult(output="completed synthetic execution")
+
+        def is_read_only(self, arguments):
+            return True
+
+    client, calls = mock_client(monkeypatch, [
+        streamed(chunk(tool_calls=[
+            tool_delta('{"code":"cut off'),
+            tool_delta(json.dumps({"code": "valid once"}), index=1, tool_id="call-valid"),
+        ], finish="length", usage=(12, 40))),
+        streamed(chunk(tool_calls=[tool_delta(
+            json.dumps({"code": "repaired"}), tool_id="call-repaired",
+        )], finish="tool_calls", usage=(18, 5))),
+        streamed(chunk(text="Done", finish="stop", usage=(20, 2))),
+    ], empty_response_fallback_model="configured-alternative")
+    registry = ToolRegistry()
+    tool = RecordingPythonTool()
+    registry.register(tool)
+    engine = GeoQueryEngine(
+        api_client=client, tool_registry=registry,
+        permission_checker=PermissionChecker(settings=PermissionSettings()),
+        cwd=tmp_path, model="test-model", system_prompt="Repair only rejected arguments.",
+        max_turns=4,
+    )
+    _ = [event async for event in engine.submit_message("make a map")]
+    assert tool.calls == ["valid once", "repaired"]
+    assert len(calls) == 3
+    results = [block for message in engine.messages for block in message.content
+               if isinstance(block, ToolResultBlock)]
+    invalid = next(block for block in results if block.tool_use_id == "call-invalid")
+    assert invalid.is_error
+    assert "invalid_json" in invalid.content
+    assert "json_error_position" in invalid.content
+    assert "no script was executed" in invalid.content
+    assert "cut off" not in invalid.content
+    assert engine.messages[-1].text == "Done"
+    assert engine.total_usage.total_tokens == 97
+    assert client.consume_unsettled_usage().total_tokens == 0

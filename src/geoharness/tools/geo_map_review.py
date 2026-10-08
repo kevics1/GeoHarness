@@ -22,6 +22,10 @@ class GeoMapReviewInput(BaseModel):
         default_factory=dict,
         description="Expected layers, CRS, source counts and rendering parameters.",
     )
+    retry_invalid_response: bool = Field(
+        default=False,
+        description="Allow one budgeted retry of a cached JSON/schema failure; never loops.",
+    )
 
 
 class GeoMapReviewTool(BaseTool):
@@ -102,6 +106,7 @@ class GeoMapReviewTool(BaseTool):
         else:
             result, budget = await review_with_budget(
                 path, config=config, task=arguments.task, evidence=evidence,
+                retry_invalid_response=arguments.retry_invalid_response,
                 metadata=context.metadata, map_id=arguments.map_id,
                 client=context.metadata.get("map_review_client"),
             )

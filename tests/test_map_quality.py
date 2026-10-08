@@ -259,13 +259,16 @@ async def test_owned_reviewer_passes_provider_options_and_records_transport_evid
     assert "diagnostics" not in requests[0]["tools"][0]["function"]["parameters"]["properties"]
     assert sdk_options == [{"max_retries": 0}]
     assert closed == [True]
-    assert result.diagnostics == {
+    expected_diagnostics = {
         "requested_model": config.model, "response_model": "provider-returned-model",
         "input_tokens": 80, "output_tokens": 42, "total_tokens": 122,
         "reasoning_tokens": 17, "finish_reason": finish_reason,
         "duration_seconds": result.diagnostics["duration_seconds"],
         **({"raw_review_status": "passed"} if finish_reason != "length" else {}),
     }
+    assert {key: result.diagnostics[key] for key in expected_diagnostics} == expected_diagnostics
+    assert result.diagnostics["request_sent"] is True
+    assert result.diagnostics["stage"] == ("budget" if finish_reason == "length" else "schema")
     if finish_reason == "length":
         assert "unverified" in result.summary
         assert "thinking" in result.summary

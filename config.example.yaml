@@ -34,6 +34,9 @@ execution:
   outputs_dir: .geoharness/runs
   timeout_seconds: 120
   max_output_chars: 12000
+publication:
+  max_attempts: 4
+  retry_delay_seconds: 0.1
 qgis:
   enabled: true
   # Empty paths discover an independently installed QGIS; set install_dir if needed.
@@ -52,6 +55,8 @@ map_review:
   total_timeout_seconds: 120
   timeout_seconds: 45
   max_tokens: 4096
+  diagnostics_max_chars: 2048
+  max_validation_errors: 12
   request_extra_body:
     thinking:
       type: disabled

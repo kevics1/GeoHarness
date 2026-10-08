@@ -65,7 +65,9 @@ def build_geo_tool_registry(
     registry.register(GeoRasterDataTool())
     registry.register(GeoCartographyTool())
     registry.register(GeoAnalysisTool())
-    registry.register(GeoPythonTool())
+    registry.register(GeoPythonTool(
+        timeout_limit=getattr(getattr(config, "execution", None), "timeout_seconds", None)
+    ))
     registry.register(GeoMapReviewTool())
     registry.register(GeoDeliverTool())
     logger.info("Registered 8 native tools")

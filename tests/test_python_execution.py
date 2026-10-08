@@ -582,6 +582,36 @@ async def test_tool_enforces_config_and_timeout_limit(tmp_path: Path):
     assert result.metadata["manifest_path"]
 
 
+def test_python_schema_exposes_configured_numeric_timeout_maximum():
+    tool = GeoPythonTool(timeout_limit=45)
+    schema = tool.to_api_schema()["input_schema"]
+    timeout = schema["properties"]["timeout_seconds"]
+    assert timeout["anyOf"][0]["maximum"] == 45
+    assert timeout["default"] is None
+    assert "45" in timeout["description"]
+    assert "timeout_seconds" not in schema["required"]
+
+
+async def test_timeout_rejection_reports_requested_and_allowed_without_execution(
+    tmp_path, monkeypatch,
+):
+    async def forbidden(**kwargs):
+        pytest.fail("timeout must be rejected before creating any run")
+
+    monkeypatch.setattr("geoharness.tools.geo_python.execute_python", forbidden)
+    config = GeoConfig(execution=ExecutionConfig(timeout_seconds=120))
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
+    result = await GeoPythonTool(timeout_limit=120).execute(
+        GeoPythonInput(code="print(1)", timeout_seconds=280), context,
+    )
+    assert result.is_error
+    assert "requested=280s" in result.output
+    assert "allowed=120s" in result.output
+    assert result.metadata["requested_timeout_seconds"] == 280
+    assert result.metadata["allowed_timeout_seconds"] == 120
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize(
     ("code", "is_error"),
     [
@@ -742,6 +772,11 @@ def test_names_cannot_escape_run_directory(name: str):
 def test_empty_tool_arguments_explain_no_script_was_executed():
     with pytest.raises(ValidationError, match="no script was executed"):
         GeoPythonInput.model_validate({})
+
+
+def test_whitespace_script_is_not_complete_code():
+    with pytest.raises(ValidationError, match="no script was executed"):
+        GeoPythonInput.model_validate({"code": " \n "})
 
 
 @pytest.mark.asyncio

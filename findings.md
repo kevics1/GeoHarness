@@ -121,3 +121,23 @@
 - 本地Hook API代理只过滤重试状态，继续复用上游JSON解析；普通失败返回尊重block_on_failure的HookResult，取消不吞掉。Hook调用纳入engine既有finally，取消时仍结算已确认用量。
 - 上游React后端只捕获取消，普通异常会丢error/line_complete并退出；前端assistant_complete本身不清busy。本地后端补普通异常唯一error及结束事件，返回输入循环。异常详情先对已配置凭证脱敏。
 - 修复后实际用户目录源码首回复5.64秒、安装版首回复8.88秒，均为assistant_delta；随后停止、再输入和exit0正常，stderr无Context和Task回收异常。真实探测停止于首段正文，未据此声称完整业务制图通过。
+
+# 2026-10-08 业务制图诊断
+
+- verify_crs_spread真实manifest: NumPy/Pandas先计算float减string后astype，TypeError；首次map_v1_build把Affine.height/width当作存在的属性，AttributeError；map_v5_final写RUN_DIR外fire_map_out，应用guard禁止。均有具体保存脚本和日志，不等同QGIS故障。
+- 对照v3与final实图：v3详图只有晕渲且矢量全不可见；final详图图层/标签恢复。v3 EXT采用(xmin,ymin,xmax,ymax)却直接传imshow，final纠正为(xmin,xmax,ymin,ymax)。当前布局passed报告scope仅layout_geometry，视觉及数据正确性均unverified。
+- QGIS doctor真实记录成功3.44.7/440算法。两个视觉审查条目中第二个review_cached=true，复用首次8.156秒失败，并非两个独立网络请求。具体ValidationError字段需进一步取证。
+- 实际字段先转换后最大几何/属性差3.98e-13度；只证明内部一致。保持equal aspect只修正范围顺序即可恢复详图点，模型将问题归因于set_aspect不成立。
+- 原生impact metric_crs=EPSG:32648；最终显示投影32647却沿用distance_m并把计算方法写为32647。234点两个投影距离最大差10.23m，2km受影响分类变化0；事实是出处说明错误，不据此判定47个受影响结果错误。
+- Windows子文件被进程持有可产生相同WinError5目录rename，释放后成功；普通关闭写入rename100/100、原生impact30/30及工程30/30通过。实际失败句柄持有者未记录，不能确定进程或永久权限问题。
+- 真实解析器把截断JSON和显式{}都变成空工具输入；实际两次原始参数未保留，无法区分。timeout错误实际请求280>允许120，脚本未启动；不同于运行满120秒的超时。
+- 视觉错误发生于本地MapReview校验，未保存字段错误；一次同配置纯合成审图9.422秒通过。只能证明管线可用，不能证明复杂地图识别能力或原业务具体错误字段。
+- 会话79次工具、34次geo_python、一次geo_qgis doctor及打包后一次geo_qgis_project inspect，没有该工具创建/导出调用；QGIS虽已集成，本次实际制图仍是模型自由编写Matplotlib。报告提出先修接口/发布/诊断，再补QGIS复杂布局主路径；正式模型基准保持用户延后的优先级。
+- 追加真实QGIS工程核验：10图层valid，但项目/地图框CRS invalid、单位unknown、比例尺约1:19.98亿。直接原因是project.py:700-703手写properties缺SpatialRefSys/ProjectionsEnabled；临时副本只补type=int/value=1，读回有效EPSG32647、单位米及比例尺约1:16.108万。原生PyQGIS工程自带该项。原业务工程未改，读回验收缺口纳入优先修复建议。
+
+# 2026-10-08 四阶段实施：阶段1
+
+- 原生QGIS读回回归先失败于crs为空，修复ProjectionsEnabled后通过；检查器现验证项目/地图框坐标与范围/比例尺，新包装工程重新打开验收。
+- 新project_output_dir要求未创建目录，旧output_path输入语义保留；不删除已有空目录，也不通过删目的目录规避发布错误。
+- 发布与审查/参数改动已整合；相关348项通过，另统一PRE_TOOL_USE实际零副作用guard回归通过。独立审查发现发布重试等候期间deadline/cancel会触发通用清理删除完整stage，正在保留该中断的发布诊断和产物，维持TimeoutError语义。
+- 受管工作区pytest临时目录ACL错误改为明确系统TEMP子目录后测试正常；未据此改变产品权限。一次文档patch匹配失败未写入，使用实际段落重新应用成功。

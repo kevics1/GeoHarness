@@ -699,6 +699,9 @@ def _write_qgis(project: MapProject, destination: Path) -> None:
         ET.SubElement(order, "layer", {"id": layer.id})
     properties = ET.SubElement(root, "properties")
     _text(ET.SubElement(properties, "Paths"), "Absolute", "false").set("type", "bool")
+    _text(ET.SubElement(properties, "SpatialRefSys"), "ProjectionsEnabled", "1").set(
+        "type", "int"
+    )
     ET.SubElement(root, "transformContext")
     _qgis_print_layout(ET.SubElement(root, "Layouts"), project)
     ET.indent(root, space="  ")
@@ -775,7 +778,8 @@ def export_map_project(
     render_kwargs: dict[str, Any],
     layout: MapLayout | None = None,
     extent: list[float] | None = None,
-) -> dict[str, str]:
+    publication_settings: Any = None,
+) -> dict[str, Any]:
     """Snapshot an actual native render into a portable editable project.
 
     ``layers`` contains the actual GeoDataFrames passed to rendering, ordered
@@ -784,7 +788,7 @@ def export_map_project(
     copied from ``render_kwargs['basemap_raster']``. No source/catalog metadata
     is persisted. ``extent`` optionally records the actual map-frame bounds in
     the project CRS (xmin, ymin, xmax, ymax), without expanding to source bounds.
-    Existing nonempty projects are never overwritten.
+    Existing project directories are never removed or overwritten.
     """
     mode = str(render_kwargs.get("mode", "layers"))
     if extent is None:
@@ -801,7 +805,7 @@ def export_map_project(
     if not preview.is_file():
         raise ValueError("Render the map before exporting its editable project.")
     destination = Path(project_dir).expanduser().resolve()
-    if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
+    if destination.exists() or destination.is_symlink():
         raise FileExistsError("Editable project already exists; choose a new project directory.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
@@ -889,11 +893,22 @@ def export_map_project(
         _write_qgis(project, staging / "map.qgs")
         (staging / "redraw.py").write_text(_REDRAW_SCRIPT, encoding="utf-8")
         (staging / "README.md").write_text(_README, encoding="utf-8")
-        if destination.exists():
-            destination.rmdir()  # Empty directory only, verified above; never recursively removed.
-        staging.rename(destination)
-    except Exception:
-        if staging.resolve().is_relative_to(destination.parent.resolve()):
+        from geoharness.files.publication import publish_directory
+
+        publication = publish_directory(staging, destination, settings=publication_settings)
+    except Exception as exc:
+        if getattr(exc, "diagnostics", None):
+            import json
+
+            try:
+                (staging / "publication.json").write_text(
+                    json.dumps(exc.diagnostics, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except OSError:
+                pass
+        elif staging.resolve().is_relative_to(
+            destination.parent.resolve()
+        ):
             shutil.rmtree(staging)
         raise
     return {
@@ -903,6 +918,7 @@ def export_map_project(
         "redraw_script": str(destination / "redraw.py"),
         "project_readme": str(destination / "README.md"),
         "preview_sha256": preview_sha256,
+        "publication": publication,
     }
 
 

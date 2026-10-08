@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from pathlib import Path
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field, model_validator
 
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_python_render
-from geoharness.config.settings import CartographyConfig
+from geoharness.config.settings import CartographyConfig, ExecutionConfig
 from geoharness.execution import execute_python
 
 
@@ -32,7 +33,17 @@ class GeoPythonInput(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def require_complete_code(cls, value):
-        if isinstance(value, dict) and not value.get("code"):
+        if isinstance(value, dict) and value.get("_geoharness_argument_error"):
+            diagnostic = value["_geoharness_argument_error"]
+            raise ValueError(
+                "geo_python arguments rejected; no script was executed. "
+                + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True)
+                + ". Send a shorter complete script using the configured timeout."
+            )
+        if isinstance(value, dict) and (
+            not value.get("code")
+            or isinstance(value.get("code"), str) and not value["code"].strip()
+        ):
             raise ValueError(
                 "geo_python requires complete 'code' arguments; no script was executed. "
                 "Empty arguments can result from an incomplete/invalid provider tool call. "
@@ -59,6 +70,25 @@ class GeoPythonTool(BaseTool):
     )
     input_model: type[BaseModel] = GeoPythonInput
 
+    def __init__(self, *, timeout_limit: float | None = None) -> None:
+        self.timeout_limit = (
+            ExecutionConfig().timeout_seconds if timeout_limit is None else timeout_limit
+        )
+        if not math.isfinite(self.timeout_limit) or self.timeout_limit <= 0:
+            raise ValueError("timeout_limit must be finite and positive")
+
+    def to_api_schema(self) -> dict:
+        schema = super().to_api_schema()
+        timeout = schema["input_schema"]["properties"]["timeout_seconds"]
+        timeout["description"] = (
+            "Optional timeout; omit it to use the configured default. "
+            f"Maximum allowed value is {self.timeout_limit:g} seconds."
+        )
+        for option in timeout["anyOf"]:
+            if option.get("type") == "number":
+                option["maximum"] = self.timeout_limit
+        return schema
+
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         assert isinstance(arguments, GeoPythonInput)
         config = context.metadata.get("geoharness_config")
@@ -70,8 +100,17 @@ class GeoPythonTool(BaseTool):
         timeout = arguments.timeout_seconds or execution.timeout_seconds
         if timeout > execution.timeout_seconds:
             return ToolResult(
-                output=f"Error: timeout exceeds configured maximum ({execution.timeout_seconds}s).",
+                output=(
+                    "Error: timeout exceeds configured maximum "
+                    f"(requested={timeout:g}s, allowed={execution.timeout_seconds:g}s); "
+                    "no script was executed. Omit timeout_seconds to use the default."
+                ),
                 is_error=True,
+                metadata={
+                    "requested_timeout_seconds": timeout,
+                    "allowed_timeout_seconds": execution.timeout_seconds,
+                    "script_executed": False,
+                },
             )
         identity = arguments.map_id or map_identity(arguments.name)
         state = context.metadata.get("map_workflow_state", {})

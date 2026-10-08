@@ -40,6 +40,7 @@ assert project.read(str(args.project.resolve())), (
 )
 layers = list(project.mapLayers().values())
 assert layers and all(layer.isValid() for layer in layers), "QGIS has invalid/missing data layers"
+assert project.crs().isValid(), "QGIS project CRS is invalid or projection is disabled"
 layouts = project.layoutManager().layouts()
 assert len(layouts) == 1, "Expected an editable print layout"
 layout = layouts[0]
@@ -47,6 +48,9 @@ page = layout.pageCollection().page(0).rect()
 maps = [item for item in layout.items() if isinstance(item, QgsLayoutItemMap)]
 assert maps, "The layout needs an editable map frame"
 for item in maps:
+    assert item.crs().isValid(), "Layout map CRS is invalid"
+    assert item.extent().width() > 0 and item.extent().height() > 0, "Layout extent is invalid"
+    assert item.scale() > 0, "Layout scale is invalid"
     assert item.pos().x() + item.rect().width() <= page.width() + 0.01
     assert item.pos().y() + item.rect().height() <= page.height() + 0.01, "Map exceeds page"
 scalebars = [item for item in layout.items() if isinstance(item, QgsLayoutItemScaleBar)]

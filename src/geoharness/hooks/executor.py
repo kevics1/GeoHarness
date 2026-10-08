@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from dataclasses import replace
@@ -12,9 +13,10 @@ from openharness.api.client import (
     ApiStreamEvent,
     SupportsStreamingMessages,
 )
+from openharness.hooks.events import HookEvent
 from openharness.hooks.executor import HookExecutionContext, HookExecutor
 from openharness.hooks.loader import HookRegistry
-from openharness.hooks.types import HookResult
+from openharness.hooks.types import AggregatedHookResult, HookResult
 
 
 class _PromptHookApiClient:
@@ -41,6 +43,37 @@ class GeoHookExecutor(HookExecutor):
             api_client=_PromptHookApiClient(api_client) if api_client is not None else None,
             default_model=default_model,
         )
+
+    async def execute(self, event, payload):
+        if event == HookEvent.PRE_TOOL_USE:
+            arguments = payload.get("tool_input")
+            if isinstance(arguments, dict) and "_geoharness_argument_error" in arguments:
+                diagnostic = arguments["_geoharness_argument_error"]
+                diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
+                category = diagnostic.get("category")
+                reason = diagnostic.get("finish_reason")
+                safe = {
+                    "category": category if isinstance(category, str) and category in {
+                        "invalid_json", "non_object_json", "missing_required_arguments",
+                    } else "invalid_arguments",
+                    "finish_reason": reason if isinstance(reason, str) and reason in {
+                        "length", "stop", "tool_calls", "function_call", "content_filter",
+                    } else "unknown",
+                    **{key: diagnostic[key] for key in (
+                        "argument_chars", "json_error_position", "json_error_line",
+                        "json_error_column",
+                    ) if isinstance(diagnostic.get(key), int)},
+                }
+                return AggregatedHookResult(results=[HookResult(
+                    hook_type="geoharness_argument_guard", success=False, blocked=True,
+                    reason=(
+                        "Invalid provider tool arguments; no tool was executed. "
+                        + json.dumps(safe, ensure_ascii=False)
+                        + ". Send a complete valid tool call; prior successful tools are retained."
+                    ),
+                    metadata={"argument_diagnostic": safe},
+                )])
+        return await super().execute(event, payload)
 
     async def _run_prompt_like_hook(self, hook, event, payload, *, agent_mode):
         try:

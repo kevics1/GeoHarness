@@ -16,7 +16,7 @@ from openharness.api.openai_client import (
     _token_limit_param_for_model,
 )
 from openharness.engine.messages import ConversationMessage, ImageBlock, TextBlock, ToolUseBlock
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from geoharness.config.settings import GeoConfig, MapLayout
 
@@ -56,6 +56,36 @@ class _IncompleteReview(Exception):
     """A known provider completion condition with a safe diagnostic."""
 
 
+def _review_secrets(config: GeoConfig) -> tuple[str, ...]:
+    """Known configured credentials must never enter persisted review evidence."""
+    values = [config.api_key, config.map_review.api_key, config.data.postgis_dsn]
+    for server in config.mcp_servers.values():
+        values.extend(value for key, value in server.env.items() if any(
+            marker in key.upper()
+            for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "DSN")
+        ))
+    variants = set()
+    for value in values:
+        if value:
+            variants.add(str(value))
+            variants.add(json.dumps(str(value), ensure_ascii=False)[1:-1])
+            variants.add(json.dumps(str(value), ensure_ascii=True)[1:-1])
+    return tuple(sorted(variants, key=len, reverse=True))
+
+
+def _redact_review(value: Any, secrets: tuple[str, ...]) -> Any:
+    if isinstance(value, str):
+        for secret in secrets:
+            value = value.replace(secret, "[redacted]")
+        return value
+    if isinstance(value, dict):
+        return {_redact_review(key, secrets): _redact_review(item, secrets)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_review(item, secrets) for item in value]
+    return value
+
+
 def apply_layout_patch(layout: MapLayout, patch: LayoutPatch) -> MapLayout:
     return MapLayout.model_validate({**layout.model_dump(), **patch.model_dump(exclude_none=True)})
 
@@ -81,15 +111,21 @@ async def review_map(
 ) -> MapReview:
     """Inspect pixels, with source/render evidence; failures stay unverified."""
     settings = config.map_review
+    secrets = _review_secrets(config)
+    diagnostics: dict[str, Any] = {
+        "requested_model": settings.model or config.model,
+        "stage": "configuration", "request_sent": False,
+    }
     if not settings.enabled:
-        return MapReview(status="unverified", summary="Visual map review is disabled.")
+        return MapReview(status="unverified", summary="Visual map review is disabled.",
+                         diagnostics={**diagnostics, "outcome": "disabled"})
     key = settings.api_key or config.api_key
     if client is None and (not key or "${" in key):
         return MapReview(
             status="unverified", summary="No usable map review API credential configured.",
+            diagnostics={**diagnostics, "outcome": "failed", "failure_stage": "configuration"},
         )
     owned = client is None
-    diagnostics: dict[str, Any] = {"requested_model": settings.model or config.model}
     result: MapReview | None = None
     started = time.monotonic()
     prompt = (
@@ -110,6 +146,7 @@ async def review_map(
     )
     try:
         if owned:
+            diagnostics["stage"] = "provider"
             client = OpenAICompatibleClient(
                 api_key=key, base_url=settings.base_url or config.base_url or None,
                 timeout=settings.timeout_seconds,
@@ -118,6 +155,7 @@ async def review_map(
         def check_completion(reason: str | None) -> None:
             diagnostics["finish_reason"] = reason
             if reason == "length":
+                diagnostics["stage"] = "budget"
                 raise _IncompleteReview(
                     "Map review exhausted its output token budget; visual findings remain "
                     "unverified. Check map_review.request_extra_body thinking settings "
@@ -127,6 +165,7 @@ async def review_map(
                 raise _IncompleteReview(f"Visual review did not complete ({reason}).")
 
         async def collect() -> str:
+            diagnostics["stage"] = "image"
             block = await asyncio.to_thread(_image_block, path, settings.max_image_side)
             schema = MapReview.model_json_schema()
             # Provider observations come from our transport, never from model claims.
@@ -166,7 +205,9 @@ async def review_map(
                     params["extra_body"] = settings.request_extra_body
                 # Internal SDK retries would consume calls outside our shared budget.
                 transport = client._client.with_options(max_retries=0)
+                diagnostics.update(stage="network", request_sent=True)
                 response = await transport.chat.completions.create(**params)
+                diagnostics["stage"] = "response"
                 diagnostics["response_model"] = response.model
                 if response.usage is not None:
                     diagnostics.update(
@@ -185,13 +226,17 @@ async def review_map(
                 if calls:
                     if len(calls) != 1 or calls[0].function.name != "record_map_review":
                         raise _IncompleteReview("The model returned an ambiguous review call.")
+                    diagnostics["response_format"] = "tool_call"
                     return calls[0].function.arguments
                 if not (choice.message.content or "").strip():
                     raise _IncompleteReview("The model returned no visual review text.")
+                diagnostics["response_format"] = "text"
                 return choice.message.content
 
+            diagnostics.update(stage="network", request_sent=True)
             async for event in client.stream_message(request):
                 if isinstance(event, ApiMessageCompleteEvent):
+                    diagnostics["stage"] = "response"
                     diagnostics.update(
                         input_tokens=event.usage.input_tokens,
                         output_tokens=event.usage.output_tokens,
@@ -202,17 +247,36 @@ async def review_map(
                     if calls:
                         if len(calls) != 1 or calls[0].name != "record_map_review":
                             raise _IncompleteReview("The model returned an ambiguous review call.")
+                        diagnostics["response_format"] = "tool_call"
                         return json.dumps(calls[0].input, ensure_ascii=False)
                     if not event.message.text.strip():
                         raise _IncompleteReview("The model returned no visual review text.")
+                    diagnostics["response_format"] = "text"
                     return event.message.text
-            raise ValueError("The model did not return a complete review.")
+            diagnostics["stage"] = "response"
+            raise _IncompleteReview("The model did not return a complete review.")
 
         raw = await asyncio.wait_for(collect(), timeout=settings.timeout_seconds)
         text = raw.strip()
         if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        result = MapReview.model_validate_json(text)
+            _, separator, fenced = text.partition("\n")
+            if separator:
+                text = fenced.rsplit("```", 1)[0].strip()
+        diagnostics["raw_review_chars"] = len(text)
+        # Record only bounded review JSON/arguments, never an accompanying reasoning field.
+        if diagnostics.get("response_format") == "tool_call" or text.startswith(("{", "[")):
+            safe_text = _redact_review(text, secrets)
+            diagnostics["raw_review_excerpt"] = safe_text[:settings.diagnostics_max_chars]
+            diagnostics["raw_review_truncated"] = len(safe_text) > settings.diagnostics_max_chars
+        diagnostics["stage"] = "json"
+        payload = json.loads(text)
+        if isinstance(payload, dict) and payload.get("layout_patch", {}) is None:
+            # null and an empty object have the same unambiguous meaning here.
+            payload["layout_patch"] = {}
+            diagnostics["compatibility_applied"] = ["layout_patch_null_to_empty"]
+        diagnostics["stage"] = "schema"
+        result = MapReview.model_validate(payload)
+        diagnostics["outcome"] = "completed"
         result.diagnostics = diagnostics
         diagnostics["raw_review_status"] = result.status
         actionable = any(issue.severity in {"error", "warning"} for issue in result.issues)
@@ -232,13 +296,59 @@ async def review_map(
     except asyncio.CancelledError:
         raise
     except _IncompleteReview as exc:
+        diagnostics.update(outcome="failed", failure_stage=diagnostics["stage"])
         result = MapReview(status="unverified", summary=str(exc))
+        return result
+    except json.JSONDecodeError as exc:
+        diagnostics.update(
+            outcome="failed", failure_stage="json", error_type="JSONDecodeError",
+            json_error={"line": exc.lineno, "column": exc.colno, "position": exc.pos,
+                        "msg": exc.msg},
+        )
+        result = MapReview(
+            status="unverified", summary="Visual review response contains invalid JSON; "
+            "no visual conclusion was accepted.",
+        )
+        return result
+    except ValidationError as exc:
+        # An SDK may also reject its transport response before returning review
+        # arguments. Keep that distinct from our MapReview contract validation.
+        failure_stage = diagnostics["stage"]
+        if failure_stage == "network":
+            failure_stage = "response"
+            diagnostics["stage"] = failure_stage
+        errors = exc.errors(include_input=False, include_context=False, include_url=False)
+        # Locations may contain unknown field names supplied by the model; redact and bound them.
+        details = _redact_review([
+            {"loc": list(error["loc"]), "type": error["type"], "msg": error["msg"]}
+            for error in errors[:settings.max_validation_errors]
+        ], secrets)
+        for error in details:
+            error["loc"] = [part[:settings.diagnostics_max_chars] if isinstance(part, str)
+                            else part for part in error["loc"]]
+            error["msg"] = error["msg"][:settings.diagnostics_max_chars]
+        diagnostics.update(
+            outcome="failed", failure_stage=failure_stage, error_type="ValidationError",
+            validation_errors=details, validation_error_count=exc.error_count(),
+            validation_errors_truncated=exc.error_count() > settings.max_validation_errors,
+        )
+        result = MapReview(
+            status="unverified", summary=(
+                "Visual review response does not satisfy the review schema; "
+                "inspect validation_errors. This is not evidence of a service outage."
+                if failure_stage == "schema" else
+                "Review transport response validation failed; inspect validation_errors. "
+                "No visual conclusion was accepted."
+            ),
+        )
         return result
     except Exception as exc:
         diagnostics["error_type"] = type(exc).__name__
         status = getattr(exc, "status_code", None)
         if status is not None:
             diagnostics["http_status"] = status
+            diagnostics["stage"] = "provider"
+        diagnostics.update(outcome="failed", failure_stage=diagnostics["stage"])
         result = MapReview(
             status="unverified",
             summary=f"Visual map review could not finish ({type(exc).__name__}).",
@@ -253,7 +363,11 @@ async def review_map(
                 diagnostics["close_error_type"] = type(exc).__name__
         diagnostics["duration_seconds"] = round(time.monotonic() - started, 3)
         if result is not None:
-            result.diagnostics = diagnostics
+            result.summary = _redact_review(result.summary, secrets)
+            for issue in result.issues:
+                issue.description = _redact_review(issue.description, secrets)
+                issue.location = _redact_review(issue.location, secrets)
+            result.diagnostics = _redact_review(diagnostics, secrets)
 
 
 def save_review(

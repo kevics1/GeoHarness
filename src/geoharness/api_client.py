@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from contextvars import ContextVar
@@ -17,7 +18,8 @@ from openharness.api.client import (
 )
 from openharness.api.openai_client import OpenAICompatibleClient
 from openharness.api.usage import UsageSnapshot
-from openharness.engine.messages import ConversationMessage, TextBlock
+from openharness.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
+from pydantic import ValidationError
 
 from geoharness.config.settings import AgentConfig
 
@@ -33,6 +35,9 @@ class _RequestState:
     include_stream_usage: bool = True
     record_usage: Callable[[UsageSnapshot], None] | None = None
     active_streams: list[Any] = field(default_factory=list)
+    raw_tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
+    finish_reason: str | None = None
+    reasoning_text: list[str] = field(default_factory=list)
 
 
 def _add_usage(left: UsageSnapshot, right: UsageSnapshot) -> UsageSnapshot:
@@ -76,6 +81,11 @@ class _CompletionProxy:
         stream = await self._completions.create(**params)
         if state is not None:
             state.active_streams.append(stream)
+            # Upstream transport retries start a new completion. Never join a
+            # failed attempt's partial arguments to the next attempt's JSON.
+            state.raw_tool_calls.clear()
+            state.finish_reason = None
+            state.reasoning_text.clear()
 
         async def observed_stream() -> AsyncIterator[Any]:
             previous_usage = UsageSnapshot()
@@ -101,10 +111,24 @@ class _CompletionProxy:
                             output_tokens=max(usage.output_tokens, previous_usage.output_tokens),
                         )
                     if state is not None and chunk.choices:
-                        delta = chunk.choices[0].delta
+                        choice = chunk.choices[0]
+                        delta = choice.delta
+                        state.finish_reason = choice.finish_reason or state.finish_reason
                         reasoning = getattr(delta, "reasoning_content", None) or ""
                         state.reasoning_chars += len(reasoning)
+                        if reasoning:
+                            state.reasoning_text.append(reasoning)
                         state.raw_content_chars += len(delta.content or "")
+                        for tool in delta.tool_calls or ():
+                            entry = state.raw_tool_calls.setdefault(tool.index, {
+                                "id": "", "name": "", "arguments": "",
+                            })
+                            if tool.id:
+                                entry["id"] = tool.id
+                            if tool.function:
+                                if tool.function.name:
+                                    entry["name"] = tool.function.name
+                                entry["arguments"] += tool.function.arguments or ""
                     yield chunk
             finally:
                 await _close_provider_stream(stream, state)
@@ -157,6 +181,9 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         self._unsettled_usage: ContextVar[UsageSnapshot | None] = ContextVar(
             "geoharness_unsettled_usage", default=None,
         )
+        self._tool_argument_diagnostics: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+            "geoharness_tool_argument_diagnostics", default=None,
+        )
         # Avoid stacking the SDK's retry loop inside the upstream client's loop.
         self._sdk_client = self._client.with_options(max_retries=0)
         self._client = _ClientProxy(self._sdk_client, self._request_state)
@@ -168,6 +195,11 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
     @property
     def last_response_diagnostic(self) -> str | None:
         return self._response_diagnostic.get()
+
+    @property
+    def last_tool_argument_diagnostics(self) -> list[dict[str, Any]]:
+        """Bounded metadata only; raw scripts and reasoning are never retained here."""
+        return [dict(item) for item in self._tool_argument_diagnostics.get() or ()]
 
     def _record_usage(self, usage: UsageSnapshot) -> None:
         self._unsettled_usage.set(_add_usage(self._unsettled_usage.get() or UsageSnapshot(), usage))
@@ -196,6 +228,40 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         if state is not None and state.visible_chars:
             return False
         return super()._is_retryable(exc)
+
+    async def _stream_once(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
+        """Handle the upstream parser's non-object JSON failure without replaying HTTP."""
+        state = self._request_state.get()
+        try:
+            async for event in super()._stream_once(request):
+                yield event
+        except ValidationError as exc:
+            # ToolUseBlock requires a dict. A provider's JSON array/scalar otherwise
+            # aborts parsing and discards complete sibling calls and their usage.
+            if state is None or exc.title != "ToolUseBlock":
+                raise
+            content: list[TextBlock | ToolUseBlock] = []
+            if state.visible_text:
+                content.append(TextBlock(text="".join(state.visible_text)))
+            for index in sorted(state.raw_tool_calls):
+                raw = state.raw_tool_calls[index]
+                if not raw["name"]:
+                    continue
+                try:
+                    arguments = json.loads(raw["arguments"])
+                except json.JSONDecodeError:
+                    arguments = {}
+                content.append(ToolUseBlock(
+                    id=raw["id"], name=raw["name"],
+                    input=arguments if isinstance(arguments, dict) else {},
+                ))
+            message = ConversationMessage(role="assistant", content=content)
+            if state.reasoning_text:
+                message._reasoning = "".join(state.reasoning_text)
+            yield ApiMessageCompleteEvent(
+                message=message,
+                usage=state.reported_usage, stop_reason=state.finish_reason,
+            )
 
     async def _stream_request(
         self, request: ApiMessageRequest, state: _RequestState,
@@ -233,6 +299,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
     async def stream_message(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
         self._empty_diagnostic.set(None)
         self._response_diagnostic.set(None)
+        self._tool_argument_diagnostics.set(None)
         usage = UsageSnapshot()
         current = request
         extras = dict(self.settings.request_extra_body)
@@ -295,6 +362,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
             )
             self._record_usage(unobserved)
             usage = _add_usage(usage, _add_usage(state.reported_usage, unobserved))
+            final = self._diagnose_tool_arguments(current, final, state)
             empty = final.message.is_effectively_empty()
             if not empty:
                 yield replace(final, usage=usage)
@@ -319,6 +387,80 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 max_tokens=min(request.max_tokens, recovery_limit),
             )
             extras = fallback_extras
+
+    def _diagnose_tool_arguments(
+        self, request: ApiMessageRequest, event: ApiMessageCompleteEvent, state: _RequestState,
+    ) -> ApiMessageCompleteEvent:
+        """Retain tool-result repair flow while refusing unsafe parser fallbacks.
+
+        The upstream parser maps invalid JSON to {}. Preserve each call's identity
+        and attach only a reserved error marker, which GeoPythonInput and the
+        pre-tool guard reject before execution. Valid parallel calls are unchanged.
+        """
+        schemas = {tool["name"]: tool.get("input_schema", {}) for tool in request.tools}
+        raw_calls = iter(state.raw_tool_calls[index] for index in sorted(state.raw_tool_calls)
+                         if state.raw_tool_calls[index]["name"])
+        content = []
+        diagnostics = []
+        for block in event.message.content:
+            if not isinstance(block, ToolUseBlock):
+                content.append(block)
+                continue
+            raw = next(raw_calls, None)
+            if raw is None:
+                content.append(block)
+                continue
+            arguments = raw["arguments"]
+            diagnostic: dict[str, Any] = {
+                "tool_name": block.name[:64], "tool_call_id": block.id[:64],
+                "argument_chars": len(arguments),
+                "finish_reason": event.stop_reason or state.finish_reason or "unknown",
+            }
+            try:
+                decoded = json.loads(arguments)
+            except json.JSONDecodeError as exc:
+                diagnostic.update(
+                    category="invalid_json", json_error_position=exc.pos,
+                    json_error_line=exc.lineno, json_error_column=exc.colno,
+                    json_error_message=exc.msg[:120],
+                )
+            else:
+                if not isinstance(decoded, dict):
+                    diagnostic.update(category="non_object_json", json_type=type(decoded).__name__)
+                else:
+                    required = schemas.get(block.name, {}).get("required", [])
+                    missing = [key for key in required if key not in decoded]
+                    code = decoded.get("code")
+                    if block.name == "geo_python" and (
+                        code is None or isinstance(code, str) and not code.strip()
+                    ):
+                        missing = [*missing, "code"]
+                    if not missing:
+                        content.append(block)
+                        continue
+                    diagnostic.update(
+                        category="missing_required_arguments", empty_object=not decoded,
+                        missing_required=sorted(set(missing))[:8],
+                    )
+            diagnostics.append(diagnostic)
+            content.append(block.model_copy(update={"input": {
+                "_geoharness_argument_error": diagnostic,
+            }}))
+        if not diagnostics:
+            return event
+        self._tool_argument_diagnostics.set(diagnostics[:8])
+        self._response_diagnostic.set(
+            "工具参数被拒绝，未执行这些调用；已保留其他完整调用和既有工具结果。"
+            + "；".join(
+                f"{item['tool_name']}: {item['category']} "
+                f"(argument_chars={item['argument_chars']}, "
+                f"finish_reason={item['finish_reason']}"
+                + (f", json_error_position={item['json_error_position']}"
+                   if "json_error_position" in item else "") + ")"
+                for item in diagnostics[:8]
+            )
+        )
+        return replace(event, message=event.message.model_copy(update={"content": content}))
 
     @staticmethod
     def _diagnostic(
