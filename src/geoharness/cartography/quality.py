@@ -62,7 +62,7 @@ def _review_secrets(config: GeoConfig) -> tuple[str, ...]:
     for server in config.mcp_servers.values():
         values.extend(value for key, value in server.env.items() if any(
             marker in key.upper()
-            for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "DSN")
+            for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "DSN", "URI")
         ))
     variants = set()
     for value in values:

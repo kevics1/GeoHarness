@@ -96,13 +96,16 @@ async def test_json_failure_has_position_and_differs_from_schema_failure(image):
 
 
 @pytest.mark.asyncio
-async def test_persisted_diagnostics_redact_credentials_before_truncating(image, tmp_path):
+@pytest.mark.parametrize("credential_key", ["TOKEN", "DATABASE_URI"])
+async def test_persisted_diagnostics_redact_credentials_before_truncating(
+    image, tmp_path, credential_key
+):
     secrets = ["main-key-123456", "review-key-987654", 'mcp-secret-"escaped"']
     config = GeoConfig(
         api_key=secrets[0],
         map_review=MapReviewConfig(api_key=secrets[1], diagnostics_max_chars=128,
                                    max_validation_errors=1),
-        mcp_servers={"test": McpServerConfig(command="python", env={"TOKEN": secrets[2]})},
+        mcp_servers={"test": McpServerConfig(command="python", env={credential_key: secrets[2]})},
     )
     # Include a secret across the maximum snippet boundary and in an error location.
     payload = {**PASS, "summary": "x" * 65 + secrets[0] + secrets[1] + secrets[2],

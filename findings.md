@@ -143,3 +143,11 @@
 - 受管工作区pytest临时目录ACL错误改为明确系统TEMP子目录后测试正常；未据此改变产品权限。一次文档patch匹配失败未写入，使用实际段落重新应用成功。
 
 - QGIS模板保存重开会归一化比例尺尺寸；最终PNG改为由已保存并读回的布局导出。applyDefaultSize需显式Kilometers，避免默认米配km标签；NULL category value不能被exclude_none序列化丢掉。仅模板自身区域互压受结构检查约束，用户地图内新增注记保留。
+
+# 2026-10-09 PostgreSQL MCP 启动入口
+
+- 缺失模块可直接复现；现有PG参数与原生PostGIS DSN五项一致，数据库连接本身正常。
+- 官方postgres-mcp0.3.0真实入口为console script，启动必须提供DATABASE_URI。发布包未设MCP上限，首次安装选择2.3.0后FastMCP导入失败；隔离环境限制mcp>=1.25,<2得到1.30.0并正常启动。
+- Windows入口已采用Selector事件循环支持psycopg异步连接；服务另提示Unix信号处理不支持，但其后真实握手、9工具发现与只读SQL均成功。
+- MCP错误脱敏需要先替换长的完整URI，否则旧PGPASSWORD会提前改变连接串使整体匹配失效；两种环境变量插入顺序已回归。
+- 本机全局配置已最小切换并备份，主模型、原凭证与Geo MCP保持不变；安装版实际CLI双服务握手和正常回复通过。索引/健康/统计高级扩展能力未逐项验收。

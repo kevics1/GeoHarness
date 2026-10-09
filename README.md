@@ -134,27 +134,10 @@ model: ${GEOH_MODEL}
 api_key: ${GEOH_API_KEY}
 base_url: ${GEOH_BASE_URL}
 
-# ── MCP 服务器 ────────────────────────────────
-# 2 个领域 MCP 服务器，提供 27 个工具
-mcp:
-  geo-mcp-server:
-    # 空间分析核心：地理编码、空间统计、聚类、因果检验
-    command: python
-    args: ["-m", "geo_mcp_server"]
-    env:
-      PYTHONUTF8: "1"              # 必须！修复 Windows 中文路径 .pth 问题
-      AMAP_API_KEY: your-amap-key  # 高德 API Key，用于地理编码
-
-  postgres:
-    # PostgreSQL 查询：schema 检查、查询分析
-    command: python
-    args: ["-m", "postgres_mcp_server"]
-    env:
-      PGHOST: ${GEOH_POSTGRES_HOST}
-      PGPORT: ${GEOH_POSTGRES_PORT}
-      PGDATABASE: ${GEOH_POSTGRES_DB}
-      PGUSER: ${GEOH_POSTGRES_USER}
-      PGPASSWORD: ${GEOH_POSTGRES_PASSWORD}
+# ── MCP 服务器（可选）─────────────────────────
+# 默认仅启用原生工具；安装服务后再添加真实 command/args。
+# Geo MCP 和独立只读 Postgres MCP 的配置见 user-guide.md。
+mcp: {}
 
 # ── 制图配置 ──────────────────────────────────
 cartography:

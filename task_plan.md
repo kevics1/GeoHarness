@@ -111,3 +111,11 @@
 - 保留用户已有.env.example修改，不纳入提交；不修改AGENTS、上游OpenHarness、模型/凭证或既有地图数据。
 - 原有Matplotlib/HTML及可信Python入口继续可用；新的默认静态制图路径采用已安装PyQGIS独立运行时。
 - 每阶段相关pytest与ruff通过后提交，随后CLI验证；不把尚未验证的业务质量宣称为通过。
+
+## 当前任务：修复遗留 PostgreSQL MCP 启动入口（2026-10-09）
+
+1. 复现缺失模块，核对现有凭证引用与官方服务入口 — complete。
+2. 在独立环境安装真实 Postgres MCP；修正本机启动配置和文档，保留现有连接信息并启用 restricted 模式 — complete。
+3. 验证 MCP 握手、只读数据库请求和真实全局 CLI；运行相关回归并交付 — complete。
+- 用户继续指令接续上一轮明确留下的 PostgreSQL MCP 故障；不扩大到延后的业务质量评测。
+- 不修改原始数据、旧地图、模型或凭证；用户既有 .env.example 修改保持不动。

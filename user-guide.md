@@ -43,6 +43,38 @@ MCP 配置必须对应真实安装入口，不能按服务名猜 Python 模块�
 连接失败会显示具体原因；原生空间分析和 PostGIS 数据工具仍可使用。
 新执行 `geoh init` 默认不启用外部 MCP；安装服务后再配置真实入口。已有用户配置不自动删除。
 
+独立 PostgreSQL MCP 可使用 [Postgres MCP 官方项目](https://github.com/crystaldba/postgres-mcp)。
+本机使用 `postgres-mcp==0.3.0`，该扩展需要 Python 3.12 或以上；GeoHarness 原生工具的
+Python 版本要求不变。推荐安装到独立环境，避免改变 GIS 主环境的依赖。Windows 示例：
+
+```powershell
+uv venv --python 3.12 "$env:USERPROFILE\.geoharness\servers\postgres-mcp"
+uv pip install --python "$env:USERPROFILE\.geoharness\servers\postgres-mcp\Scripts\python.exe" postgres-mcp==0.3.0 "mcp>=1.25,<2"
+```
+
+在全局 YAML 的 `mcp` 下添加以下配置，保留已有 Geo MCP 条目。`USERPROFILE` 是
+Windows 现有环境变量；`GEOH_POSTGIS_DSN` 使用配置同目录 `.env` 中已有的数据库连接串。
+若原生工具与 MCP 使用不同数据库，需提供对应连接串，不能直接替换为原生工具的 DSN。
+
+```yaml
+mcp:
+  postgres:
+    command: ${USERPROFILE}/.geoharness/servers/postgres-mcp/Scripts/postgres-mcp.exe
+    args: ["--access-mode=restricted"]
+    env:
+      DATABASE_URI: ${GEOH_POSTGIS_DSN}
+      PGCONNECT_TIMEOUT: "5"
+```
+
+真实入口是 `postgres-mcp`，不是 `python -m postgres_mcp_server`；该服务通过
+`DATABASE_URI` 接收连接信息，仅配置 PGHOST/PGPORT 等变量不足以启动。restricted 模式
+限制 SQL 为只读事务。高级索引分析及查询统计工具可能需要数据库扩展；连接成功不证明
+所有这些扩展存在。凭证通过环境传给子进程，不放在命令行；诊断会遮蔽配置的连接串。
+该版本使用 MCP 1.x 的 FastMCP API，安装命令明确限制 `mcp<2`；MCP 2.x 已移除此 API，
+直接安装未设上限的发布包会在导入时失败。此限制仅用于独立服务环境。
+Windows 上该服务可能显示 `Signal handling not supported on Windows`；这是服务未使用
+Unix 信号处理的提示。是否连接成功应以 MCP 握手和实际 SQL 请求结果为准。
+
 继承的 PostGIS PROJ 数据目录可能与 rasterio wheel 不兼容。启动时只在当前进程选择
 与 rasterio 自带数据库兼容的目录，成功修复不显示警告，不修改机器环境或 PostGIS 文件；
 pyproj 仍使用自己的数据目录。

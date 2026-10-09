@@ -120,12 +120,15 @@ def _safe_error_text(detail: str, config: Any) -> str:
     """Keep the cause visible without exposing configured credentials."""
     env = getattr(config, "env", None) or {}
     if isinstance(env, dict):
-        for key, value in env.items():
+        secrets = {
+            str(value) for key, value in env.items()
             if value and any(
                 token in str(key).upper()
-                for token in ("KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "DSN")
-            ):
-                detail = detail.replace(str(value), "[redacted]")
+                for token in ("KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "DSN", "URI")
+            )
+        }
+        for secret in sorted(secrets, key=len, reverse=True):
+            detail = detail.replace(secret, "[redacted]")
     return " ".join(detail.split())[:1200]
 
 

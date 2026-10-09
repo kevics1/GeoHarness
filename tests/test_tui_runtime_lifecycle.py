@@ -271,7 +271,8 @@ async def test_failure_before_model_reply_finishes_line_and_accepts_next_input(
         await client._sdk_client.close()
 
 
-def test_unexpected_runtime_error_redacts_configured_credentials(lifecycle_host):
+@pytest.mark.parametrize("credential_key", ["TOKEN", "DATABASE_URI"])
+def test_unexpected_runtime_error_redacts_configured_credentials(lifecycle_host, credential_key):
     from geoharness.config.settings import DataConfig, GeoConfig, MapReviewConfig, McpServerConfig
     from geoharness.tui_backend import _runtime_error_detail
 
@@ -280,7 +281,9 @@ def test_unexpected_runtime_error_redacts_configured_credentials(lifecycle_host)
     engine.tool_metadata["geoharness_config"] = GeoConfig(
         api_key=secrets[0], map_review=MapReviewConfig(api_key=secrets[1]),
         data=DataConfig(postgis_dsn=secrets[2]),
-        mcp_servers={"test": McpServerConfig(command="synthetic", env={"TOKEN": secrets[3]})},
+        mcp_servers={
+            "test": McpServerConfig(command="synthetic", env={credential_key: secrets[3]})
+        },
     )
     detail = _runtime_error_detail(
         RuntimeError("connection failed " + " ".join(secrets)), host._bundle,

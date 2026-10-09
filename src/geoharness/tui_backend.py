@@ -35,7 +35,7 @@ def _runtime_error_detail(exc: Exception, bundle: Any) -> str:
     ]
     for server in (getattr(config, "mcp_servers", None) or {}).values():
         secrets.extend(value for key, value in server.env.items() if any(
-            marker in key.upper() for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET", "DSN")
+            marker in key.upper() for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET", "DSN", "URI")
         ))
     detail = str(exc)
     for secret in sorted((str(value) for value in secrets if value), key=len, reverse=True):

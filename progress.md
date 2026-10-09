@@ -135,3 +135,12 @@
 - 两份授权项目技能与使用/架构文档已更新；wheel包含六份技能且源码核对一致。全局D:/Python312已安装当前修复版，跨目录验证尚在执行；主模型、凭证、全局配置及用户.env.example保持不变。
 - 最终全量918 passed（598.27秒）；ruff和diff检查通过。安装版66个Python源码模块及六份技能逐项与工作区字节匹配；用户test目录geoh version/dry-run/真实run --print正常回复并exit0，没有创建.openharness。安装版QGIS doctor succeeded，持久回执重读保留data/layout/packaged/delivered passed、visual issues、quality draft。
 - 四项实施及文档、独立审查、全局安装全部完成。现存外部限制：用户原postgres MCP配置引用的postgres_mcp_server未安装，真实启动仍提示连接失败；未修改该配置或安装未知依赖。空间分析/制图验证不依赖此服务。
+
+# 2026-10-09：PostgreSQL MCP 遗留启动故障
+
+- 用户继续指令后复现缺失模块；核对PG参数与原生DSN一致，原生只读查询及PostGIS扩展检查通过。
+- 在独立Python3.12环境安装官方postgres-mcp0.3.0。首次解析到MCP2.3.0实际FastMCP导入失败，限定mcp>=1.25,<2后使用1.30.0，真实入口正常。
+- 本机全局配置保留GeoMCP、模型、原连接信息，只切换postgres入口与restricted参数，增加引用既有DSN的DATABASE_URI和5秒连接超时，保存原配置备份。
+- 诊断URI脱敏三处及重叠凭证先红后绿；最终88项相关回归、ruff通过，独立审查问题闭环。MCP真实15.53秒握手、9工具发现及只读SQL通过。
+- 全局wheel已更新，66个模块与源码一致；用户test目录实际geoh run --print中两个服务均握手，正常模型回复并exit0，dry-run通过，无.openharness。高级数据库扩展工具未逐项验收。
+- 诊断报告：diagnostics/2026-10-09-postgres-mcp.md；README与使用指南已移除错误入口并说明隔离安装及MCP版本兼容要求，原有.env.example保持不动。
