@@ -23,6 +23,54 @@ _COUNT_SEMANTICS = (
     "zone totals are not a deduplicated global total. affected_count uses the same predicate "
     "after selecting affected source features."
 )
+_AREA_SEMANTICS = (
+    "Planar areas in the declared metre CRS. feature_area_sum_m2 counts overlaps repeatedly; "
+    "union_area_m2 is deduplicated coverage; overlap_area_m2 is sum minus union, not a "
+    "geometrical overlap footprint. Groups are independent and cannot be added as global coverage."
+)
+
+
+def polygon_area_statistics(frame: Any, group_field: str = "", *,
+                            group_values: list | None = None) -> dict:
+    """Measure actual projected polygons; serialized group values bind output semantics."""
+    from shapely import union_all
+
+    from geoharness._proj_fix import ensure_proj_data
+
+    ensure_proj_data()
+    from pyproj import CRS
+
+    crs = CRS.from_user_input(frame.crs)
+    if (not crs.is_projected or len(crs.axis_info) < 2
+            or any(not math.isclose(axis.unit_conversion_factor, 1) for axis in crs.axis_info[:2])):
+        raise ValueError("area requires a projected CRS with metre units")
+    _validate_frame(frame, "area")
+    if not frame.geom_type.isin(["Polygon", "MultiPolygon"]).all():
+        raise ValueError("area requires polygon or multipolygon geometries")
+    if group_field and (group_field not in frame.columns
+                        or group_field in {frame.geometry.name, "area_m2"}):
+        raise ValueError("area group_field must be an existing non-reserved attribute")
+    if group_field and (group_values is None or len(group_values) != len(frame)):
+        raise ValueError("area group_field requires serialized values for every feature")
+
+    def measure(subset):
+        total = float(subset.geometry.area.sum())
+        union = float(union_all(subset.geometry.array).area)
+        return {"feature_count": len(subset), "feature_area_sum_m2": total,
+                "union_area_m2": union, "overlap_area_m2": max(0.0, total - union)}
+
+    result = {"unit": "m2", **measure(frame), "group_field": group_field, "groups": []}
+    if group_field:
+        groups = {}
+        for index, value in enumerate(group_values):
+            if (not isinstance(value, (str, int, float, bool, type(None)))
+                    or isinstance(value, float) and not math.isfinite(value)):
+                raise ValueError("area group_field values must be finite scalar JSON values")
+            key = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            groups.setdefault(key, {"value": value, "indices": []})["indices"].append(index)
+        result["groups"] = [{"value": group["value"], **measure(frame.iloc[group["indices"]])}
+                            for group in groups.values()]
+    return result
 
 
 def _check_deadline(deadline: float, cancelled: Event) -> None:
@@ -203,6 +251,10 @@ def _run_operation(action: str, source: Any, reference: Any, zones: Any, distanc
         result = source.copy()
         result.geometry = source.buffer(distance)
         return {"result": result}
+    if action == "area":
+        result = _reserve_columns(source, ["area_m2"])
+        result["area_m2"] = source.geometry.area
+        return {"result": result}
     if action == "count":
         return {"result": _counts(source, zones if zones is not None else reference)}
     if action in ("clip", "intersection"):
@@ -291,6 +343,12 @@ def analyze_vectors(
         args.distance_m,
     )
     statistics = {"source_count": len(metric["source"]), "feature_count": len(artifacts["result"])}
+    if args.action == "area":
+        # Use exact serialized attributes; datetime/NumPy values may change type on export.
+        features = json.loads(artifacts["result"].to_json(default=str))["features"]
+        statistics["area_statistics"] = polygon_area_statistics(metric["source"],
+            args.group_field,
+            group_values=[f["properties"].get(args.group_field) for f in features])
     if args.action == "impact":
         statistics["affected_count"] = len(artifacts["affected"])
         statistics["unaffected_count"] = len(metric["source"]) - len(artifacts["affected"])
@@ -359,6 +417,9 @@ def analyze_vectors(
             "manifest_path": str(manifest_path),
             "geometry_semantics": "Shortest planar distance between any parts of the geometries.",
         }
+        if args.action == "area":
+            manifest["parameters"]["group_field"] = args.group_field
+            manifest["geometry_semantics"] = _AREA_SEMANTICS
         if args.action in ("count", "impact"):
             manifest["count_semantics"] = _COUNT_SEMANTICS
         (stage / "manifest.json").write_text(

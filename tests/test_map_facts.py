@@ -64,6 +64,33 @@ def _legacy(manifest):
     _write_manifest(manifest)
 
 
+@pytest.mark.parametrize("tamper", ["union", "group", "per_feature"])
+def test_area_facts_recompute_group_and_union_coverage_from_bound_output(tmp_path, tamper):
+    manifest = analyze_vectors(GeoAnalysisInput(action="area", group_field="time",
+        source=_source([box(500000,3400000,500100,3400100),
+                        box(500000,3400000,500200,3400200)], {"time": ["t1","t2"]})),
+        cwd=tmp_path, outputs_dir="analysis", metric_crs="EPSG:32650")
+    facts = _facts(tmp_path, manifest)
+    stats = facts["analyses"][0]["statistics"]["area_statistics"]
+    assert stats["union_area_m2"] == pytest.approx(40000)
+    assert stats["feature_area_sum_m2"] == pytest.approx(50000)
+    assert "去重覆盖" in facts["footer_text"] and "面积之和" in facts["footer_text"]
+    if tamper == "union":
+        manifest["statistics"]["area_statistics"]["union_area_m2"] = 50000
+    elif tamper == "group":
+        manifest["statistics"]["area_statistics"]["groups"][0]["union_area_m2"] = 15000
+    else:
+        entry = manifest["paths"]["result"]
+        path = Path(entry["geojson"])
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["features"][0]["properties"]["area_m2"] = 15000
+        path.write_text(json.dumps(document), encoding="utf-8")
+        entry["geojson_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    _write_manifest(manifest)
+    with pytest.raises(ValueError, match="area statistics"):
+        _facts(tmp_path, manifest)
+
+
 @pytest.mark.parametrize("crs", [[1], {"properties": []}, {"properties": {"name": 1}}])
 def test_invalid_nested_geojson_crs_is_a_bounded_validation_error(tmp_path, crs):
     manifest = _analysis(tmp_path)

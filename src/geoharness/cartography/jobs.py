@@ -678,7 +678,8 @@ def _stale_files(stage: dict[str, Any]) -> bool:
 
 
 def _receipt(
-    job: dict[str, Any], index: dict[str, Any], *, artifact: Path | None = None
+    job: dict[str, Any], index: dict[str, Any], *, artifact: Path | None = None,
+    include_candidate: bool = True,
 ) -> dict[str, Any]:
     result = copy.deepcopy(job)
     aliases = [alias for alias, job_id in index["aliases"].items() if job_id == job["job_id"]]
@@ -690,6 +691,7 @@ def _receipt(
     )
     result["latest_version"] = job["current_version"]
     version = result["versions"][-1] if result["versions"] else None
+    result["artifact_registered"] = artifact is None
     if artifact is not None:
         actual_digest = _sha(artifact)
         selected = next(
@@ -711,6 +713,7 @@ def _receipt(
             )
         if selected is not None:
             version = selected
+            result["artifact_registered"] = True
     if version is None:
         stages = {key: {"status": "unverified"} for key in _STAGES}
     else:
@@ -762,7 +765,39 @@ def _receipt(
         if any(item["status"] == "stale" for item in stages.values())
         else result["quality_status"]
     )
+    if include_candidate:
+        result["delivery_candidate"] = _delivery_candidate(job, index)
     return result
+
+
+def _delivery_candidate(job: dict[str, Any], index: dict[str, Any]) -> dict | None:
+    """Prefer verified visuals; otherwise use the last unchanged measured-layout pass."""
+    draft = None
+    for version in reversed(job["versions"]):
+        checked = _receipt({**job, "versions": [version]}, index, include_candidate=False)
+        stages = checked["stages"]
+        if (stages["rendered"]["status"] != "passed"
+                or stages["layout_checked"]["status"] != "passed"
+                or stages["data_checked"]["status"] in {"issues", "stale", "failed"}
+                or stages["visual_checked"]["status"] in {"issues", "stale"}
+                or stages["packaged"].get("project_dir")
+                and stages["packaged"]["status"] != "passed"):
+            continue
+        candidate = {key: checked.get(key) for key in (
+            "image_path", "image_sha256", "project_dir", "quality_status",
+        )}
+        reference = stages["visual_checked"].get("report_reference", {})
+        if stages["visual_checked"]["status"] == "passed" and reference.get("path"):
+            candidate["review_path"] = reference["path"]
+        candidate.update(version=version["version"], reason=(
+            "Unchanged image with a measured layout pass; visual/data checks keep their "
+            "actual statuses. A newer version does not automatically replace this candidate."
+        ))
+        if checked["quality_status"] == "passed":
+            return candidate
+        if draft is None:
+            draft = candidate
+    return draft
 
 
 def map_job_receipt(

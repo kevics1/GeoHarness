@@ -1,7 +1,8 @@
 """Bounded native analysis evidence tied to the layers actually being mapped.
 
-This verifies persisted output integrity and counts, never reruns analysis or
-turns arbitrary manifest prose into statistical evidence. Legacy manifests have
+This verifies persisted output integrity/counts and recomputes area from output
+polygons. Other spatial operations are not rerun; arbitrary manifest prose is
+never statistical evidence. Legacy manifests have
 no original output fingerprints and therefore receive a narrower verification.
 """
 
@@ -18,11 +19,11 @@ from typing import Any
 from pyproj import CRS
 
 from geoharness._proj_fix import ensure_proj_data
-from geoharness.analysis.vector import _COUNT_SEMANTICS
+from geoharness.analysis.vector import _AREA_SEMANTICS, _COUNT_SEMANTICS, polygon_area_statistics
 from geoharness.cartography.values import frame_content
 from geoharness.qgis.worker_context import WorkerContext
 
-_ACTIONS = {"buffer", "clip", "intersection", "distance", "count", "impact"}
+_ACTIONS = {"buffer", "clip", "intersection", "distance", "count", "impact", "area"}
 _MAX_MANIFESTS = 8
 _MANIFEST_BYTES = 1024 * 1024
 _OUTPUT_BYTES = 64 * 1024 * 1024
@@ -35,6 +36,7 @@ _METHODS = {
     "distance": "最短平面距离",
     "count": "分区相交计数",
     "impact": "距离阈值影响分析",
+    "area": "面积统计",
 }
 _GEOMETRY_SEMANTICS = {
     "buffer": "Planar buffers around source geometries in the metric CRS.",
@@ -43,6 +45,7 @@ _GEOMETRY_SEMANTICS = {
     "count": "Each source feature counts in every zone it intersects, including boundaries.",
     "distance": "Shortest planar distance between any parts of the geometries.",
     "impact": "Shortest planar distance between any parts of the geometries.",
+    "area": _AREA_SEMANTICS,
 }
 
 
@@ -233,7 +236,8 @@ def _read_outputs(
     return outputs, fingerprints, "sha256_verified" if has_hashes else "legacy_count_verified"
 
 
-def _statistics(manifest: dict, outputs: dict, distance: float) -> tuple[dict, list[str]]:
+def _statistics(manifest: dict, outputs: dict, distance: float,
+                metric_crs: CRS | None = None) -> tuple[dict, list[str]]:
     action, declared = manifest["action"], manifest["statistics"]
     result = outputs["result"]["features"]
     if _count(declared.get("feature_count")) != len(result):
@@ -241,13 +245,47 @@ def _statistics(manifest: dict, outputs: dict, distance: float) -> tuple[dict, l
     verified = {"feature_count": len(result)}
     source_count = _count(declared.get("source_count"))
     unverified = []
-    if action in {"buffer", "distance", "impact", "count"}:
+    if action in {"buffer", "distance", "impact", "count", "area"}:
         actual = len(outputs["source"]["features"]) if action == "count" else len(result)
         if source_count != actual:
             raise ValueError("Analysis source_count disagrees with actual output counts.")
         verified["source_count"] = actual
     else:
         unverified.append("source_count")
+    if action == "area":
+        import geopandas as gpd
+
+        group_field = manifest["parameters"].get("group_field", "")
+        if not isinstance(group_field, str) or len(group_field) > 128:
+            raise ValueError("area statistics group_field must be a bounded string")
+        frame = (gpd.GeoDataFrame.from_features(result, crs="EPSG:4326") if result
+                 else gpd.GeoDataFrame(geometry=[], crs="EPSG:4326"))
+        if not result and group_field:
+            frame[group_field] = []
+        frame = frame.to_crs(metric_crs)
+        actual = polygon_area_statistics(frame, group_field,
+            group_values=[item["properties"].get(group_field) for item in result])
+        declared_areas = declared.get("area_statistics")
+
+        def equivalent(expected, value):
+            if isinstance(expected, dict):
+                return (isinstance(value, dict) and set(value) == set(expected)
+                        and all(equivalent(item, value[key]) for key, item in expected.items()))
+            if isinstance(expected, list):
+                return (isinstance(value, list) and len(value) == len(expected)
+                        and all(equivalent(a, b) for a, b in zip(expected, value)))
+            if isinstance(expected, float):
+                return (type(value) in {int, float} and math.isfinite(value)
+                        and math.isclose(expected, value, rel_tol=1e-8, abs_tol=1e-3))
+            return type(value) is type(expected) and expected == value
+
+        if not equivalent(actual, declared_areas) or any(
+            not math.isclose(_number(item["properties"].get("area_m2")), area,
+                             rel_tol=1e-8, abs_tol=1e-3)
+            for item, area in zip(result, frame.geometry.area)
+        ):
+            raise ValueError("Native area statistics disagree with recomputed output polygons")
+        verified["area_statistics"] = actual
     if action in {"distance", "impact"}:
         distances = [_number(item["properties"].get("distance_m")) for item in result]
         if action == "impact":
@@ -377,6 +415,12 @@ def _mapped_outputs(
     return matches
 
 
+def _area_note(stats: dict) -> str:
+    areas = stats["area_statistics"]
+    return (f"；要素面积之和 {areas['feature_area_sum_m2'] / 1e6:.2f} km²"
+            f"；去重覆盖 {areas['union_area_m2'] / 1e6:.2f} km²")
+
+
 def _footer(analyses: list[dict]) -> str:
     lines = []
     for analysis in analyses:
@@ -384,6 +428,16 @@ def _footer(analyses: list[dict]) -> str:
         line = f"{_METHODS[action]}：结果 {stats['feature_count']}"
         if action == "impact":
             line += f"，受影响 {stats['affected_count']}，未影响 {stats['unaffected_count']}"
+        if action == "area":
+            areas = stats["area_statistics"]
+            line += _area_note(stats) + "（重叠范围不可相加为覆盖）"
+            groups = areas["groups"]
+            if groups:
+                line += "；各组去重面积：" + "，".join(
+                    f"{str(group['value'])[:80]} {group['union_area_m2'] / 1e6:.2f} km²"
+                    for group in groups[:6])
+                if len(groups) > 6:
+                    line += f"（共{len(groups)}组，完整结果见事实报告）"
         if action in {"buffer", "impact"}:
             label = "缓冲距离" if action == "buffer" else "距离阈值 ≤"
             line += f"；{label} {analysis['parameters']['distance_m']:g} m"
@@ -407,6 +461,8 @@ def _footer(analyses: list[dict]) -> str:
                 if item["action"] == "impact"
                 else ""
             )
+            + (_area_note(item["statistics"])
+               if item["action"] == "area" else "")
             for item in analyses
         ]
         lines.append("完整参数、计量CRS、显示CRS及验证范围见分析事实报告。")
@@ -479,7 +535,7 @@ def load_analysis_facts(
             )
         ):
             raise ValueError("Only known geo_analysis native manifests are supported.")
-        metric_name = _crs(manifest.get("metric_crs"), metric=True)[1]
+        metric_crs, metric_name = _crs(manifest.get("metric_crs"), metric=True)
         export_crs, export_name = _crs(manifest.get("export_crs"))
         if export_crs != CRS.from_epsg(4326):
             raise ValueError("Native analysis export_crs must be EPSG:4326.")
@@ -489,7 +545,7 @@ def load_analysis_facts(
         ):
             raise ValueError("Native analysis distance_m is inconsistent with action.")
         outputs, fingerprints, verification = _read_outputs(manifest, reader, export_crs)
-        statistics, unverified = _statistics(manifest, outputs, distance)
+        statistics, unverified = _statistics(manifest, outputs, distance, metric_crs)
         matches = _mapped_outputs(outputs, mapped_sources, reader)
         analyses.append(
             {
@@ -499,7 +555,9 @@ def load_analysis_facts(
                 "metric_crs": metric_name,
                 "export_crs": export_name,
                 "display_crs": display_name,
-                "parameters": {"distance_m": distance},
+                "parameters": {"distance_m": distance,
+                               **({"group_field": manifest["parameters"].get("group_field", "")}
+                                  if action == "area" else {})},
                 "statistics": statistics,
                 "unverified_statistics": unverified,
                 "count_semantics": _COUNT_SEMANTICS if action in {"count", "impact"} else "",
@@ -509,7 +567,9 @@ def load_analysis_facts(
                 "verification": verification,
                 "verification_scope": (
                     "Persisted output SHA256 integrity and output counts; "
-                    "original spatial analysis has not been recomputed."
+                    + ("polygon areas recomputed from output in metric_crs; "
+                       if action == "area" else "")
+                    + "original source data have not been reprocessed."
                     if verification == "sha256_verified"
                     else "Legacy persisted output counts only; no original output fingerprints and "
                     "no recomputation of the original spatial analysis."

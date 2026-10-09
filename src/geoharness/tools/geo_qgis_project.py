@@ -163,7 +163,10 @@ class QgisProjectLayout(BaseModel):
     detail_extent: QgisExtent | None = Field(
         default=None, description="Optional detail-map rectangle in the project CRS."
     )
-    footer_text: str = ""
+    footer_text: str = Field(default="", description=(
+        "Source/context notes only. Bind native analysis_manifests for verified statistics; "
+        "use geo_analysis area for grouped time areas, sums and deduplicated coverage."
+    ))
     font_family: str = "Microsoft YaHei"
     font_file: str = Field(default="", description=(
         "Optional TTF/TTC/OTF file in workspace/data read roots. For installed fonts "

@@ -27,6 +27,8 @@ buffer、clip、intersection、zonal、slope、hillshade、nearest；不猜测 I
 
 首期 geo_analysis 不依赖 MCP 或 PostGIS。source、reference、zones 使用结构化 SpatialSource，每个来源恰好提供 file_path、source_name 或 geojson 中的一项。
 
+面积统计使用 action=area，只传面 source，可传实际时次/类别 group_field。结果 area_m2 与整体/分组 feature_area_sum_m2、union_area_m2、overlap_area_m2 来自米制投影几何；overlap 是面积之和减去去重覆盖，不是重叠区域本身。累计或重叠范围不能相加称为覆盖，不按文件顺序猜时间次序。将返回的 result/manifest 用于制图，自动说明复算持久输出面积并同时呈现两种口径；不要手写未验证的总面积。
+
 | action | 运算与输入 |
 |---|---|
 | buffer | source 按 distance_m 生成缓冲区 |
@@ -78,6 +80,8 @@ QGIS 分析结果可直接作为 `geo_qgis_project` 的真实图层创建可编�
 制图子集使用原生分析输出路径加 derivation（feature_indices、keep_fields、annotations），保留可核验来源；不要删业务属性后另写几何文件来冒充完整结果。工具会区分完整分析数与实际上图数，新增地图注记不属于分析统计。日期/null 与驱动加入的 Feature.id 由制图工具处理，不改变原始文件；真实业务 ID、字段和几何变化仍会被拒绝。两个制图入口共用同一事实规则，计量 CRS 来自分析清单，显示 CRS 来自地图设置。
 
 用 geo_deliver 把数据结果、实际主图、QGIS 工程、脚本/manifest 和报告交付到当前工作目录 exports 的新子目录。传 primary_map 与实际 review_path，保留 map-receipt.json；工程与图片摘要/快照变化时旧证明失效，应核对新版本后重新交付。Python 图用 geo_cartography(action="project",map_path=...,project_output_dir=...) 和实际图层打包，不重新绘图或提升质量，不在脚本中绕过 RUN_DIR 复制文件。
+
+交付默认在已登记选中图存在已知问题/失效检查时选择同一任务的未变化布局通过候选，并使用该候选的对应工程；status 的 delivery_candidate 是建议，实际结果以 geo_deliver.selection 为准。没有候选会明确失败，用户要求保留指定问题图时可 version_policy=selected 草稿交付。未完成真实视觉检查的候选仍为 draft，不能因回到早期版本就宣称视觉通过。
 
 最终给出数量/距离/范围、方法、计量/显示 CRS、单位、计数口径和工具返回的路径。区分 quality_status 的 passed/draft 与阶段 issues/unverified/stale；只声称实际完成的核对，不把业务正确性或准确率评测写成已完成。
 

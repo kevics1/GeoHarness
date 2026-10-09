@@ -9,7 +9,9 @@ description: 分析结果制图、图片检查与编辑工程交付。使用数�
 
 使用真实分析结果和对应图层。analysis_type 只选择符号化规则，不执行分析。核对数量、CRS、字段、单位及范围；不要把目录/通配符当作 file_path，也不要根据概况回复重建几何。
 
-涉及统计或方法说明时，给 geo_cartography/geo_qgis_project 的新建请求传 `analysis_manifests`：最多8个实际 geo_analysis 清单。工具读取对应输出，核对 SHA256/计数、impact 阈值与选集，并要求输出确实参与当前图层。没有原始摘要的旧清单只验证现存输出计数。QGIS 说明栏的统计、方法、计量 CRS 与显示 CRS 来自核对结果；自由 footer_text 是备注，不是统计证据。这里没有重新计算分析，analysis_correctness 仍为 unverified；任意 Python/QGIS 清单不属于该证据接口。
+涉及统计或方法说明时，给 geo_cartography/geo_qgis_project 的新建请求传 `analysis_manifests`：最多8个实际 geo_analysis 清单。工具读取对应输出，核对 SHA256/计数、impact 阈值与选集，并要求输出确实参与当前图层。没有原始摘要的旧清单只验证现存输出计数。QGIS 说明栏的统计、方法、计量 CRS 与显示 CRS 来自核对结果；自由 footer_text 是备注，不是统计证据。原始源数据不重新分析，analysis_correctness 仍为 unverified；area 另从持久输出几何复算面积。任意 Python/QGIS 清单不属于该证据接口。
+
+时次/类别面数据的面积使用 `geo_analysis(action="area", source=..., group_field="实际时间字段")`。每组分别返回 union_area_m2（去重覆盖）和 feature_area_sum_m2（要素面积之和），累积/重叠范围不能相加称为总覆盖。将其 result 和清单用于制图，说明栏自动保留这两个口径；不手写未经核对的面积总量，不假定时次按文件顺序排列。
 
 ## 原生制图
 
@@ -78,5 +80,7 @@ geo_map_review 可登记实际图片与其布局报告，但不会给自定义�
 ## 交付
 
 调用 geo_deliver(files=实际地图/分析结果/脚本/报告路径列表, project_dir=工程目录, primary_map=实际PNG预览, review_path=实际报告)。交付到当前工作目录 exports 的新子目录；核对主图、工程预览、已登记快照和复制结果。打包/交付成功不补齐质量证据；保留 delivery.json 与 map-receipt.json。
+
+先读取 status 的 delivery_candidate。默认交付 version_policy=prefer_checked 会在已登记选中图有已知问题/失效证据时选择未变化的布局通过候选及其对应工程，优先全质量通过，否则仍为草稿；也可只传 map_id。selection 返回实际版本和原因，最终使用这些返回路径，不能继续引用较新问题图。无候选先修复或如实报告；用户明确要求保留指定问题图时用 version_policy=selected。换图不沿用旧图的审查报告或工程，不静默重绘，不删旧产物。
 
 最终使用返回的 delivery_dir、qgis_project、receipt_path 和文件路径，明确质量/阶段状态、方法、CRS、单位及剩余问题。QGIS 打开返回的 .qgs/.qgz，通过“项目 → 布局”编辑后保存，用 geo_qgis_project inspect/export 另建输出；修改图片或工程使旧证明失效，应核对新版本后重新交付。分享携带整个工程目录。Python/Matplotlib 工程的 redraw.py 读取 project.json，不读取 QGIS 样式修改；保留原脚本和前版本，不覆盖用户编辑工程。

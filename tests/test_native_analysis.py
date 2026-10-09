@@ -39,6 +39,65 @@ def _result_frame(result):
     return gpd.read_file(result.metadata["paths"]["result"]["geojson"])
 
 
+async def test_area_reports_time_groups_and_union_separately(context):
+    result = await GeoAnalysisTool().execute(GeoAnalysisInput(action="area", group_field="time",
+        source=_source([box(500000,3400000,500100,3400100),
+                        box(500000,3400000,500200,3400200)], {"time": ["t1", "t2"]})), context)
+    frame = _result_frame(result)
+    assert frame.area_m2.tolist() == pytest.approx([10000, 40000])
+    areas = result.metadata["statistics"]["area_statistics"]
+    assert areas["feature_area_sum_m2"] == pytest.approx(50000)
+    assert areas["union_area_m2"] == pytest.approx(40000)
+    assert areas["overlap_area_m2"] == pytest.approx(10000)
+    assert [group["value"] for group in areas["groups"]] == ["t1", "t2"]
+    assert [group["union_area_m2"] for group in areas["groups"]] == pytest.approx([10000, 40000])
+
+
+async def test_area_rejects_nonpolygon_and_unknown_group(context):
+    bad = await GeoAnalysisTool().execute(GeoAnalysisInput(action="area",
+        source=_source([Point(500000,3400000)])), context)
+    assert bad.is_error and "polygon" in bad.output
+    missing = await GeoAnalysisTool().execute(GeoAnalysisInput(action="area", group_field="missing",
+        source=_source([box(500000,3400000,500100,3400100)])), context)
+    assert missing.is_error and "group_field" in missing.output
+
+
+async def test_area_groups_deduplicate_overlaps_and_reject_reserved_field(context):
+    result = await GeoAnalysisTool().execute(GeoAnalysisInput(action="area", group_field="time",
+        source=_source([box(500000,3400000,500100,3400100),
+                        box(500050,3400000,500150,3400100),
+                        box(500000,3400000,500100,3400100)],
+                       {"time": ["t1", "t1", None]})), context)
+    frame = _result_frame(result)
+    assert frame.area_m2.tolist() == pytest.approx([10000, 10000, 10000])
+    areas = result.metadata["statistics"]["area_statistics"]
+    assert areas["feature_area_sum_m2"] == pytest.approx(30000)
+    assert areas["union_area_m2"] == pytest.approx(15000)
+    assert [group["value"] for group in areas["groups"]] == ["t1", None]
+    assert [group["union_area_m2"] for group in areas["groups"]] == pytest.approx([15000,10000])
+    conflict = await GeoAnalysisTool().execute(GeoAnalysisInput(action="area",
+        source=_source([box(500000,3400000,500100,3400100)], {"area_m2": [99]})), context)
+    assert conflict.is_error and "conflict" in conflict.output
+
+
+async def test_area_preserves_datetime_groups_and_handles_empty_result(context):
+    path = Path(context.cwd) / "dated.gpkg"
+    gpd.GeoDataFrame({"time": [pd.Timestamp("2020-03-30T19:00:00+08:00")]},
+        geometry=[box(500000,3400000,500100,3400100)], crs="EPSG:32650").to_file(path)
+    source = SpatialSource(file_path=str(path))
+    result = await GeoAnalysisTool().execute(GeoAnalysisInput(
+        action="area", source=source, group_field="time"), context)
+    _result_frame(result)
+    value = result.metadata["statistics"]["area_statistics"]["groups"][0]["value"]
+    output = json.loads(Path(result.metadata["output_path"]).read_text(encoding="utf-8"))
+    assert output["features"][0]["properties"]["time"] == value
+    assert "+08:00" in value
+    empty = await GeoAnalysisTool().execute(GeoAnalysisInput(action="area",
+        source=SpatialSource(geojson={"type": "FeatureCollection", "features": []})), context)
+    assert _result_frame(empty).empty
+    assert empty.metadata["statistics"]["area_statistics"]["union_area_m2"] == 0
+
+
 async def test_impact_multilayer_mixed_crs_and_zone_counts(context):
     assets = gpd.GeoDataFrame(
         {"asset": ["inside", "near", "outside"]},

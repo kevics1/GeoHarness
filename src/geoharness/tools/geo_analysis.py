@@ -40,7 +40,7 @@ class GeoAnalysisInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["buffer", "clip", "intersection", "distance", "count", "impact"]
+    action: Literal["buffer", "clip", "intersection", "distance", "count", "impact", "area"]
     source: SpatialSource = Field(
         description="Assets/features to analyze; original data is read-only."
     )
@@ -49,6 +49,10 @@ class GeoAnalysisInput(BaseModel):
     )
     zones: SpatialSource | None = Field(default=None, description="Optional counting zones.")
     distance_m: float = Field(default=0, ge=0, allow_inf_nan=False)
+    group_field: str = Field(default="", max_length=128, description=(
+        "area only: optional existing attribute, e.g. a time field. Reports each group's "
+        "union and sum separately; cumulative/overlapping time ranges are not additive coverage."
+    ))
     output_name: str = Field(default="", description="Plain stem for a new output directory.")
 
     @model_validator(mode="after")
@@ -63,8 +67,10 @@ class GeoAnalysisInput(BaseModel):
             raise ValueError("count accepts one zone layer: zones or reference, not both.")
         if self.zones is not None and self.action not in ("count", "impact"):
             raise ValueError("zones is only used by count or impact.")
-        if self.action == "buffer" and self.reference is not None:
-            raise ValueError("buffer uses source only; reference is not applicable.")
+        if self.action in {"buffer", "area"} and self.reference is not None:
+            raise ValueError(f"{self.action} uses source only; reference is not applicable.")
+        if self.group_field and self.action != "area":
+            raise ValueError("group_field applies only to area.")
         if self.action not in ("buffer", "impact") and self.distance_m != 0:
             raise ValueError("distance_m only applies to buffer and impact.")
         return self
@@ -79,7 +85,11 @@ class GeoAnalysisTool(BaseTool):
         "to configured metre CRS or local UTM. Writes GeoJSON/CSV plus provenance manifest "
         "and layer specs for geo_cartography; does not alter original data. "
         "Zone counts use intersects including boundaries and count each asset in every "
-        "matching zone. impact distance_m=0 means exact intersection."
+        "matching zone. impact distance_m=0 means exact intersection. "
+        "area measures polygon area_m2, union coverage, feature-area sum and overlap in a "
+        "metre CRS; group_field optionally groups time/category ranges. Overlapping ranges "
+        "must not be summed as total coverage. Use its result layer and analysis_manifests "
+        "for automatically verified map notes rather than handwritten area totals."
     )
     input_model: type[BaseModel] = GeoAnalysisInput
 

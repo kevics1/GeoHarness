@@ -7,6 +7,7 @@ import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -92,6 +93,145 @@ def record(job_id, metadata, cwd, image, **kwargs):
         project_dir=kwargs.get("project_dir"),
         analysis=kwargs.get("analysis"),
     )
+
+
+async def test_delivery_selects_last_unchanged_layout_pass_and_keeps_matching_project(tmp_path):
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
+
+    config, metadata = GeoConfig(), {}
+    job_id = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="fire")
+    good, bad = tmp_path / "v2.png", tmp_path / "v3.png"
+    good.write_bytes(b"good layout")
+    bad.write_bytes(b"clipped footer")
+    project_root = tmp_path / "good-project"
+    layout = package(project_root, good)
+    manifest = json.loads((project_root / "project.json").read_text())
+    manifest.update(backend="qgis", project_fidelity="saved_layout")
+    (project_root / "project.json").write_text(json.dumps(manifest), encoding="utf-8")
+    record(job_id, metadata, tmp_path, good, preflight=preflight(), layout=layout,
+           project_dir=project_root)
+    failed = native_layout(bad)
+    failed.update(status="issues", clipped_figure_text=[{"text": "overflow"}])
+    record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=failed)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={**metadata, "geoharness_config": config})
+    receipt = map_job_receipt(context.metadata, cwd=tmp_path, config=config, map_id=job_id)
+    assert receipt["latest_version"] == 2
+    assert receipt["delivery_candidate"]["version"] == 1
+    delivered = await GeoDeliverTool().execute(GeoDeliverInput(
+        primary_map=str(bad), map_id=job_id, name="checked"), context)
+    assert not delivered.is_error, delivered.output
+    result = delivered.metadata
+    assert result["selection"]["selected_version"] == 1
+    assert Path(result["primary_map"]).read_bytes() == good.read_bytes()
+    assert result["project_fidelity"] == "saved_layout"
+    assert Path(result["qgis_project"]).is_file()
+    assert result["quality_status"] == "draft"  # No visual review was performed.
+
+    good.write_bytes(b"changed after check")
+    stale = map_job_receipt(context.metadata, cwd=tmp_path, config=config, map_id=job_id)
+    assert stale["delivery_candidate"] is None
+    refused = await GeoDeliverTool().execute(GeoDeliverInput(
+        primary_map=str(bad), map_id=job_id, name="blocked"), context)
+    assert refused.is_error
+    assert "no unchanged candidate" in refused.output
+
+
+def test_candidate_selection_prefers_visual_pass_over_unreviewed_version(tmp_path):
+    config, metadata = GeoConfig(), {}
+    job_id = ensure_map_job(metadata, cwd=tmp_path, config=config)
+    for index in range(2):
+        image = tmp_path / f"v{index}.png"
+        image.write_bytes(f"image-{index}".encode())
+        record(job_id, metadata, tmp_path, image,
+               preflight=preflight(), layout=native_layout(image))
+        if index == 0:
+            record_map_review(job_id, metadata, cwd=tmp_path, config=config, image_path=image,
+                review={"status": "passed", "image_sha256": digest(image), "issues": [],
+                        "layout_patch": {}})
+    receipt = map_job_receipt(metadata, cwd=tmp_path, config=config, map_id=job_id)
+    assert receipt["delivery_candidate"]["version"] == 1
+    assert receipt["delivery_candidate"]["quality_status"] == "passed"
+
+
+async def test_delivery_by_id_and_explicit_draft_preserve_selection_intent(tmp_path):
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
+
+    config, metadata = GeoConfig(), {}
+    job_id = ensure_map_job(metadata, cwd=tmp_path, config=config)
+    good, bad, edited = [tmp_path / name for name in ("good.png", "bad.png", "edited.png")]
+    for image in (good, bad, edited):
+        image.write_bytes(image.name.encode())
+    record(job_id, metadata, tmp_path, good, preflight=preflight(), layout=native_layout(good))
+    failed = native_layout(bad)
+    failed.update(status="issues", clipped_figure_text=[{"text": "clipped"}])
+    record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=failed)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={**metadata, "geoharness_config": config})
+    tool = GeoDeliverTool()
+    by_id = await tool.execute(GeoDeliverInput(map_id=job_id), context)
+    assert not by_id.is_error, by_id.output
+    assert Path(by_id.metadata["primary_map"]).read_bytes() == good.read_bytes()
+    explicit = await tool.execute(GeoDeliverInput(
+        map_id=job_id, primary_map=str(bad), version_policy="selected"), context)
+    assert not explicit.is_error, explicit.output
+    assert Path(explicit.metadata["primary_map"]).read_bytes() == bad.read_bytes()
+    assert explicit.metadata["quality_status"] == "draft"
+    # An unrelated/new user edit must not be silently replaced just because an ID is supplied.
+    unregistered = await tool.execute(GeoDeliverInput(
+        map_id=job_id, primary_map=str(edited)), context)
+    assert not unregistered.is_error, unregistered.output
+    assert Path(unregistered.metadata["primary_map"]).read_bytes() == edited.read_bytes()
+    assert unregistered.metadata["quality_status"] == "draft"
+    assert unregistered.metadata["selection"]["changed"] is False
+
+
+def test_candidate_excludes_changed_bound_report(tmp_path):
+    config, metadata = GeoConfig(), {}
+    job_id = ensure_map_job(metadata, cwd=tmp_path, config=config)
+    image = tmp_path / "map.png"
+    image.write_bytes(b"pixels")
+    report = tmp_path / "layout.json"
+    layout = native_layout(image)
+    report.write_text(json.dumps(layout), encoding="utf-8")
+    layout["report_path"] = str(report)
+    record(job_id, metadata, tmp_path, image, layout=layout)
+    assert map_job_receipt(metadata, cwd=tmp_path, config=config,
+                           map_id=job_id)["delivery_candidate"] is not None
+    report.write_text("{}", encoding="utf-8")
+    assert map_job_receipt(metadata, cwd=tmp_path, config=config,
+                           map_id=job_id)["delivery_candidate"] is None
+
+
+async def test_delivery_fallback_uses_older_visual_report_after_restart(tmp_path):
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
+
+    config, metadata = GeoConfig(), {}
+    job_id = ensure_map_job(metadata, cwd=tmp_path, config=config)
+    good, bad = tmp_path / "checked.png", tmp_path / "new.png"
+    good.write_bytes(b"checked")
+    bad.write_bytes(b"new")
+    record(job_id, metadata, tmp_path, good, preflight=preflight(), layout=native_layout(good))
+    review = {"status": "passed", "summary": "Checked actual image", "issues": [],
+              "layout_patch": {}, "image_sha256": digest(good)}
+    review_path = tmp_path / "checked.review.json"
+    review_path.write_text(json.dumps(review), encoding="utf-8")
+    record_map_review(job_id, metadata, cwd=tmp_path, config=config, image_path=good,
+                      review={**review, "review_path": str(review_path)})
+    failed = native_layout(bad)
+    failed.update(status="issues", clipped_figure_text=[{"text": "clipped"}])
+    record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=failed)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
+    result = await GeoDeliverTool().execute(GeoDeliverInput(
+        map_id=job_id, primary_map=str(bad)), context)
+    assert not result.is_error, result.output
+    assert result.metadata["quality_status"] == "passed"
+    assert result.metadata["review_status"] == "passed"
+    assert any(Path(path).name == review_path.name for path in result.metadata["files"])
 
 
 def test_server_uuid_and_alias_rename_survive_restart(tmp_path):

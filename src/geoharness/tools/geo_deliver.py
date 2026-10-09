@@ -30,6 +30,10 @@ class _QgisDeliveryProject(BaseModel):
 
 
 class GeoDeliverInput(BaseModel):
+    map_id: str = Field(default="", description="Recorded logical map to deliver or select by ID.")
+    version_policy: Literal["prefer_checked", "selected"] = Field(default="prefer_checked",
+        description="Prefer a recorded unchanged layout pass when the selected map has known "
+        "issues/stale checks. selected explicitly retains the requested map as a draft.")
     files: list[str] = Field(
         default_factory=list,
         max_length=100,
@@ -122,25 +126,76 @@ class GeoDeliverTool(BaseTool):
             return _source(path if path.is_absolute() else workspace / path, roots)
 
         def publish() -> dict:
+            from geoharness.cartography.jobs import map_job_receipt
+
             files = [resolve(value) for value in arguments.files]
             primary = resolve(arguments.primary_map) if arguments.primary_map else None
+            project_directory = arguments.project_dir
+            candidate_report = None
+            selection = {"policy": arguments.version_policy, "changed": False}
+            selected_maps = [file for file in files if file.suffix.lower() in _MAP_SUFFIXES]
+            selection_source = primary or (selected_maps[0] if len(selected_maps) == 1 else None)
+            if selection_source is None and project_directory:
+                root = Path(project_directory).expanduser()
+                root = (root if root.is_absolute() else workspace / root).resolve()
+                document = json.loads(resolve(str(root / "project.json")).read_text(
+                    encoding="utf-8"))
+                if isinstance(document, dict) and isinstance(document.get("preview"), str):
+                    relative = Path(document["preview"])
+                    preview = (root / relative).resolve()
+                    if relative.is_absolute() or relative.drive or ".." in relative.parts \
+                            or not preview.is_relative_to(root):
+                        raise ValueError("Project preview reference must stay inside its folder.")
+                    selection_source = resolve(str(preview))
+            initial_receipt = map_job_receipt(context.metadata, cwd=workspace, config=config,
+                map_id=arguments.map_id, artifact_path=selection_source)
+            if (arguments.version_policy == "prefer_checked" and initial_receipt.get("job_id")
+                    and initial_receipt.get("artifact_registered", False)):
+                stages = initial_receipt["stages"]
+                known_problem = any(stages[key]["status"] in {"issues", "stale", "failed"}
+                    for key in ("rendered", "layout_checked", "data_checked", "visual_checked"))
+                candidate = initial_receipt.get("delivery_candidate")
+                if known_problem or (arguments.map_id and selection_source is None):
+                    if candidate is None:
+                        raise ValueError("Selected map has no unchanged candidate passing measured "
+                            "layout checks. Repair it, or explicitly use version_policy=selected "
+                            "to retain the requested draft.")
+                    primary = resolve(candidate["image_path"])
+                    files = [file for file in files if file != selection_source]
+                    project_directory = candidate.get("project_dir") or ""
+                    candidate_report = candidate.get("review_path")
+                    selection.update(changed=primary != selection_source,
+                        selected_version=candidate["version"],
+                        requested_version=initial_receipt.get("selected_version"),
+                        reason=candidate["reason"], project_available=bool(project_directory))
+            if primary is None and not files and arguments.map_id and selection_source is not None:
+                primary = selection_source
             if primary is not None and primary.suffix.lower() not in _MAP_SUFFIXES:
                 raise ValueError("Primary map must be a PNG/JPEG/WebP/PDF/SVG/HTML map artifact.")
             if primary is not None and primary not in files:
                 files.append(primary)
-            report_file = resolve(arguments.review_path) if arguments.review_path else None
+            report_file = (resolve(arguments.review_path)
+                           if arguments.review_path and not selection["changed"] else None)
+            if selection["changed"] and arguments.review_path:
+                old_report = resolve(arguments.review_path)
+                files = [file for file in files if file != old_report]
+            if selection["changed"] and candidate_report:
+                report_file = resolve(candidate_report)
             if report_file is not None and report_file not in files:
                 files.append(report_file)
             project_files: list[tuple[Path, Path]] = []
             project_digest = None
             project_file = "map.qgs"
-            if arguments.project_dir:
-                project_root = Path(arguments.project_dir).expanduser()
+            project_fidelity = "unverified"
+            if project_directory:
+                project_root = Path(project_directory).expanduser()
                 project_root = (
                     project_root if project_root.is_absolute() else workspace / project_root
                 ).resolve()
                 manifest = resolve(str(project_root / "project.json"))
                 recorded_project = json.loads(manifest.read_text(encoding="utf-8"))
+                project_fidelity = (recorded_project.get("project_fidelity", "unverified")
+                                    if isinstance(recorded_project, dict) else "unverified")
                 if isinstance(recorded_project, dict) and recorded_project.get("backend") == "qgis":
                     project = _QgisDeliveryProject.model_validate(recorded_project)
                     project_file = project.project_file
@@ -344,6 +399,10 @@ class GeoDeliverTool(BaseTool):
                 "primary_map": delivered_primary,
                 "primary_map_sha256": digest,
                 "project_preview_sha256": project_digest,
+                "project_fidelity": project_fidelity,
+                "selection": selection,
+                "project_note": ("Reference QGIS layout differs from the main image."
+                                 if project_fidelity == "reference" else ""),
                 "quality_status": "passed" if verified else "draft",
                 "snapshot_status": "changed" if snapshot_changed else "passed",
                 "map_id": receipt.get("map_id"),

@@ -44,6 +44,9 @@ def receipt_summary(receipt: dict) -> dict:
             name: value.get("status", "unverified")
             for name, value in receipt.get("stages", {}).items()
         },
+        "delivery_candidate": receipt.get("delivery_candidate"),
+        "project_fidelity": receipt.get("stages", {}).get("packaged", {}).get(
+            "project_fidelity", "unverified"),
     }
 
 

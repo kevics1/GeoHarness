@@ -298,6 +298,10 @@ map_review 可单独配置 model、base_url、api_key；留空时复用主配置
 
 geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付时核对主图、工程 preview 与记录的 SHA256；不同地图或已替换的预览会拒绝交付。交付 quality_status=passed 除了同图数据、布局和实际视觉检查通过，还要求包含的工程与已登记快照一致，复制期间没有变化；其余为 draft。工具同时返回 map_id、map_receipt、review_status 和 receipt_path，工程生成本身不代表质量验收。
 
+默认 `version_policy="prefer_checked"`：选中的已登记版本有布局/数据/视觉问题或检查已失效时，交付工具查找同一 map_id 下图片、报告、工程均未变化的布局通过版本，并一起选取它对应的工程。优先选择数据、布局、视觉均通过的版本，其次是最近的布局通过草稿；不因文件名或版本较新而覆盖较好的候选。也可只传 map_id 自动选择。没有候选会返回具体错误；明确要保留指定问题图时用 `version_policy="selected"`，仍如实标为 draft。另存的未登记图片不会被旧 map_id 自动替换。`selection` 返回实际选择、原因和工程是否可用；换版本时不沿用旧图审查报告，附件的其他分析文件仍由调用者明确选择。状态回执的 `delivery_candidate` 只建议候选，不修改当前版本或原文件。
+
+累计时次面数据使用 `geo_analysis(action="area", source={"file_path":"实际面数据"}, group_field="实际时间字段")`。输出每个要素的 `area_m2`，以及整体/分组的 `feature_area_sum_m2`（面积之和）、`union_area_m2`（合并去重覆盖）和 `overlap_area_m2`（前两者之差，并非独立重叠区域的面积）。计量采用声明的米制投影，不按文件顺序推断时次；分组覆盖不能相加称为总体覆盖。输入已有 area_m2 字段会明确报冲突，避免覆盖原属性。将返回的 result 图层和 manifest 用于新建地图，说明栏从持久输出几何复算统计，并分别写出面积之和与去重覆盖；未重新处理原始数据，也不提升整个分析的正确性状态。
+
 在 QGIS 3.x 打开返回的 .qgs/.qgz；双击图层修改颜色、透明度、分级等，通过“项目 → 布局”打开返回的布局，修改标题、图例、地图框、比例尺后导出 PNG/PDF。默认 QGIS 路径的原图即由该工程布局导出；Python/Matplotlib 工程使用另一渲染引擎，自定义注记可能需要参照预览和原始脚本补充。
 
 分享或移动时携带整个工程目录。Python/Matplotlib 工程提供 redraw.py 时，安装 GeoHarness 后可在工程目录运行 `python redraw.py --output edited.png`，从数据副本和 JSON 重绘。此入口读取 project.json，不读取在 QGIS 中保存的样式/布局；在 QGIS 修改样式后应从 QGIS 或 geo_qgis_project 的 export 导出。保存到 GeoPackage 的数据修改可被两种方式读取。重新交付会创建新目录，保留用户之前编辑的工程。

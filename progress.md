@@ -184,3 +184,9 @@
 - 最近64个QGIS任务经manifest.run_dir与规范路径核验，仅五项诊断文件获得只读授权；父子进程冻结文件身份，不允许链接转移、目录枚举或写入，敏感文件名仍拒绝。font_file明确工作区/数据字体范围，系统字体用font_family。
 - Python执行完整48项回归通过；原始test01 QGIS request.json实际可读且打印12层，Path/List类型正确。证据C:/Users/Administrator/AppData/Local/Temp/geoharness-python-contract-check-j_1_6z0e/verification.json。
 - 额外精确文件验证已加入，单独复核五文件只读与凭证拒绝；ruff和CLI dry-run通过。阶段3只读评审工具因账户usage limit未能完成，主Agent继续进行边界检查并将在最终回归验证；没有把未运行评审称作通过。
+
+### 四项改进阶段4
+- 交付候选重新核对图像、报告和工程摘要，优先全质量通过，否则最近未变化的布局通过草稿。已登记选中图有问题/失效时选候选及对应工程，明确selection；未登记用户编辑图不被旧map_id替换，selected可明确保留问题草稿。重新启动后使用候选对应的真实视觉报告，不沿用另一图的报告。
+- 新增area分组统计，分别持久化面积之和、union覆盖和二者之差；说明从实际输出几何和属性复算，拒绝错误union、分组统计或单要素面积。日期/空组和输出保留，已有area_m2属性报冲突而不覆盖。
+- 相关整合127项通过，追加边界后145项、版本交付30项通过；ruff/diff检查通过。真实test01三期面积sum48.110519/union33.149636km²，QGIS工程重开同DPI导出PNG摘要完全一致；来源SHP摘要未变，未调用视觉审查，仍为草稿。
+- 验证证据C:/Users/Administrator/AppData/Local/Temp/geoharness-test01-area-layout-t6wer56a/verification.json；完整业务图未重绘。四项修复已完成，最终全量回归和只读审查正在执行，随后构建安装并跨目录验证。
