@@ -135,6 +135,18 @@ def test_legacy_explicit_layout_is_translated():
     assert layout.title_font_size_pt == 20
 
 
+def test_explicit_legend_font_reaches_native_layout_with_separate_footer_font():
+    from geoharness.cartography.qgis_bridge import native_layout
+
+    args = GeoCartographyInput(layout={"legend_font_size": 7},
+                              qgis_layout={"body_font_size_pt": 9})
+    assert native_layout(args).legend_font_size_pt == 7
+    assert native_layout(args).body_font_size_pt == 9
+    explicit = args.model_copy(update={"qgis_layout": args.qgis_layout.model_copy(
+        update={"legend_font_size_pt": 8})})
+    assert native_layout(explicit).legend_font_size_pt == 8
+
+
 async def test_cancelled_source_preparation_preserves_cancellation(tmp_path, monkeypatch):
     from threading import Event
 

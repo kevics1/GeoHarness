@@ -528,7 +528,7 @@ def _extent(project: Any, layers: list[Any], requested: list[float] | None) -> A
 
 
 def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
-    """Allocate fixed millimetre rectangles once; never retry page composition."""
+    """Allocate millimetre rectangles from the measured, effective layout parameters."""
     width, height = spec.get("width_mm", 297), spec.get("height_mm", 210)
     margin, gap = spec.get("margin_mm", 12), spec.get("gap_mm", 5)
     inner_width = width - 2 * margin
@@ -550,7 +550,8 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
         regions["title"] = [margin, margin, inner_width, title_height]
     sidebar_x = width - margin - sidebar_width
     if spec.get("detail_extent") is not None:
-        detail_height = map_height * 0.4 if spec.get("legend", True) else map_height
+        detail_height = (map_height * spec.get("detail_height_ratio", 0.4)
+                         if spec.get("legend", True) else map_height)
         regions["detail_map"] = [sidebar_x, top, sidebar_width, detail_height]
         top += detail_height + gap
     if spec.get("legend", True):
@@ -572,7 +573,7 @@ def _place_item(layout: Any, item: Any, name: str, rect: list[float]) -> None:
 
 def _create_layout(
     project: Any, layers: list[Any], extent: Any, payload: dict[str, Any], context: Any,
-    *, _fit_attempt: int = 0,
+    *, _fit_attempt: int = 0, _adaptations: list[dict[str, Any]] | None = None,
 ) -> Any:
     from qgis.core import (
         Qgis,
@@ -582,6 +583,7 @@ def _create_layout(
         QgsLayoutItemMap,
         QgsLayoutItemScaleBar,
         QgsLayoutSize,
+        QgsLegendRenderer,
         QgsPrintLayout,
         QgsRectangle,
     )
@@ -601,6 +603,9 @@ def _create_layout(
     layout.setCustomProperty("geoharness/template", "structured-v1")
     layout.setCustomProperty("geoharness/regions", json.dumps(regions))
     layout.setCustomProperty("geoharness/font", json.dumps(font_info))
+    layout.setCustomProperty("geoharness/effective_parameters", json.dumps(spec))
+    adaptations = list(_adaptations or [])
+    layout.setCustomProperty("geoharness/adaptations", json.dumps(adaptations))
 
     def add_map(name: str, rect: Any) -> Any:
         item = QgsLayoutItemMap(layout)
@@ -638,12 +643,14 @@ def _create_layout(
         for layer in reversed(layers):
             root.addLayer(layer)
         legend.setWrapString("\n")
+        legend_format = _text_format(font, spec.get("legend_font_size_pt")
+                                    or spec.get("body_font_size_pt", 9))
         for component in (
             Qgis.LegendComponent.Title, Qgis.LegendComponent.Group,
             Qgis.LegendComponent.Subgroup, Qgis.LegendComponent.SymbolLabel,
         ):
             style = legend.style(component)
-            style.setTextFormat(body_format)
+            style.setTextFormat(legend_format)
             legend.setStyle(component, style)
         _place_item(layout, legend, "legend", regions["legend"])
     footer = regions["footer"]
@@ -688,7 +695,33 @@ def _create_layout(
         resized = {**spec, "footer_height_mm": required_height}
         _layout_regions(resized, title)  # Fail before exporting or packaging any map.
         return _create_layout(project, layers, extent, {**payload, "layout": resized},
-                              context, _fit_attempt=_fit_attempt + 1)
+                              context, _fit_attempt=_fit_attempt + 1,
+                              _adaptations=[*adaptations, {
+                                  "parameter": "footer_height_mm", "before": footer[3],
+                                  "after": required_height, "reason": "measured footer text",
+                              }])
+    if spec.get("legend", True) and spec.get("legend_auto_fit", True):
+        minimum = QgsLegendRenderer(legend.model(), legend.legendSettings()).minimumSize()
+        available = regions["legend"]
+        resized = dict(spec)
+        if minimum.width() > available[2] + 0.05 and minimum.width() + 0.5 <= 500:
+            resized["sidebar_width_mm"] = minimum.width() + 0.5
+        if minimum.height() > available[3] + 0.05 and "detail_map" in regions:
+            height = regions["main_map"][3]
+            detail_height = height - spec.get("gap_mm", 5) - minimum.height() - 0.5
+            if detail_height >= max(20, height * 0.1):
+                resized["detail_height_ratio"] = detail_height / height
+        if resized != spec and _fit_attempt < 3:
+            try:
+                _layout_regions(resized, title)
+            except ValueError:
+                pass  # Report measured content and dimensions below; never drop entries.
+            else:
+                changes = [{"parameter": key, "before": spec.get(key), "after": value,
+                            "reason": "measured legend content"}
+                           for key, value in resized.items() if spec.get(key) != value]
+                return _create_layout(project, layers, extent, {**payload, "layout": resized},
+                    context, _fit_attempt=_fit_attempt + 1, _adaptations=[*adaptations, *changes])
     project.layoutManager().addLayout(layout)
     _validate_layout_bounds(layout)
     return layout
@@ -828,6 +861,7 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
     rectangles = {}
     user_items = {}
     problems = []
+    content_metrics = {}
     for item in layout.items():
         if not isinstance(item, QgsLayoutItem) or isinstance(item, QgsLayoutItemPage):
             continue
@@ -848,6 +882,10 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
                 problems.append(f"{name}: item exceeds its reserved rectangle")
         if isinstance(item, QgsLayoutItemLegend):
             minimum = QgsLegendRenderer(item.model(), item.legendSettings()).minimumSize()
+            content_metrics[name] = {
+                "required_mm": [minimum.width(), minimum.height()],
+                "available_mm": [item.rect().width(), item.rect().height()],
+            }
             if minimum.width() > item.rect().width() + 0.05 or (
                 minimum.height() > item.rect().height() + 0.05
             ):
@@ -861,21 +899,34 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
     problems.extend(_rectangle_problems(rectangles, page.width(), page.height()))
     return {
         "checked": True, "valid": not problems, "problems": problems,
-        "items": rectangles, "user_items": user_items,
+        "items": rectangles, "user_items": user_items, "content_metrics": content_metrics,
     }
 
 
 def _validate_layout_bounds(layout: Any) -> None:
     result = _layout_bounds(layout)
     if result["problems"]:
-        raise ValueError("Structured layout validation failed: " + "; ".join(result["problems"]))
+        error = ValueError("Structured layout validation failed: " + "; ".join(result["problems"])
+                           + "; use the measured required_mm/available_mm, effective parameters "
+                           "and loaded font evidence to adjust page/sidebar dimensions")
+        error.diagnostics = _layout_metadata(layout)
+        raise error
 
 
 def _layout_metadata(layout: Any) -> dict[str, Any]:
-    from qgis.core import QgsLayoutItemLabel, QgsLayoutItemMap, QgsLayoutItemScaleBar
+    from qgis.core import (
+        Qgis,
+        QgsLayoutItemLabel,
+        QgsLayoutItemLegend,
+        QgsLayoutItemMap,
+        QgsLayoutItemScaleBar,
+    )
 
     maps = []
     scale_bars = []
+    page = layout.pageCollection().page(0)
+    effective = ({"width_mm": page.pageSize().width(), "height_mm": page.pageSize().height()}
+                 if page else {})
     for item in layout.items():
         if isinstance(item, QgsLayoutItemMap):
             extent = item.extent()
@@ -894,7 +945,21 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                     "layers": [layer.id() for layer in item.layers()],
                 }
             )
+            main = layout.itemById("main_map")
+            if item.id() == "detail_map" and main and main.rect().height() > 0:
+                effective["detail_height_ratio"] = (
+                    item.rect().height() / main.rect().height())
+        elif isinstance(item, QgsLayoutItemLegend):
+            effective["sidebar_width_mm"] = item.rect().width()
+            effective["legend_font_size_pt"] = item.style(
+                Qgis.LegendComponent.SymbolLabel).textFormat().size()
+        elif isinstance(item, QgsLayoutItemLabel):
+            key = {"title": "title_font_size_pt", "footer_text": "body_font_size_pt"}.get(
+                item.id())
+            if key:
+                effective[key] = item.textFormat().size()
         elif isinstance(item, QgsLayoutItemScaleBar):
+            effective.setdefault("body_font_size_pt", item.textFormat().size())
             scale_bars.append({
                 "id": item.id(), "units": item.units().name,
                 "units_per_segment": item.unitsPerSegment(), "segments": item.numberOfSegments(),
@@ -906,6 +971,10 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
         "template": layout.customProperty("geoharness/template", ""),
         "regions": json.loads(layout.customProperty("geoharness/regions", "{}")),
         "font": json.loads(layout.customProperty("geoharness/font", "{}")),
+        "effective_parameters": effective,
+        "creation_parameters": json.loads(layout.customProperty(
+            "geoharness/effective_parameters", "{}")),
+        "adaptations": json.loads(layout.customProperty("geoharness/adaptations", "[]")),
         "bounds_check": _layout_bounds(layout),
         "footer_text": (layout.itemById("footer_text").text()
                         if isinstance(layout.itemById("footer_text"), QgsLayoutItemLabel) else ""),
@@ -1070,6 +1139,7 @@ def _save_package(
             files.extend(path for path in directory.rglob("*") if path.is_file())
     manifest = {
         "backend": "qgis",
+        "project_fidelity": "saved_layout",
         "project_file": project_path.name,
         "preview": "preview.png",
         "preview_sha256": digest,
@@ -1084,6 +1154,7 @@ def _save_package(
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
         "backend": "qgis",
+        "project_fidelity": "saved_layout",
         "project_dir": str(context.run_dir),
         "project_file": str(project_path),
         "project_manifest": str(manifest_path),

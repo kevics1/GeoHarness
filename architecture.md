@@ -96,6 +96,11 @@ index.json 与 `<UUID>/receipt.json`，默认目录为 `.geoharness/maps/`，配
 明确列出的包文件。QGIS PNG 与编辑工程来自同一布局；对已有 Python 图的 project
 动作只打包实际图和图层，不保证生成的 QGIS 布局重现全部自定义注记。
 
+原生包标记 `project_fidelity=saved_layout`，导出源是保存后重新打开的选定布局。
+旧图片补工程标记 `reference`，工具输出和 README 明示参考布局与原图不同源；包检查
+仅证明文件完整性。新建布局在一次工具调用内按实测图例尺寸调整侧栏/详图，保留纸张、
+字号和类别；记录有效参数、调整原因与内容必需/可用尺寸。已保存工程导出不重新排版。
+
 回执分别保存 parameters、data_checked、rendered、layout_checked、visual_checked、
 packaged、delivered 的实际报告和文件摘要。quality_status=passed 要求同图的数据合同、
 实际渲染、已测布局及实际视觉审查全为 passed；其余为 draft。质量范围限定为

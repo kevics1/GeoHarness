@@ -306,6 +306,7 @@ async def execute_qgis(
                     "status": result["status"],
                     "result": result["result"],
                     "error_summary": result["error_summary"],
+                    "diagnostics": result.get("diagnostics"),
                 },
                 ensure_ascii=False,
                 indent=2,

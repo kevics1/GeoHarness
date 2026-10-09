@@ -41,6 +41,8 @@ required 图层默认至少在主图或详图中相交1个要素，可用 expect
 
 QGIS 使用 qgis_layout 的主图、可选 detail_extent、图例与 footer_text 分区；layout 保留 dpi 和常规呈现参数。`renderer="matplotlib"` 或 cartography.static_renderer=matplotlib 可选原静态路径；HTML/SVG 和 geo_python 保留。QGIS 不可用时说明实际错误，按用户需求明确选替代入口，不静默丢弃布局要求。
 
+新建布局自动按实际图例尺寸调整侧栏/详图，不删类别、不缩字号。遇到布局失败先看 `content_metrics.required_mm/available_mm`、`effective_parameters`、`adaptations` 和已加载字体证据，调整真实生效的参数。图例字号用 `qgis_layout.legend_font_size_pt`，底栏用 `body_font_size_pt`。默认原生包 `project_fidelity=saved_layout`；旧 Python 图片补的 QGIS 工程为 `reference`，必须告知布局不同源，不能把复制预览作为工程一致的证据。
+
 ## 自动检查与修正
 
 工具显式把图片和任务/图层/参数摘要送入视觉模型，检查空白、图层可见性、图例对应、文字乱码/遮挡、范围与布局。文件落盘不代表检查通过。

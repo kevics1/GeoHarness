@@ -166,3 +166,11 @@
 - Windows同大小、恢复mtime后原stat-only缓存仍可能误命中，现追加有64MiB总读取预算的SHA256。已有工程依赖未枚举、栅格worldfile改变范围但主文件不变，故这两类请求不缓存失败；文件锁/超时仍正常重试。
 - 完整组943 passed对应边界修复前版本；最终边界修复后的180项相关回归和ruff/diff检查通过，独立只读评审无未解决问题。最后版本全量回归正在执行，不将前一轮结果作为最终完整验证。
 - 最终版本全量956 passed（553.86秒）；189条警告为依赖弃用及缺CRS测试夹具提示。安装版69个模块及6份技能与当前源码一致，实际双MCP启动和模型回复成功，QGIS3.44.7/440算法可用；真实派生预检及10层工程读回成功，未创建.openharness。
+
+# 2026-10-09：test01 最新错误与工程布局差异诊断
+
+- 最新session-bfde4744da4a：55次调用、13条错误，8真实执行失败/5参数拒绝。集中geo_python5/18、geo_cartography4/6、geo_qgis_project3/3、geo_analysis1/5；原生分析实际4/4成功。四次残缺参数均finish_reason=length，当前空回复恢复未覆盖非空残缺调用。
+- 三次原生QGIS真正异常为图例超预留框，并非FT_New_Face警告；模型调整generic legend_font_size未影响显式qgis_layout内固定9pt。独立原生预检测得需63.50×87.10mm，预留58×82.6；仅字号7仍高不足，仅A3仍宽不足，A3+侧栏78通过。字体MicrosoftYaHei加载有效。
+- PNG由自定义Python绘制，project action走旧基础QGS生成器，忽略完整qgis_layout；工程只有一个地图框和13个OGR层，缺详图、两栅格及底栏。preview复制PNG所以摘要相同，package只核验完整性，不能证明布局等价。真实QGIS重开导出已复现，原图/工程/preview摘要不变。
+- v2硬布局通过，v3增加长名单后退化，预算拒绝v4但最终交付v3。时次面积相加48.1105km²与去重覆盖33.1496km²不同，Python手写说明未受原生事实绑定。
+- 诊断报告已保存，未实施产品改动。手工探针先因缺analysis窄读取根、随后缺discover_qgis的cwd参数失败，修正探针后完成复验，不将探针错误算作用户工具失败。

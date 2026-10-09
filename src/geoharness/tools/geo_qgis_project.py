@@ -165,6 +165,12 @@ class QgisProjectLayout(BaseModel):
     font_file: str = ""
     title_font_size_pt: float = Field(default=18, ge=8, le=40)
     body_font_size_pt: float = Field(default=9, ge=5, le=20)
+    legend_font_size_pt: float | None = Field(default=None, ge=5, le=20)
+    legend_auto_fit: bool = Field(default=True, description=(
+        "Measure native legend content and expand the sidebar or shorten the detail map "
+        "within the requested page; never remove entries or shrink text."
+    ))
+    detail_height_ratio: float = Field(default=0.4, ge=0.1, le=0.8)
     sidebar_width_mm: float = Field(default=60, ge=20, le=500)
     gap_mm: float = Field(default=5, ge=1, le=30)
     title_height_mm: float = Field(default=16, ge=8, le=60)
@@ -256,7 +262,10 @@ class GeoQgisProjectTool(BaseTool):
         "Use layer.derivation for verified subsets/fields/annotations of native output files. "
         "Native analysis manifests are shared with geo_cartography and may be inferred; "
         "previous map facts are never inherited. Datetime categories normalize automatically. "
-        "preflight with layout measures actual fonts/footer/legend without exporting. "
+        "preflight measures actual fonts/footer/legend without exporting. Legend auto-fit "
+        "widens the sidebar or shortens the detail map within the requested page. "
+        "Use effective_parameters, adaptations and content_metrics for layout diagnosis. "
+        "legend_font_size_pt controls the legend; body_font_size_pt controls footer text. "
         "duplicate_error_blocked requires changing the diagnosed arguments or input data. "
         "Network/database layers are unsupported. Outputs are drafts until geo_map_review "
         "checks actual pixels. Keep the same map_id and use geo_deliver for final delivery."
@@ -338,8 +347,11 @@ class GeoQgisProjectTool(BaseTool):
                                       is_error=True, metadata={"render_executed": False})
                 if result.get("status") != "succeeded":
                     return ToolResult(output="Error: QGIS layout preflight failed: "
-                                      + (result.get("error_summary") or "unknown layout error"),
+                                      + (result.get("error_summary") or "unknown layout error")
+                                      + "\n" + json.dumps(result.get("diagnostics"),
+                                                            ensure_ascii=False),
                                       is_error=True, metadata={"render_executed": False,
+                                      "diagnostics": result.get("diagnostics"),
                                       "deterministic_error": (result.get("error_summary") or "")
                                       .startswith("ValueError:")})
                 preflight["layout"] = result["result"]["layout"]

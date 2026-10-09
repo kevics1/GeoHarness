@@ -413,6 +413,10 @@ def _package(
         "manifest_path": str(manifest_path),
         "image_sha256": digest,
         "files": files,
+        "project_fidelity": manifest.get("project_fidelity", "unverified"),
+        "fidelity_note": ("QGIS reference layout differs from the supplied image; "
+                          "package check verifies file integrity only."
+                          if manifest.get("project_fidelity") == "reference" else ""),
     }, manifest
 
 

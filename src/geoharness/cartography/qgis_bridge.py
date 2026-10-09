@@ -129,14 +129,20 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
 
 def native_layout(args: Any) -> QgisProjectLayout:
     if args.qgis_layout is not None:
-        return args.qgis_layout
+        native = args.qgis_layout
+        if ("legend_font_size" in args.layout.model_fields_set
+                and "legend_font_size_pt" not in native.model_fields_set):
+            native = QgisProjectLayout.model_validate({
+                **native.model_dump(), "legend_font_size_pt": args.layout.legend_font_size,
+            })
+        return native
     layout = args.layout
     updates = {}
     mappings = {
         "width": "width_mm",
         "height": "height_mm",
         "title_font_size": "title_font_size_pt",
-        "legend_font_size": "body_font_size_pt",
+        "legend_font_size": "legend_font_size_pt",
     }
     for old, new in mappings.items():
         if old in layout.model_fields_set:

@@ -82,6 +82,7 @@ def main() -> int:
             "status": "error",
             "result": None,
             "error_summary": f"{type(exc).__name__}: {exc}",
+            "diagnostics": getattr(exc, "diagnostics", None),
         }
     finally:
         if app is not None:

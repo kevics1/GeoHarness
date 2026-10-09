@@ -160,3 +160,15 @@
 - 全局D:/Python312已安装最终wheel；69个Python模块和6份技能逐项字节一致，PATH解析geoh为D:/Python312/Scripts/geoh.exe。用户目录version/dry-run正常，test目录实际run --print双MCP连接、主模型max正常回复并exit0，未创建.openharness。
 - 安装版QGIS doctor成功（3.44.7、440算法）；真实23→3派生图层预检通过，统计保持23且源摘要不变。安装版读回新增回归QGIS工程：10层有效、EPSG32647有效、布局bounds有效，工程与预览摘要不变。真实视觉未调用，回归地图仍为draft。
 - 最后版本全量956 passed（553.86秒），ruff/diff与独立评审通过；四阶段修复、文档、安装和跨目录验证均完成。回归产物在test/exports/20261009-fire-regression；已运行会话需退出重启以加载新安装。原有.env.example修改仍独立保留。
+
+# 2026-10-09：test01 工具错误与 PNG/QGS 差异（仅诊断）
+
+- 核对最新18:47会话与交付，独立只读子任务统计55调用/13错误；主Agent直接用QGIS读回并重导出原QGS，确认跨渲染引擎后补工程造成差异，原文件摘要不变。
+- 独立native图例探针复现真实尺寸不足，MicrosoftYaHei有效；A3+78mm侧栏同数据预检通过。未因字体警告扩大权限或修改原生代码。
+- 完成报告diagnostics/2026-10-09-test01-errors-and-layout.md，提出原生版式/工程同源、残缺参数恢复、窄诊断入口、候选版本选择与统计口径四组改进。仅更新诊断/规划文档，没有产品修复或安装变更。
+
+### 四项改进阶段1
+- 原生 QGIS 测量图例必需尺寸，有限地加宽侧栏/缩短详图，保留纸张、字号与全部类别；失败返回内容尺寸/有效参数/字体证据。已保存工程导出不自动排版。
+- 图例字号独立于底栏，常规字号能够进入原生布局；原生包 saved_layout，旧图片补工程 reference，工具/README/清单明确不同源。
+- test01 原始12图层冻结请求以修复代码执行预检/新建/重新导出成功：侧栏58→63.998mm、详图比例0.4→0.3657；重导PNG摘要一致。证据：C:/Users/Administrator/AppData/Local/Temp/geoharness-test01-fixed-layout-t4oxuwdn/verification.json。原数据和旧交付未改。
+- 相关原有55项通过，新增多图层适配回归通过；ruff/CLI dry-run通过。初始测试12个带重复分组的分类图层确实超过A4可用高度，不能作为应当适配成功的输入；缩小到可容纳的10层案例并保留关闭auto-fit的失败诊断检验。

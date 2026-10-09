@@ -70,6 +70,7 @@ class MapProject(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1] = 1
+    project_fidelity: Literal["reference"] = "reference"
     renderer: Literal["single", "layers"]
     preview: str
     preview_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -747,7 +748,12 @@ args = parser.parse_args()
 print(redraw_map_project(Path(__file__).with_name("project.json"), output_path=args.output))
 '''
 
-_README = """# 可编辑地图工程
+_README = """# QGIS 参考工程
+
+此工程的 QGIS 布局是根据图层重新建立的参考布局，和原始图片不同源。
+`preview` 是原始图片的副本，不是从 `map.qgs` 导出的图。
+需要图片和可编辑工程一致时，请用 GeoHarness 的 QGIS 原生制图路径，
+从保存并重新打开的同一布局导出 PNG/PDF。
 
 用 QGIS 3.x 打开 `map.qgs`。图层面板可修改图层顺序；双击图层可调整符号、颜色、
 分级和透明度。数据副本在 `data/` 中，矢量为 GeoPackage，栅格为自包含 GeoTIFF。
@@ -931,6 +937,7 @@ def export_map_project(
         "redraw_script": str(destination / "redraw.py"),
         "project_readme": str(destination / "README.md"),
         "preview_sha256": preview_sha256,
+        "project_fidelity": "reference",
         "publication": publication,
     }
 

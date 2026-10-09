@@ -50,6 +50,10 @@ async def test_project_input_and_output_directory_are_independent(tmp_path):
     assert Path(result.metadata["qgis_project"]).is_file()
     assert result.metadata["output_path"] == str(preview)
     assert hashlib.sha256(preview.read_bytes()).hexdigest() == before
+    assert result.metadata["project_fidelity"] == "reference"
+    assert "Reference QGIS project" in result.output
+    manifest = json.loads(Path(result.metadata["project_file"]).read_text(encoding="utf-8"))
+    assert manifest["project_fidelity"] == "reference"
 
     rejected = await GeoCartographyTool().execute(
         GeoCartographyInput(

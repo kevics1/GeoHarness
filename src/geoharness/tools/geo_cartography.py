@@ -1296,7 +1296,9 @@ class GeoCartographyTool(BaseTool):
             )
         return ToolResult(
             output=(
-                f"{result.output}\nEditable QGIS project: {project['qgis_project']}"
+                f"{result.output}\nReference QGIS project: {project['qgis_project']}"
+                "\nIts basic layout differs from the retained image; preview is a copied image. "
+                "Use native QGIS create/export for a project and image from the same saved layout."
                 f"\nPortable project folder: {project['project_dir']}"
             ),
             metadata={

@@ -163,6 +163,40 @@ def _sources(tmp_path):
     ]
 
 
+async def test_many_layers_fit_legend_before_render_and_report_effective_dimensions(
+    tmp_path, native_settings,
+):
+    sources = _sources(tmp_path)
+    layers = [{**sources[1], "name": f"专题图层{index}及说明",
+               **({"style": {"renderer": "single", "color": "#2166ac"}}
+                  if index >= 3 else {})} for index in range(10)]
+    spec = QgisProjectLayout(sidebar_width_mm=45,
+        detail_extent={"xmin": 0, "ymin": 0, "xmax": 2000, "ymax": 2000})
+    payload = {"layers": layers, "title": "图例适配", "crs": "EPSG:3857",
+               "map_extent": [-300, -300, 6100, 3900],
+               "layout": spec.model_dump()}
+    result = await execute_qgis("project_preflight", payload, cwd=tmp_path,
+        settings=native_settings, read_roots=[tmp_path])
+    assert result["status"] == "succeeded", result.get("error_summary")
+    layout = result["result"]["layout"]
+    assert layout["bounds_check"]["valid"] is True
+    assert layout["adaptations"]
+    legend = layout["bounds_check"]["content_metrics"]["legend"]
+    assert all(a >= r for a, r in zip(legend["available_mm"], legend["required_mm"]))
+    assert layout["effective_parameters"]["body_font_size_pt"] == 9
+    assert layout["regions"]["detail_map"][3] >= 20
+    assert layout["effective_parameters"]["width_mm"] == 297
+    assert not list(Path(result["run_dir"]).glob("*.png"))
+
+    payload["layout"]["legend_auto_fit"] = False
+    rejected = await execute_qgis("project_preflight", payload, cwd=tmp_path,
+        settings=native_settings, read_roots=[tmp_path])
+    assert rejected["status"] == "failed"
+    diagnosis = rejected["diagnostics"]
+    assert diagnosis["bounds_check"]["content_metrics"]["legend"]["required_mm"]
+    assert diagnosis["effective_parameters"]["body_font_size_pt"] == 9
+
+
 async def test_native_template_create_png_reopen_and_export_preserve_layout(
     tmp_path: Path, native_settings
 ):
@@ -214,6 +248,8 @@ async def test_native_template_create_png_reopen_and_export_preserve_layout(
     assert exported["status"] == "succeeded", exported.get("error_summary")
     assert exported["result"]["layout"]["map_extents"] == layout["map_extents"]
     assert exported["result"]["image_sha256"] == result["image_sha256"]
+    assert result["project_fidelity"] == "saved_layout"
+    assert exported["result"]["project_fidelity"] == "saved_layout"
 
     # Native user editing may add labels or north arrows inside the map frame.
     # Those intentional overlays must survive export without template collisions.

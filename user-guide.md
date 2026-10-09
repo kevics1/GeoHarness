@@ -324,6 +324,10 @@ geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付�
 
 提供 `qgis_layout`/`layout` 的预检会在独立 QGIS 进程中测量真实字体、比例尺、图例与面板，不导出地图或工程、不占成图次数。仅检查数据且未提供布局时，预检保持无 QGIS 依赖。新建底栏根据实际可用宽度换行，按文字和比例尺高度扩展；页面放不下时，明确要求缩短备注或扩大页面。已保存工程的导出保留用户布局，不自动改写文字。
 
+新建布局默认启用 `legend_auto_fit`：根据 QGIS 实测图例尺寸加宽侧栏或缩短详图，详图至少保留20mm；不缩字号、不删类别、不自动改变纸张。仍放不下时返回 `content_metrics` 的必需/可用尺寸与实际字体证据。`effective_parameters`、`adaptations` 记录最终参数及调整原因。`legend_font_size_pt` 单独控制图例，`body_font_size_pt` 控制底栏；同时传常规 `layout.legend_font_size` 时，只有明确的 `qgis_layout.legend_font_size_pt` 优先于它。
+
+QGIS 原生新建/导出标记 `project_fidelity=saved_layout`，PNG、PDF 和预览从保存后重新打开的同一布局导出。给现有 Python/Matplotlib 图片补工程的 `action=project` 保留兼容，标记 `project_fidelity=reference`：QGIS 布局是参考布局，包内预览是原图副本，不能据此认定两者一致。需要同源交付请使用默认 QGIS 制图，再检查实际预览。
+
 同一请求内，相同参数和未变化的本地输入触发同一确定性检查错误时，工具返回已有诊断并标记 `duplicate_error_blocked`，不重复执行该检查或重绘。文件内容摘要和状态共同判断输入是否变化，保留时间戳的同大小修改也会使缓存失效。修改参数、数据、关联分析输出或读取配置后可以重新执行。文件锁、超时等暂时故障不会按确定性错误缓存；没有稳定本地身份的目录别名、含外部依赖的栅格/VRT、已有工程的 inspect/export 和超过64MiB总读取上限的输入保留正常执行。该机制帮助避免无效循环，不能保证模型每次都给出正确参数。
 
 `geo_cartography(action="preflight", ...)` 与 `geo_qgis_project(action="preflight", ...)` 可先检查实际数据，不绘图、不生成工程，也不消耗成图或视觉审查预算。正常新建地图会在预留预算前自动先执行同样的检查。检查 CRS、有效/有限几何、符号与标签字段、分类/分级、数值类型、指定要素总数，并返回主图/详图中的几何相交数量。相交计数不证明符号没有被遮挡；栅格只核验范围相交，不据此宣称像素值或语义正确。
