@@ -133,3 +133,5 @@
 - VRT兼容与交付状态专项31项通过；本地VRT依赖先校验并物化GTiff，保持原支持。首轮全量914通过，1条旧视觉单独通过断言已按新数据/布局/视觉合同更新；最终全量正在执行。
 - 实际西昌业务案例完成八层QGIS成图、真实视觉服务和工程交付：服务约8秒返回issues，正确保留draft，不以像素替代审查；原数据及既有分析文件SHA保持不变。新增验证产物在独立visualizations工作区，不覆盖用户旧地图。
 - 两份授权项目技能与使用/架构文档已更新；wheel包含六份技能且源码核对一致。全局D:/Python312已安装当前修复版，跨目录验证尚在执行；主模型、凭证、全局配置及用户.env.example保持不变。
+- 最终全量918 passed（598.27秒）；ruff和diff检查通过。安装版66个Python源码模块及六份技能逐项与工作区字节匹配；用户test目录geoh version/dry-run/真实run --print正常回复并exit0，没有创建.openharness。安装版QGIS doctor succeeded，持久回执重读保留data/layout/packaged/delivered passed、visual issues、quality draft。
+- 四项实施及文档、独立审查、全局安装全部完成。现存外部限制：用户原postgres MCP配置引用的postgres_mcp_server未安装，真实启动仍提示连接失败；未修改该配置或安装未知依赖。空间分析/制图验证不依赖此服务。
