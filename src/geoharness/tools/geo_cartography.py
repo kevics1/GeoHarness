@@ -906,6 +906,10 @@ class GeoCartographyTool(BaseTool):
                 geojson_text=spec.get("geojson", ""),
                 catalog=context.metadata.get("data_catalog"),
             )
+            if spec.get("derivation") is not None:
+                from geoharness.cartography.derivation import derive_frame
+
+                gdf = derive_frame(gdf, spec["derivation"])
             options = (
                 _layer_style_options(spec)
                 if args.layers
@@ -962,6 +966,7 @@ class GeoCartographyTool(BaseTool):
                         "file_path": spec.get("file_path") or spec.get("source_name", ""),
                         "gdf": frame["gdf"],
                         "label": spec.get("label", ""),
+                        "derivation": spec.get("derivation"),
                     }
                     for spec, frame in zip(specs, frames)
                 ],

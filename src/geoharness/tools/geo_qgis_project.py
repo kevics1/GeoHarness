@@ -12,6 +12,7 @@ from typing import Any, Literal
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from geoharness.cartography.derivation import MapDerivation, derive_frame
 from geoharness.cartography.snapshot import FrozenQgisInputs, freeze_qgis_inputs
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_map_render
 from geoharness.tools.geo_qgis import qgis_read_roots
@@ -112,11 +113,16 @@ class QgisProjectLayer(BaseModel):
     required: bool = True
     expected_feature_count: int | None = Field(default=None, ge=0)
     minimum_visible_features: int = Field(default=1, ge=0)
+    derivation: MapDerivation | None = Field(
+        default=None,
+        description="Verified map subset/field selection/new annotations of file_path.",
+    )
 
     @model_validator(mode="after")
     def validate_kind(self) -> QgisProjectLayer:
         if self.kind == "raster" and (
             self.style is not None or self.label_field or self.label_style or self.layer_name
+            or self.derivation is not None
         ):
             raise ValueError("vector style/labels/layer_name do not apply to raster sources")
         if self.kind == "vector" and self.raster_style is not None:
@@ -455,6 +461,8 @@ class GeoQgisProjectTool(BaseTool):
                     selector, selected = options.split("=", 1)
                     name = int(selected) if selector == "layerid" else selected
                 gdf = gpd.read_file(path, **({"layer": name} if name else {}))
+                if layer.derivation is not None and snapshot is None:
+                    gdf = derive_frame(gdf, layer.derivation)
                 if snapshot:
                     from geoharness.cartography.values import TEMPORAL_FIELDS
 
@@ -467,7 +475,9 @@ class GeoQgisProjectTool(BaseTool):
                     str(path)
                 )
                 mapped_sources.append({"file_path": original_path, "gdf": gdf,
-                                       "label": common["label"]})
+                                       "label": common["label"],
+                                       "derivation": layer.derivation.model_dump()
+                                       if layer.derivation is not None else None})
         settings = config.cartography
         report = validate_frames(
             frames, map_crs=arguments.crs, map_extent=arguments.map_extent,

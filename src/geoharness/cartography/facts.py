@@ -290,6 +290,10 @@ def _mapped_outputs(
             continue
         path = reader.path(value)
         exact = [label for label, output in outputs.items() if path == output["path"]]
+        if source.get("derivation") is not None and not exact:
+            # A declaration is a view of this verified source, never a claim that
+            # unrelated hand-written data are an analytical result.
+            continue
         # The renderer may already hold a cached frame. Disk evidence alone
         # cannot prove that those cached features are the manifest output.
         cached = source.get("gdf")
@@ -303,21 +307,45 @@ def _mapped_outputs(
             for label in candidates:
                 output = outputs[label]
                 features = output["features"]
+                derivation = source.get("derivation")
+                if derivation is not None:
+                    from geoharness.cartography.derivation import MapDerivation, derive_frame
+
+                    spec = MapDerivation.model_validate(derivation)
+                    indices = (spec.feature_indices if spec.feature_indices is not None
+                               else list(range(len(features))))
+                    selected_features = [features[i] for i in indices if i < len(features)]
+                    verified = derive_frame(gpd.read_file(io.BytesIO(output["bytes"])), spec)
+                else:
+                    selected_features = features
                 generated_ids = (
-                    [f["id"] for f in features]
-                    if features and all("id" in f and "id" not in f["properties"]
-                                        for f in features) else None
+                    [f["id"] for f in selected_features]
+                    if selected_features and all("id" in f and "id" not in f["properties"]
+                                                 for f in selected_features) else None
                 )
-                if "driver_content" not in output:
+                if derivation is not None:
+                    expected_content = frame_content(verified, generated_ids=generated_ids)
+                elif "driver_content" not in output:
                     verified = gpd.read_file(io.BytesIO(output["bytes"]))
                     output["driver_content"] = frame_content(verified, generated_ids=generated_ids)
-                if frame_content(cached, generated_ids=generated_ids) == output["driver_content"]:
+                if derivation is None:
+                    expected_content = output["driver_content"]
+                if frame_content(cached, generated_ids=generated_ids) == expected_content:
                     matching.append(label)
             if not matching:
                 if exact:
                     raise ValueError("Mapped data changed after it was loaded; rerun preflight.")
                 continue
         if exact:
+            if source.get("derivation") is not None:
+                if cached is None:
+                    raise ValueError("Derived map evidence requires actual cached features")
+                matches.extend({
+                    "output": label, "layer_index": index, "match": "derivation",
+                    "source_feature_count": len(outputs[label]["features"]),
+                    "mapped_feature_count": len(cached), "derivation": spec.model_dump(),
+                } for label in exact)
+                continue
             matches.extend(
                 {"output": label, "layer_index": index, "match": "path"} for label in exact
             )
@@ -353,6 +381,10 @@ def _footer(analyses: list[dict]) -> str:
             label = "缓冲距离" if action == "buffer" else "距离阈值 ≤"
             line += f"；{label} {analysis['parameters']['distance_m']:g} m"
         line += f"；计量CRS {analysis['metric_crs']}；显示CRS {analysis['display_crs']}"
+        for match in analysis["mapped_outputs"]:
+            if match["match"] == "derivation":
+                line += (f"；制图子集 {match['mapped_feature_count']}/"
+                         f"{match['source_feature_count']}（统计仍为完整分析输出）")
         if action == "count" or "zones" in analysis["output_fingerprints"]:
             line += "；按相交（含边界）逐分区计数，可重复计入，不可相加为全局去重总数"
         if analysis["verification"] == "legacy_count_verified":

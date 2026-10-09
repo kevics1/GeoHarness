@@ -94,6 +94,10 @@ def freeze_qgis_inputs(
             frame = gpd.read_file(path, **({"layer": selected} if selected != "" else {}))
             frame = normalize_frame(frame)
             snapshot.original_sources[-1]["temporal_fields"] = frame.attrs[TEMPORAL_FIELDS]
+            if spec.get("derivation") is not None:
+                from geoharness.cartography.derivation import derive_frame
+
+                frame = derive_frame(frame, spec["derivation"])
             target = snapshot.directory / f"layer_{index}.gpkg"
             layer_name = f"layer_{index}"
             # GPKG's default fid/geom names must not consume existing business fields.
