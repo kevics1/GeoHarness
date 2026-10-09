@@ -58,8 +58,8 @@ async def test_native_map_has_editable_project_and_default_workspace_output(tmp_
     assert not delivered.is_error, delivered.output
     folder = Path(delivered.metadata["delivery_dir"])
     assert folder.parent == tmp_path / "exports"
-    assert (folder / "project" / "map.qgs").is_file()
-    assert (folder / "project" / "data" / "layer_1.gpkg").is_file()
+    assert Path(delivered.metadata["qgis_project"]).is_file()
+    assert list((folder / "project" / "data").glob("*.gpkg"))
     # The original and any user edits to a delivered project are preserved.
     edited = folder / "project" / "README.md"
     edited.write_text("User modified this", encoding="utf-8")
@@ -195,7 +195,7 @@ async def test_project_snapshot_rejects_changed_preview(tmp_path):
     (None, "draft"),
     ({"status": "unverified", "summary": "Unavailable"}, "draft"),
     ({"status": "issues", "summary": "Legend clipped"}, "draft"),
-    ({"status": "passed", "summary": "Clear", "issues": []}, "passed"),
+    ({"status": "passed", "summary": "Clear", "issues": []}, "draft"),
     ({"status": "passed", "summary": "Repair needed", "layout_patch": {
         "legend_outside": True,
     }}, "draft"),
@@ -226,7 +226,7 @@ async def test_review_report_without_matching_hash_cannot_mark_delivery_passed(t
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
     report = tmp_path / "map-review.json"
     for report_hash, expected in [("", "draft"), ("0" * 64, "draft"), (
-        hashlib.sha256(image.read_bytes()).hexdigest(), "passed",
+        hashlib.sha256(image.read_bytes()).hexdigest(), "draft",
     )]:
         report.write_text(json.dumps({
             "status": "passed", "summary": "Clear", "issues": [],
@@ -280,6 +280,7 @@ async def test_native_multilayer_tool_passes_risk_field_to_renderer_and_project(
     })
     result = await GeoCartographyTool().execute(GeoCartographyInput(
         action="export", output_format="png", output_path="risk.png",
+        renderer="matplotlib",
         layers=json.dumps([{"geojson": points.to_json(), "field_name": "RiskTier"}]),
     ), context)
     assert not result.is_error, result.output
@@ -327,7 +328,13 @@ async def test_failed_native_render_refunds_only_its_reservation(tmp_path, monke
 @pytest.mark.asyncio
 async def test_render_budget_denial_does_not_refund_prior_successes(tmp_path, monkeypatch):
     tool = GeoCartographyTool()
-    monkeypatch.setattr(tool, "_run_off_loop", lambda *args, **kwargs: pytest.fail("No new render"))
+    original = tool._run_off_loop
+
+    async def preflight_only(work, *, what):
+        assert what == "map preflight"
+        return await original(work, what=what)
+
+    monkeypatch.setattr(tool, "_run_off_loop", preflight_only)
     context = ToolExecutionContext(cwd=tmp_path, metadata={
         "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=0)),
         "map_workflow_state": {"maps": {"risk": {"renders": 1, "reviews": 0}}},
@@ -357,6 +364,8 @@ async def test_failed_repair_releases_its_budget_and_preserves_actual_layout(
 
     async def render(*args, **kwargs):
         nonlocal calls
+        if kwargs.get("what") == "map preflight":
+            return await asyncio.to_thread(args[0])
         calls += 1
         if calls == 1:
             return ToolResult(output="Existing rendered map", metadata={"output_path": str(image)})
@@ -383,6 +392,7 @@ async def test_failed_repair_releases_its_budget_and_preserves_actual_layout(
     points = gpd.GeoDataFrame(geometry=[Point(0, 0)], crs=3857)
     args = GeoCartographyInput(
         geojson=points.to_json(), map_id="risk", output_format="png", output_path=str(image),
+        renderer="matplotlib",
     )
     if cancelled:
         with pytest.raises(asyncio.CancelledError):

@@ -136,7 +136,7 @@ qgis:
 进程的内存图层。取消或超时会结束任务及其 native 子进程。运行器使用独立临时配置，
 不继承 API 凭证或个人 QGIS 插件设置；文件保护用于可信本地算法，不是 OS 安全沙箱。
 
-`geo_qgis_project` 提供 create、inspect、export。create 的 layers 是结构化数组，
+`geo_qgis_project` 提供 create、inspect、export、preflight。create 的 layers 是结构化数组，
 按从底到顶排列；矢量可指定分类字段、类别颜色和 label_field，栅格保留实际数据。
 
 ```json
@@ -145,8 +145,8 @@ qgis:
 
 创建真实 QGIS 工程及基础打印布局，并从该布局导出 preview.png；output_format=pdf
 时同时导出 PDF。数据副本采用 GPKG/TIFF，工程使用相对引用，project.json 记录
-文件、样式、布局及预览摘要。基础布局包含标题、地图、可选图例和比例尺；放大图、
-复杂注记和质量决策升级属于后续完善范围，不宣称已有完整复杂布局自动生成能力。
+文件、样式、布局及预览摘要。结构化布局包含标题、主图、可选详图、图例、比例尺和
+说明栏；详图使用 layout.detail_extent。复杂注记和任意自定义布局仍需按实际能力处理。
 
 打开返回的 project_file，修改样式或打印布局并保存。然后用 inspect 查看工程，或用
 export(project_path=...,layout_name=...) 导出选定的已保存布局；多个布局时需要指定名称。
@@ -156,7 +156,7 @@ export 读取真实保存的图层和布局，生成新数据快照、工程和�
 创建/导出只表示执行完成，视觉状态仍为 unverified。使用返回的 preview_path 进行
 geo_map_review，保留相同 map_id；用 project_dir 和 primary_map=preview_path 调用
 geo_deliver。PDF 可列入 files，主图摘要对应实际 PNG 预览。所有检查和交付仍使用
-既有预算与 draft/passed 规则，本轮没有重构质量判定或自动修改回退。
+共享预算；最终 draft/passed 由下面的地图任务回执和实际检查证据决定。
 
 详细的执行隔离与数据流见 [architecture.md](architecture.md)。
 
@@ -174,7 +174,13 @@ impact 的影响条件是相交或最短距离不超过阈值。分区按 inters
 
 原生分析每次独立保存 GeoJSON、CSV、统计和 manifest，记录来源、参数、计量/导出 CRS 和计数口径；默认目录为工作区内 `.geoharness/analysis/`。未知 CRS 和无效几何会报错，不静默按 WGS84 处理。
 
+在 `geo_cartography` 或 `geo_qgis_project` 的新建请求中传入 `analysis_manifests`（最多8个实际 geo_analysis 清单路径），系统会读取对应输出，核对 SHA256、要素计数、impact 的距离阈值/affected 标记及影响选集，并要求至少一份输出确实用于当前地图图层。新清单的输出摘要必须一致；旧清单没有原始 SHA256 时只核对现存输出计数，并明确缩小验证范围。任意 Python/QGIS 清单或自由文字不属于此接口支持的统计证据。
+
+QGIS 说明栏中的方法、数量、阈值和计量 CRS 来自上述核对结果，显示 CRS 单独取当前地图设置。`footer_text` 的自由文字作为备注保留，不能冒充已核对统计。这里验证的是持久输出的一致性，没有重新计算原始空间运算；`analysis_correctness` 仍为 `unverified`。复杂分析仍须另外核验方法、输入与结果。
+
 Python 每次保留 analysis.py、stdout.txt、stderr.txt、manifest.json 和产物清单，默认在 `.geoharness/runs/`。SOURCE_CWD、DATA_DIRS、RUN_DIR 是脚本全局变量，也提供同名环境变量；环境中的 DATA_DIRS 按 os.pathsep 分隔。当前目录为 RUN_DIR，输出只写 RUN_DIR 或相对文件名。配置的分析、制图和既有运行产物目录可只读访问，仍拒绝凭证文件和源文件写入；超时终止并等待子进程。
+
+一次被识别为制图的 Python 脚本可能生成多张图片；系统按最后写出的图片登记一个 primary_map 候选和一个版本，map_candidates 列出全部图片候选。这些附件不是连续修订版；需要审查另一张图时明确选择它。geo_map_review 再次审查已登记旧图会更新该版本的检查，不增加新的成图版本。
 
 工具结果包含 status（succeeded/failed/timed_out）、exit_code、error_summary 和日志路径。界面中的 `✗` 表示该次调用确实报错；只有 stderr 警告而退出码为0时仍算成功。`geo_python {}` 是没有收到完整 code 参数，脚本未执行；可能与服务返回不完整/无效工具参数有关。缩短脚本或改用原生工具，并查看实际错误。主 Agent 的输出预算通过 agent.max_tokens 配置，示例为16384，减少长推理和长脚本竞争同一预算的情况。
 
@@ -184,11 +190,39 @@ Python 每次保留 analysis.py、stdout.txt、stderr.txt、manifest.json 和产
 
 分析和工程发布遇到 Windows 临时访问/共享冲突时，仅重试最后的目录重命名，不重复计算。publication.max_attempts（默认4）与 retry_delay_seconds（默认0.1）控制有限重试；仍失败时保留暂存结果及恢复路径，不自动关闭占用进程或修改权限。
 
+## 地图任务与质量回执
+
+系统为地图维护持久 UUID，工具返回的 `map_id`/`job_id` 是该身份；模型提供的名称仅作为别名。后续修改、换文件名、审图、打包和交付应沿用返回的 map_id。用户输入“继续”或“接着做”（也支持 continue/resume）时关联当前任务，当前会话没有活动任务时关联工作区最近的持久任务。每次真实用户输入都会开启新预算，包括“继续”；内部恢复、空回复重试和自动续跑沿用原预算。
+
+回执默认保存在工作区 `.geoharness/maps/<UUID>/receipt.json`，索引为 `.geoharness/maps/index.json`。`cartography.jobs_dir` 可配置，但必须是工作区子目录。只查询已有证据可调用：
+
+```json
+{"action":"status","map_id":"工具返回的UUID"}
+```
+
+也可用 `map_path` 查询已登记的实际图片。`geo_cartography(action="status")` 会重新计算当前图片和已登记工程/交付文件的摘要；返回摘要，完整回执在工具 metadata 的 `map_receipt` 中。没有对应任务时返回 draft，不创建任务、不绘图、不增加检查结果。
+
+| 阶段 | 记录的实际证据 |
+|---|---|
+| parameters | 新建时实际使用的 preflight 参数与报告，状态为 recorded |
+| data_checked | 字段、几何、CRS、范围和可见数量等数据合同检查 |
+| rendered | 实际图片路径与 SHA256 |
+| layout_checked | 与当前图片绑定的布局测量或 QGIS bounds_check |
+| visual_checked | 与当前图片绑定的实际视觉审查 |
+| packaged | 同图预览、工程清单与工程文件摘要 |
+| delivered | 实际复制的交付文件和主图摘要 |
+
+缺少证据的阶段为 unverified；布局或视觉检查报告问题时可为 issues，文件改变使旧证据失效时为 stale。`quality_status=passed` 要求同一张图的 data_checked、rendered、layout_checked、visual_checked 全部为 passed；其余为 draft。范围仅为地图数据合同、已测布局几何和图片视觉检查，`analysis_correctness` 永远为 unverified。打包或交付成功不会补齐缺失检查。
+
+修改图片、QGIS 工程、已登记数据副本或交付文件后，旧摘要绑定的证明不能继续用于新文件；状态查询会标记受影响阶段 stale。保存修改后应导出新图，核对数据、布局并审查新图，再重新交付。完整交付包含 `map-receipt.json`；该回执是当时的快照，当前状态以重新查询结果为准。
+
 ## 成图检查与自动重绘
 
-geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，最多两轮，可配置为 0 或 1 轮。不会因为 info 提示或单纯审美建议再画一版。修正前地图、PNG 预览和 report.json 位于成图旁独立的 `.review-*` 目录；路径通过工具结果返回，不覆盖已有旁侧文件。
+新建 QGIS 地图时，系统先将受控读取的图层保存为临时 GPKG/GeoTIFF，再对该数据副本预检并交给 QGIS 渲染；检查与成图使用同一份数据。冻结输入、预检失败不占成图次数，临时副本在读取线程和 QGIS 进程结束后清理。已有用户工程的 inspect/export 保留原数据、样式和布局，导出不覆盖输入工程。
 
-原生工具、Python 制图及独立审查共享一次用户请求的预算。每张地图最多初版加两轮成功修正；执行失败会释放该次成图预留。所有地图合计默认最多4次模型审查、120秒实际调用耗时；不计空间分析、渲染、生成工程和写报告的间隔，并发调用预留可用时间，完成后按实际耗时结算。各版本保持同一 map_id，改文件名不会重新获得相同地图的版本预算。相同图片和审图配置的结果会缓存，失败也不会盲目重试；明确修正模型/token/provider参数后允许再次检查。用户提出新的修改要求后开启新预算。
+geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，最多两轮，可配置为 0 或 1 轮。Matplotlib 路径可自动应用支持的呈现补丁并重绘；默认 QGIS 路径检查实际布局 PNG，由 Agent 根据具体问题调整支持的样式/布局参数后重绘，当前工具不自动应用审图补丁。不会因为 info 提示或单纯审美建议再画一版。报告由工具返回实际路径；Matplotlib 自动修正前地图和预览保存在成图旁独立 `.review-*` 目录。
+
+原生工具、Python 制图及独立审查共享一次用户请求的预算。当前请求默认最多初版加两轮成功修正；执行失败会释放该次成图预留。所有地图合计默认最多4次模型审查、120秒实际调用耗时；不计空间分析、渲染、生成工程和写报告的间隔，并发调用预留可用时间，完成后按实际耗时结算。预算与持久任务身份分开，改文件名、别名或切换已存在的历史 map_id 都不会补充当前请求额度。相同图片和审图配置的结果会缓存，失败也不会盲目重试；明确修正模型/token/provider参数后允许再次检查。真实用户新输入重置预算，历史地图与回执仍保留。
 
 有放大图和密集重点点时，Python 可使用 `geoharness.cartography.layout` 的 create_map_figure、place_point_labels、save_map_figure。它预留主图、放大图、图例、说明的独立区域，按渲染后的文字边界避让；放不下的名字保留省略记录，使用编号对应名单。保存 `.layout.json` 记录分区相交、标签相交/裁切和图例/说明越界，与实际图片 SHA256 绑定。geo_map_review 先检查对应报告；明确的布局缺陷先修正，再调用视觉服务。
 
@@ -196,13 +230,17 @@ geo_cartography 显式读取成图，结合任务、预期图层、参数和源�
 
 不会因图片建议自动更换数据、统计方法、字段或影响阈值。视觉检查不能证明数值正确，必须同时核验分析结果。
 
-| 状态 | 含义 |
+下面是视觉审查状态，与最终 quality_status 分开：
+
+| 视觉状态 | 含义 |
 |---|---|
 | passed | 完成视觉检查，没有报告需处理的问题 |
 | issues | 仍有具体问题，报告保留原因 |
 | unverified | 检查关闭、服务失败、回复无效或无法确认，不表示正确 |
 
 PNG 是首期推荐输出。PDF/SVG 检查同参数 PNG 预览，导出文件本身的排版/字体需另行核验。HTML 没有实际网页截图时仍标为 unverified。Python 自定义地图用 geo_map_review，由 Agent 按问题修改呈现代码、重绘、再检查。
+
+仅调用 geo_map_review 会登记已有 Python 图片及可用的布局报告，不会替它补造数据 preflight。缺少与当前图绑定的数据检查时，即使视觉审查 passed，最终仍为 draft。Matplotlib、HTML 和自主 Python 入口继续保留。
 
 map_review 可单独配置 model、base_url、api_key；留空时复用主配置。主 Agent 保持 `cbcn/deepseek-v4.1-flash(max)`。本机 9Router 网关使用已实测的独立审图模型 `cbcn/deepseek-v4.1-flash(none)`，4096 token、45秒单次上限；这张业务地图一次返回完整审查约9秒、reasoning_tokens=0。仅传 thinking.type=disabled 或 reasoning_effort=low 时，网关仍把全部4096/8192 token用于推理，无完整结论；不能据此声称关闭思考。`request_extra_body` 用于服务支持的专用参数，默认空对象，其他服务按其实际能力配置。report.json 的 diagnostics 保留 response_model、finish_reason、reasoning_tokens、output_tokens 和 duration_seconds。预算耗尽时报告 unverified，即使附有部分 JSON 也不接受通过。
 
@@ -214,34 +252,34 @@ map_review 可单独配置 model、base_url、api_key；留空时复用主配置
 
 默认地图和最终交付保存到当前工作目录的 `exports/`。geo_deliver 把明确选定的地图、结果数据、检查报告、脚本和工程复制到独立交付子目录，返回实际路径并保留之前的交付。delivery.outputs_dir 必须是工作目录的子目录；Python 脚本不负责跨目录复制，输出仍限于 RUN_DIR。
 
-原生制图同时生成可移植工程；Python 自定义地图可用 geo_cartography 的 project 动作，以已存在的原成图和实际图层创建工程，不重新绘图。分类层明确 column（兼容 field_name）、categories 和 colors，原生绘图与 QGIS 使用对应的分类颜色；map_extent 锁定主图范围。不能为创建工程而另画简化图或丢弃分类字段。工程包含：
+默认 QGIS 制图的 PNG 与可编辑工程来自同一打印布局。Python/Matplotlib 自定义地图可用 geo_cartography 的 project 动作，以已存在的原成图和实际图层创建工程，不重新绘图；生成的 QGIS 布局不保证重现所有自定义注记。分类层明确 column（兼容 field_name）、categories 和 colors，原生绘图与 QGIS 使用对应的分类颜色；map_extent 锁定主图范围。不能为创建工程而另画简化图或丢弃分类字段。工程包含：
 
-- `map.qgs`：QGIS 工程，真实图层、符号样式和可编辑打印布局。
+- `map.qgs` 或 `map.qgz`：QGIS 工程，真实图层、符号样式和可编辑打印布局；以返回的 project_file/qgis_project 为准。
 - `data/`：矢量 GeoPackage 和栅格 GeoTIFF 数据副本，使用相对路径，不依赖原始文件位置。
-- `project.json`、`redraw.py`：原生绘图参数及重绘入口；保留原始预览和使用说明。
+- `project.json`：文件、样式、布局及预览摘要；Python/Matplotlib 工程另有 `redraw.py` 重绘入口。
 
-geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付时核对主图、工程 preview 与记录的 SHA256；不同地图或已替换的预览会拒绝交付。quality_status 只有在对应图片的有效审查为 passed 且没有错误/警告时才为 passed，其余为 draft。工程生成本身不代表质量验收。
+geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付时核对主图、工程 preview 与记录的 SHA256；不同地图或已替换的预览会拒绝交付。交付 quality_status=passed 除了同图数据、布局和实际视觉检查通过，还要求包含的工程与已登记快照一致，复制期间没有变化；其余为 draft。工具同时返回 map_id、map_receipt、review_status 和 receipt_path，工程生成本身不代表质量验收。
 
-在 QGIS 3.x 打开 map.qgs；双击图层修改颜色、透明度、分级等，通过“项目 → 布局”打开 GeoHarness Map，修改标题、图例、地图框、比例尺后导出 PNG/PDF。QGIS 与 matplotlib 使用不同渲染引擎，基础布局可编辑，但不保证与原图逐像素一致；Python 的自定义注记可能需要参照预览和原始脚本补充。已使用本机 QGIS 3.44.7 实际读取工程并导出布局验证。
+在 QGIS 3.x 打开返回的 .qgs/.qgz；双击图层修改颜色、透明度、分级等，通过“项目 → 布局”打开返回的布局，修改标题、图例、地图框、比例尺后导出 PNG/PDF。默认 QGIS 路径的原图即由该工程布局导出；Python/Matplotlib 工程使用另一渲染引擎，自定义注记可能需要参照预览和原始脚本补充。
 
-分享或移动时携带整个工程目录。安装 GeoHarness 后，在工程目录运行 `python redraw.py --output edited.png`，可从数据副本和 JSON 重绘。此入口读取 project.json，不读取在 QGIS 中保存的样式/布局；在 QGIS 修改样式后应从 QGIS 导出。保存到 GeoPackage 的数据修改可被两种方式读取。重新交付会创建新目录，保留用户之前编辑的工程。
+分享或移动时携带整个工程目录。Python/Matplotlib 工程提供 redraw.py 时，安装 GeoHarness 后可在工程目录运行 `python redraw.py --output edited.png`，从数据副本和 JSON 重绘。此入口读取 project.json，不读取在 QGIS 中保存的样式/布局；在 QGIS 修改样式后应从 QGIS 或 geo_qgis_project 的 export 导出。保存到 GeoPackage 的数据修改可被两种方式读取。重新交付会创建新目录，保留用户之前编辑的工程。
 
 ## 后续方向
 
-下一阶段补充空间分布与热点分析，再做栅格/地形分析。认知技能保留领域参考价值，简单叠加任务无需强制进入空间自相关或因果流程。
+当前优先核对多图层叠加与影响范围的实际业务流程，空间分布与热点、栅格/地形业务和质量准确率评测延后。认知技能保留领域参考价值，简单叠加任务无需强制进入空间自相关或因果流程。当前实现和回执不代表最终全量或真实业务验收已经通过。
 
 ## 默认静态制图
 
-`geo_cartography(action="preflight", ...)` 与 `geo_qgis_project(action="preflight", ...)` 可先检查实际数据，不绘图、不生成工程，也不消耗地图版本。正常新建地图会自动先执行同样的检查。检查 CRS、有效/有限几何、字段与分类、数值类型、指定要素总数，并返回主图/详图中的可见数量。栅格只核验范围相交，不据此宣称像素值或语义正确。
+`geo_cartography(action="preflight", ...)` 与 `geo_qgis_project(action="preflight", ...)` 可先检查实际数据，不绘图、不生成工程，也不消耗成图或视觉审查预算。正常新建地图会在预留预算前自动先执行同样的检查。检查 CRS、有效/有限几何、符号与标签字段、分类/分级、数值类型、指定要素总数，并返回主图/详图中的几何相交数量。相交计数不证明符号没有被遮挡；栅格只核验范围相交，不据此宣称像素值或语义正确。
 
 显式 `map_extent` 使用 `{xmin,ymin,xmax,ymax}` 或四元组 `[xmin,ymin,xmax,ymax]`，必须同时指定显示坐标系（`geo_cartography.map_crs` 或 `geo_qgis_project.crs`）；`detail_extent` 同属该坐标系。不要直接把 GIS 四元组作为 `imshow.extent`，它的顺序是 `[xmin,xmax,ymin,ymax]`。没有指定范围时按对齐后的图层自动生成，单点/零跨度通过配置中的 minimum_span_geographic/minimum_span_projected 扩展。
 
 图层的 `expected_feature_count` 用来核对实际总数，`minimum_visible_features` 控制主图或详图最少显示数；必需图层默认为1。确实允许空结果或界外背景时明确 `required=false`，报告会保留零计数/警告。`geo_cartography` 可以在内存副本中将无损数值字符串转为数值，不改源文件；直接 QGIS graduated/flow 字段必须已是数值类型。
 
-PNG/PDF 默认使用 QGIS。配置 `cartography.static_renderer: qgis`，调用 `geo_cartography` 时可指定 `map_crs` 和 `qgis_layout`。`qgis_layout.detail_extent` 使用 `{xmin,ymin,xmax,ymax}`，与主图范围同属显示坐标系；`footer_text` 提供说明。主图、可选详图、图例和底栏分区生成，类别颜色复用已有桥接规则，中文字体、标注缓冲与避让由 QGIS 处理。
+PNG/PDF 默认使用 QGIS。配置 `cartography.static_renderer: qgis`，调用 `geo_cartography` 时可指定 `map_crs` 和 `qgis_layout`。`qgis_layout.detail_extent` 使用 `{xmin,ymin,xmax,ymax}`，与主图范围同属显示坐标系；`footer_text` 提供备注。主图、可选详图、图例和底栏分区生成，类别颜色复用已有桥接规则，中文字体与标注缓冲/放置由 QGIS 处理。这些设置不证明每个标签都已显示或位置正确，仍须检查实际成图。
 
 返回的 `project_file` 是真实 QGIS 工程，`preview_path` 是从它的打印布局导出的 PNG。修改工程的图层、样式或打印布局并保存后，使用 `geo_qgis_project(action="export",project_path="...")` 导出新工程和图片。交付以返回的 `primary_map` PNG 与 `project_dir` 为主，PDF 可附加。视觉审查未完成时仍为草稿。
 
 需要旧静态路径时指定 `renderer="matplotlib"` 或配置 `cartography.static_renderer: matplotlib`；HTML/SVG 保留原有渲染入口。QGIS 禁用或启动失败时，默认路径会给出具体错误。
 
-QGIS 新建模板会在导出前检查自身分区与内容溢出。对用户已保存的工程，inspect/export 保留真实布局并在 bounds_check 中记录问题，允许合法的地图内注记或手动移动图例；有问题时按草稿处理。显式 font_file 会随工程打包并由 GeoHarness 重导出时加载。QGIS 桌面需使用已安装字体，或由用户自行安装工程携带的自定义字体；系统默认中文字体无需另行打包。
+QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出及元素边界。对用户已保存的工程，inspect/export 保留真实布局并在 bounds_check 中记录问题，允许合法的地图内注记或手动移动图例；非结构化模板可能返回 checked=false。有问题或缺少有效检查时按草稿处理。bounds_check 只覆盖报告中的布局元素与边界，不证明所有地图标签、图层语义或分析结果正确。显式 font_file 会随工程打包并由 GeoHarness 重导出时加载。QGIS 桌面需使用已安装字体，或由用户自行安装工程携带的自定义字体；系统默认中文字体无需另行打包。

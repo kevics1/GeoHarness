@@ -11,6 +11,7 @@ from openharness.engine.messages import ConversationMessage
 from openharness.tools.base import ToolExecutionContext
 from PIL import Image
 
+from geoharness.cartography.jobs import begin_map_request, ensure_map_job
 from geoharness.cartography.workflow import (
     refund_map_render,
     reserve_map_render,
@@ -119,7 +120,12 @@ async def test_rendering_and_analysis_time_between_reviews_do_not_expire_review_
     metadata = {"map_workflow_state": {"seconds": 1, "started_at": 0}}
     reviewer = Reviewer()
     review, flags = await review_with_budget(
-        image, config=GeoConfig(), task="Check", evidence={}, metadata=metadata, client=reviewer,
+        image,
+        config=GeoConfig(),
+        task="Check",
+        evidence={},
+        metadata=metadata,
+        client=reviewer,
     )
     assert review.status == "unverified"
     assert not flags["review_budget_exhausted"]
@@ -136,13 +142,25 @@ async def test_explicit_provider_setting_change_can_recheck_a_cached_unverified_
     config = GeoConfig()
     results = []
     for current in (
-        config, config, replace(config, map_review=MapReviewConfig(
-            request_extra_body={"thinking": {"type": "disabled"}},
-        )),
+        config,
+        config,
+        replace(
+            config,
+            map_review=MapReviewConfig(
+                request_extra_body={"thinking": {"type": "disabled"}},
+            ),
+        ),
     ):
-        results.append(await review_with_budget(
-            image, config=current, task="Check", evidence={}, metadata=metadata, client=reviewer,
-        ))
+        results.append(
+            await review_with_budget(
+                image,
+                config=current,
+                task="Check",
+                evidence={},
+                metadata=metadata,
+                client=reviewer,
+            )
+        )
     assert reviewer.calls == 2
     assert [flags["review_cached"] for _, flags in results] == [False, True, False]
     assert len({flags["image_sha256"] for _, flags in results}) == 1
@@ -150,7 +168,8 @@ async def test_explicit_provider_setting_change_can_recheck_a_cached_unverified_
 
 @pytest.mark.asyncio
 async def test_parallel_distinct_images_reserve_and_release_only_available_review_seconds(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     from geoharness.cartography import workflow
     from geoharness.cartography.quality import MapReview
@@ -171,9 +190,18 @@ async def test_parallel_distinct_images_reserve_and_release_only_available_revie
         return MapReview(status="unverified", summary="Test review")
 
     monkeypatch.setattr(workflow, "review_map", blocking_review)
-    tasks = [asyncio.create_task(review_with_budget(
-        path, config=GeoConfig(), task="Check", evidence={}, metadata=metadata,
-    )) for path in paths]
+    tasks = [
+        asyncio.create_task(
+            review_with_budget(
+                path,
+                config=GeoConfig(),
+                task="Check",
+                evidence={},
+                metadata=metadata,
+            )
+        )
+        for path in paths
+    ]
     try:
         await asyncio.wait_for(entered.wait(), 1)
         assert sorted(timeouts) == [30, 90]
@@ -257,3 +285,86 @@ async def test_parallel_checks_of_identical_pixels_share_one_model_request(tmp_p
     )
     assert reviewer.calls == metadata["map_workflow_state"]["reviews"] == 1
     assert sorted(flags["review_cached"] for _, flags in results) == [False, True]
+
+
+def test_request_job_aliases_share_render_budget_and_legacy_entry_identity(tmp_path):
+    metadata = {"map_job_state": {}, "map_workflow_state": {}}
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
+    begin_map_request(metadata, cwd=tmp_path, config=config)
+    job_id = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="risk")
+    assert reserve_map_render(job_id, metadata, config) is None
+    assert reserve_map_render("different-name-v9", dict(metadata), config) is not None
+    maps = metadata["map_workflow_state"]["maps"]
+    assert maps["risk"] is maps[job_id] is maps["different-name-v9"]
+    assert maps["risk"]["renders"] == 1
+    assert refund_map_render("risk", metadata)
+    assert reserve_map_render("another-alias", metadata, config) is None
+    assert maps["another-alias"] is maps[job_id]
+
+
+def test_continuation_keeps_job_and_real_new_input_resets_budget(tmp_path):
+    metadata = {"map_job_state": {}, "map_workflow_state": {}}
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
+    begin_map_request(metadata, cwd=tmp_path, config=config)
+    first = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="risk")
+    assert reserve_map_render(first, metadata, config) is None
+    assert reserve_map_render("new-name", metadata, config) is not None
+    reset_map_workflow(metadata)
+    begin_map_request(metadata, cwd=tmp_path, config=config, continuation=True)
+    assert ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="continue") == first
+    assert reserve_map_render(first, metadata, config) is None
+    reset_map_workflow(metadata)
+    begin_map_request(metadata, cwd=tmp_path, config=config)
+    second = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="new-user-map")
+    assert second != first and reserve_map_render(second, metadata, config) is None
+
+
+def test_legacy_budget_does_not_create_job_state_without_cwd():
+    metadata = {}
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
+    assert reserve_map_render("one", metadata, config) is None
+    assert reserve_map_render("two", metadata, config) is None
+    assert "map_job_state" not in metadata
+
+
+def test_historical_alias_cannot_replenish_current_request_budget(tmp_path):
+    metadata = {"map_job_state": {}}
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
+    begin_map_request(metadata, cwd=tmp_path, config=config)
+    first = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="old-A")
+    begin_map_request(metadata, cwd=tmp_path, config=config)
+    second = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="old-B")
+    assert first != second
+    reset_map_workflow(metadata)
+    begin_map_request(metadata, cwd=tmp_path, config=config)
+    assert reserve_map_render("old-A", metadata, config) is None
+    assert reserve_map_render("old-B", metadata, config) is not None
+    assert refund_map_render("old-A", metadata)
+    assert reserve_map_render("old-B", metadata, config) is None
+
+
+@pytest.mark.asyncio
+async def test_changed_aliases_share_per_job_review_limit(tmp_path):
+    metadata = {"map_job_state": {}, "map_workflow_state": {}}
+    config = GeoConfig(map_review=MapReviewConfig(max_repairs=0, max_reviews_per_request=5))
+    begin_map_request(metadata, cwd=tmp_path, config=config)
+    reviewer = Reviewer()
+    results = []
+    for name, color in (("first", "white"), ("second", "black")):
+        image = tmp_path / f"{name}.png"
+        Image.new("RGB", (32, 32), color).save(image)
+        results.append(
+            await review_with_budget(
+                image,
+                config=config,
+                task="Check",
+                evidence={},
+                metadata=metadata,
+                map_id=name,
+                client=reviewer,
+            )
+        )
+    assert reviewer.calls == 1
+    assert results[-1][1]["review_budget_exhausted"]
+    maps = metadata["map_workflow_state"]["maps"]
+    assert maps["first"] is maps["second"]

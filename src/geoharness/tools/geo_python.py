@@ -42,7 +42,8 @@ class GeoPythonInput(BaseModel):
             )
         if isinstance(value, dict) and (
             not value.get("code")
-            or isinstance(value.get("code"), str) and not value["code"].strip()
+            or isinstance(value.get("code"), str)
+            and not value["code"].strip()
         ):
             raise ValueError(
                 "geo_python requires complete 'code' arguments; no script was executed. "
@@ -128,9 +129,13 @@ class GeoPythonTool(BaseTool):
                 is_error=False,
                 metadata={"render_budget_exhausted": True},
             )
-        reserved = context.metadata.get("map_workflow_state", {}).get("maps", {}).get(
-            identity, {}
-        ).get("renders", 0) > previous_renders
+        reserved = (
+            context.metadata.get("map_workflow_state", {})
+            .get("maps", {})
+            .get(identity, {})
+            .get("renders", 0)
+            > previous_renders
+        )
         file_dir = getattr(getattr(config, "data", None), "file_dir", "")
         directories = []
         for section in ("analysis", "cartography", "execution"):
@@ -170,11 +175,52 @@ class GeoPythonTool(BaseTool):
                 refund_map_render(identity, context.metadata)
             lines = result["stderr"].strip().splitlines()
             result["error_summary"] = lines[-1][:500] if lines else status
-        return ToolResult(
+        response = ToolResult(
             output=json.dumps(result, ensure_ascii=False, indent=2),
             is_error=result["timed_out"] or result["exit_code"] != 0,
             metadata=result,
         )
+        if status == "succeeded" and reserved:
+            from geoharness.cartography.tracking import bind_map_job, track_render_result
+
+            images = [
+                Path(item["path"])
+                for item in result.get("files", [])
+                if isinstance(item, dict)
+                and Path(item.get("path", "")).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            ]
+            if images:
+                # One execution can include independent figures/attachments.
+                # Register its final candidate once; selecting another image
+                # for review remains explicit, rather than inventing revisions.
+                image = max(images, key=lambda path: path.stat().st_mtime_ns)
+                try:
+                    job_id = bind_map_job(context, identity, image)
+                except (OSError, ValueError) as exc:
+                    return ToolResult(
+                        output=response.output + f"\nMap task registration failed: {exc}",
+                        is_error=True,
+                        metadata=result,
+                    )
+                tracked = await asyncio.to_thread(
+                    track_render_result,
+                    ToolResult(output="", metadata={"output_path": str(image)}),
+                    context,
+                    job_id,
+                )
+                if tracked.is_error:
+                    return tracked
+                response = ToolResult(
+                    output=response.output + tracked.output,
+                    metadata={
+                        **result,
+                        "map_id": job_id,
+                        "primary_map": str(image),
+                        "map_candidates": [str(path) for path in images],
+                        "map_receipt": tracked.metadata["map_receipt"],
+                    },
+                )
+        return response
 
     def is_read_only(self, arguments: BaseModel) -> bool:
         return False

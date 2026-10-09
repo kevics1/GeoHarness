@@ -6,11 +6,13 @@ import asyncio
 import json
 import math
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from geoharness.cartography.snapshot import FrozenQgisInputs, freeze_qgis_inputs
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_map_render
 from geoharness.tools.geo_qgis import qgis_read_roots
 
@@ -199,6 +201,10 @@ class GeoQgisProjectInput(BaseModel):
     project_format: Literal["qgz", "qgs"] = "qgz"
     dpi: int = Field(default=150, ge=36, le=600)
     map_id: str = Field(default="", description="Stable logical map ID across versions and tools.")
+    analysis_manifests: list[str] = Field(
+        default_factory=list, max_length=8,
+        description="Native analysis manifests used to derive verified statistics and methods.",
+    )
 
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
@@ -209,7 +215,8 @@ class GeoQgisProjectInput(BaseModel):
                 raise ValueError("create cannot replace an existing project; use export")
         elif not self.project_path:
             raise ValueError("inspect/export requires project_path")
-        elif self.layers or self.crs or self.map_extent is not None or self.layout is not None:
+        elif self.layers or self.crs or self.map_extent is not None or self.layout is not None \
+                or self.analysis_manifests:
             raise ValueError("inspect/export preserves the saved project's layers, CRS and layout")
         if self.map_extent is not None:
             if isinstance(self.map_extent, QgisExtent):
@@ -251,13 +258,34 @@ class GeoQgisProjectTool(BaseTool):
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
         if not config.qgis.enabled and arguments.action != "preflight":
             return ToolResult(output="Error: QGIS integration is disabled.", is_error=True)
+        if arguments.action == "create":
+            # Inputs remain alive through worker shutdown, including cancellation.
+            with TemporaryDirectory(prefix="geoh-qgis-inputs-") as directory:
+                return await self._execute(arguments, context, Path(directory).resolve())
+        return await self._execute(arguments, context)
+
+    async def _execute(self, arguments, context, snapshot_directory=None) -> ToolResult:
+        config = context.metadata["geoharness_config"]
         preflight = None
         if arguments.action in {"create", "preflight"}:
             try:
-                preflight = await asyncio.wait_for(
-                    asyncio.to_thread(self._preflight, arguments, context),
-                    timeout=config.qgis.timeout_seconds,
-                )
+                if snapshot_directory is not None:
+                    pending = asyncio.create_task(asyncio.to_thread(
+                        self._freeze_and_preflight, arguments, context, snapshot_directory,
+                    ))
+                    try:
+                        arguments, preflight = await asyncio.wait_for(
+                            asyncio.shield(pending), timeout=config.qgis.timeout_seconds,
+                        )
+                    except (TimeoutError, asyncio.CancelledError):
+                        # Cancelling to_thread cannot stop native file reads/writes.
+                        await _drain_task(pending)
+                        raise
+                else:
+                    preflight = await asyncio.wait_for(
+                        asyncio.to_thread(self._preflight, arguments, context),
+                        timeout=config.qgis.timeout_seconds,
+                    )
             except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
                 return ToolResult(output=f"Error: QGIS map preflight failed: {exc}", is_error=True,
                                   metadata={"preflight_status": "failed", "render_executed": False})
@@ -266,17 +294,46 @@ class GeoQgisProjectTool(BaseTool):
                                   metadata={"preflight": preflight, "render_executed": False})
         from geoharness.qgis.runner import execute_qgis
 
+        payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
+        if preflight:
+            payload.update(crs=preflight["display_crs"], map_extent=preflight["map_extent"])
+            facts = preflight.get("analysis") or context.metadata.get("map_analysis_facts")
+            if facts and facts.get("status") == "verified":
+                from geoharness.cartography.provenance import apply_analysis_footer
+
+                try:
+                    payload = apply_analysis_footer(payload, facts)
+                except ValueError as exc:
+                    return ToolResult(output=f"Error: analysis footer layout invalid: {exc}",
+                                      is_error=True)
         identity = arguments.map_id or map_identity(
             arguments.title or Path(arguments.project_path).stem or "qgis-map"
         )
         reserved = arguments.action in {"create", "export"}
         if reserved:
+            from geoharness.cartography.tracking import bind_map_job
+
+            try:
+                project_path = Path(arguments.project_path) if arguments.project_path else None
+                saved_path = project_path
+                if saved_path is not None and not saved_path.is_absolute():
+                    saved_path = Path(context.cwd) / saved_path
+                if arguments.action == "export" and not arguments.map_id \
+                        and saved_path and saved_path.is_file():
+                    from geoharness.cartography.jobs import saved_project_job
+
+                    identity = await asyncio.to_thread(
+                        saved_project_job, context.metadata, cwd=context.cwd, config=config,
+                        project_path=project_path,
+                    ) or identity
+                identity = bind_map_job(context, identity,
+                                        project_path)
+            except (OSError, ValueError) as exc:
+                return ToolResult(output=f"Error: map task could not start: {exc}", is_error=True)
             stop = reserve_map_render(identity, context.metadata, config)
             if stop is not None:
                 return ToolResult(output=stop, metadata={"render_budget_exhausted": True})
-        payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
-        if preflight:
-            payload.update(crs=preflight["display_crs"], map_extent=preflight["map_extent"])
+        payload["map_id"] = identity
         # NULL is a real category key, rather than an absent optional setting.
         for source, packed in zip(arguments.layers, payload.get("layers", [])):
             if source.style is not None:
@@ -284,13 +341,24 @@ class GeoQgisProjectTool(BaseTool):
                                              packed.get("style", {}).get("categories", [])):
                     encoded["value"] = category.value
         try:
-            result = await execute_qgis(
+            execution = execute_qgis(
                 f"project_{arguments.action}",
                 payload,
                 cwd=Path(context.cwd),
                 settings=config.qgis,
-                read_roots=qgis_read_roots(config, Path(context.cwd)),
+                read_roots=[*qgis_read_roots(config, Path(context.cwd)),
+                            *([snapshot_directory] if snapshot_directory is not None else [])],
             )
+            if snapshot_directory is not None:
+                pending = asyncio.create_task(execution)
+                try:
+                    result = await asyncio.shield(pending)
+                except asyncio.CancelledError:
+                    pending.cancel()
+                    await _drain_task(pending)
+                    raise
+            else:
+                result = await execution
         except (OSError, ValueError, RuntimeError) as exc:
             if reserved:
                 refund_map_render(identity, context.metadata)
@@ -305,18 +373,45 @@ class GeoQgisProjectTool(BaseTool):
             refund_map_render(identity, context.metadata)
         details: dict[str, Any] = result.get("result") or {}
         metadata = {**details, **result, "map_id": identity, "preflight": preflight}
-        return ToolResult(
+        if metadata.get("project_file"):
+            metadata["qgis_project"] = metadata["project_file"]
+        response = ToolResult(
             output=json.dumps(result, ensure_ascii=False, indent=2),
             is_error=result.get("status") != "succeeded",
             metadata=metadata,
         )
+        if reserved and result.get("status") == "succeeded":
+            from geoharness.cartography.tracking import track_render_result
+
+            analysis = (preflight or {}).get("analysis") or (
+                context.metadata.get("map_analysis_facts") if arguments.action == "create" else None
+            )
+            return await asyncio.to_thread(track_render_result, response, context, identity,
+                                           preflight=preflight, analysis=analysis)
+        return response
 
     def is_read_only(self, arguments: BaseModel) -> bool:
         return isinstance(arguments, GeoQgisProjectInput) and arguments.action in {
             "inspect", "preflight",
         }
 
-    def _preflight(self, arguments, context) -> dict:
+    def _freeze_and_preflight(self, arguments, context, directory):
+        snapshot = freeze_qgis_inputs(
+            [layer.model_dump(exclude_none=True) for layer in arguments.layers],
+            directory=directory, cwd=Path(context.cwd),
+            read_roots=qgis_read_roots(context.metadata["geoharness_config"], Path(context.cwd)),
+        )
+        frozen = arguments.model_copy(update={
+            "layers": [layer.model_copy(update=updates)
+                       for layer, updates in zip(arguments.layers, snapshot.layers)],
+        })
+        report = self._preflight(frozen, context, snapshot=snapshot)
+        # Analysis evidence was checked at original locators, against frozen GDFs.
+        # Sources may change after this point: the worker only uses the snapshots.
+        snapshot.verify_sources()
+        return frozen, report
+
+    def _preflight(self, arguments, context, *, snapshot: FrozenQgisInputs | None = None) -> dict:
         import geopandas as gpd
         import rasterio
 
@@ -326,9 +421,11 @@ class GeoQgisProjectTool(BaseTool):
 
         config = context.metadata["geoharness_config"]
         guard = WorkerContext(Path(context.cwd), Path(context.cwd),
-                              qgis_read_roots(config, Path(context.cwd)))
+                              [*qgis_read_roots(config, Path(context.cwd)),
+                               *([snapshot.directory] if snapshot else [])])
         frames = []
-        for layer in arguments.layers:
+        mapped_sources = []
+        for index, layer in enumerate(arguments.layers):
             path, options = _local_source(layer.file_path, guard)
             common = {"label": layer.name or path.stem, "required": layer.required,
                       "expected_feature_count": layer.expected_feature_count,
@@ -349,8 +446,13 @@ class GeoQgisProjectTool(BaseTool):
                 gdf = gpd.read_file(path, **({"layer": name} if name else {}))
                 frames.append({**common, "gdf": gdf, "label_field": layer.label_field,
                                "style": layer.style.model_dump() if layer.style else {}})
+                original_path = snapshot.original_sources[index]["file_path"] if snapshot else (
+                    str(path)
+                )
+                mapped_sources.append({"file_path": original_path, "gdf": gdf,
+                                       "label": common["label"]})
         settings = config.cartography
-        return validate_frames(
+        report = validate_frames(
             frames, map_crs=arguments.crs, map_extent=arguments.map_extent,
             detail_extent=(arguments.layout.detail_extent.model_dump()
                            if arguments.layout and arguments.layout.detail_extent else None),
@@ -358,3 +460,25 @@ class GeoQgisProjectTool(BaseTool):
             minimum_span_projected=settings.minimum_span_projected,
             extent_padding=settings.extent_padding,
         )
+        if arguments.analysis_manifests:
+            from geoharness.cartography.facts import load_analysis_facts
+
+            report["analysis"] = load_analysis_facts(
+                arguments.analysis_manifests, cwd=context.cwd,
+                read_roots=qgis_read_roots(config, context.cwd), mapped_sources=mapped_sources,
+                display_crs=report["display_crs"],
+            )
+        return report
+
+
+async def _drain_task(task: asyncio.Task) -> None:
+    """Finish an owned reader before deleting its files, even on repeated cancel."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    if not task.cancelled():
+        task.exception()  # Retrieve failures without replacing the original cancel/timeout.

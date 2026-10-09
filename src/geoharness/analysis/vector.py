@@ -332,7 +332,11 @@ def analyze_vectors(
                 )
             )
             paths[label] = {
-                "geojson": str(geojson_path), "csv": str(csv_path), "feature_count": len(frame)
+                "geojson": str(geojson_path), "csv": str(csv_path), "feature_count": len(frame),
+                "geojson_sha256": hashlib.sha256(
+                    (stage / geojson_path.name).read_bytes()
+                ).hexdigest(),
+                "csv_sha256": hashlib.sha256((stage / csv_path.name).read_bytes()).hexdigest(),
             }
             if not frame.empty and label != "affected":
                 layers.append({

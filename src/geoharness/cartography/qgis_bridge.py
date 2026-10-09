@@ -57,8 +57,10 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
         if gdf is None:
             gdf = resolve_geodataframe(
                 source_type=spec.get("source_type") or "file",
-                source_name=spec.get("source_name", ""), file_path=spec.get("file_path", ""),
-                geojson_text=spec.get("geojson", ""), catalog=context.metadata.get("data_catalog"),
+                source_name=spec.get("source_name", ""),
+                file_path=spec.get("file_path", ""),
+                geojson_text=spec.get("geojson", ""),
+                catalog=context.metadata.get("data_catalog"),
             )
         if gdf.empty and not spec.get("required", True):
             continue
@@ -109,8 +111,9 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
                 "label_style": spec.get("label_style"),
                 "required": spec.get("required", True),
                 "expected_feature_count": len(gdf),
-                "minimum_visible_features": spec.get("minimum_visible_features",
-                                                     1 if spec.get("required", True) else 0),
+                "minimum_visible_features": spec.get(
+                    "minimum_visible_features", 1 if spec.get("required", True) else 0
+                ),
             }
         )
     return layers
@@ -157,6 +160,7 @@ def relocate_package(metadata: dict, destination: Path, config: Any) -> dict:
     result = {**metadata, "project_dir": str(destination), "publication": publication}
     for key in ("project_file", "project_manifest", "preview_path", "primary_map", "output_path"):
         result[key] = str(destination / Path(metadata[key]).relative_to(source))
+    result["qgis_project"] = result["project_file"]
     return result
 
 
@@ -272,7 +276,14 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
         preview,
         config=config,
         task=args.review_task or args.title or args.layer_name,
-        evidence={"backend": "qgis", "render_metadata": result.metadata},
+        evidence={
+            "backend": "qgis",
+            "render_metadata": {
+                key: result.metadata[key]
+                for key in ("layers", "crs", "extent", "layout", "image_sha256", "analysis")
+                if key in result.metadata
+            },
+        },
         metadata=context.metadata,
         map_id=args.map_id,
         client=context.metadata.get("map_review_client"),
@@ -288,7 +299,7 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
             "reviewed_artifact": "exported_png",
         },
     )
-    return ToolResult(
+    response = ToolResult(
         output=(
             f"QGIS map: {desired}\nEditable project: {result.metadata['project_file']}\n"
             f"Visual review: {checked.status} — {checked.summary}\nReport: {report}\n"
@@ -297,6 +308,7 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
         metadata={
             **result.metadata,
             "output_path": str(desired),
+            "primary_map": str(desired) if desired.suffix.lower() == ".png" else str(preview),
             "map_id": args.map_id,
             "review_status": checked.status,
             "review_path": str(report),
@@ -305,4 +317,14 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
             "preflight": context.metadata.get("map_preflight"),
             **budget,
         },
+    )
+    from geoharness.cartography.tracking import track_render_result
+
+    return await asyncio.to_thread(
+        track_render_result,
+        response,
+        context,
+        args.map_id,
+        preflight=context.metadata.get("map_preflight"),
+        analysis=context.metadata.get("map_analysis_facts"),
     )

@@ -95,7 +95,7 @@ async def test_changed_qgis_preview_requires_new_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_qgis_package_can_deliver_only_a_matching_recorded_review(tmp_path):
+async def test_qgis_package_review_alone_does_not_certify_missing_data_and_layout(tmp_path):
     directory, manifest = qgis_package(tmp_path)
     report = tmp_path / "review.json"
     report.write_text(json.dumps({
@@ -106,4 +106,5 @@ async def test_qgis_package_can_deliver_only_a_matching_recorded_review(tmp_path
         GeoDeliverInput(project_dir=str(directory), review_path=str(report)),
         ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()}),
     )
-    assert not result.is_error and result.metadata["quality_status"] == "passed"
+    assert not result.is_error and result.metadata["quality_status"] == "draft"
+    assert result.metadata["review_status"] == "passed"

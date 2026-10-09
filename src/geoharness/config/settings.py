@@ -152,6 +152,7 @@ class CartographyConfig:
     default_template: str = ""
     outputs_dir: str = "exports"
     static_renderer: str = "qgis"
+    jobs_dir: str = ".geoharness/maps"
     minimum_span_geographic: float = 0.02
     minimum_span_projected: float = 1000
     extent_padding: float = 0.05
@@ -304,6 +305,7 @@ def _parse_cartography(raw: dict[str, Any] | None) -> CartographyConfig:
         default_template=template,
         outputs_dir=outputs_dir,
         static_renderer=raw.get("static_renderer", "qgis"),
+        jobs_dir=_expand_vars(raw.get("jobs_dir") or CartographyConfig().jobs_dir),
         minimum_span_geographic=raw.get("minimum_span_geographic", 0.02),
         minimum_span_projected=raw.get("minimum_span_projected", 1000),
         extent_padding=raw.get("extent_padding", 0.05),

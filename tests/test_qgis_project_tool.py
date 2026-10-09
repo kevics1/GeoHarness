@@ -211,6 +211,38 @@ async def test_create_and_export_share_budget_and_keep_saved_layout(tmp_path, mo
     assert calls[-1][1]["layers"] == []
 
 
+@pytest.mark.parametrize("map_id", ["", "explicit"])
+async def test_export_recovers_saved_project_job_unless_map_id_is_explicit(
+    tmp_path, monkeypatch, map_id,
+):
+    from geoharness.cartography.tracking import bind_map_job
+
+    context = _context(tmp_path)
+    saved_id = bind_map_job(context, "saved-map")
+    (tmp_path / "saved-as.qgs").write_text("<qgis/>", encoding="utf-8")
+    recovered = []
+    calls = []
+
+    def recover(metadata, **kwargs):
+        recovered.append(kwargs["project_path"])
+        return saved_id
+
+    async def runner(action, payload, **kwargs):
+        calls.append(payload)
+        return {"status": "succeeded", "result": {}}
+
+    monkeypatch.setattr("geoharness.cartography.jobs.saved_project_job", recover)
+    monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
+    result = await GeoQgisProjectTool().execute(
+        GeoQgisProjectInput(action="export", project_path="saved-as.qgs", map_id=map_id), context,
+    )
+    assert not result.is_error, result.output
+    assert calls[0]["project_path"] == "saved-as.qgs"
+    assert recovered == ([] if map_id else [Path("saved-as.qgs")])
+    if not map_id:
+        assert calls[0]["map_id"] == saved_id
+
+
 @pytest.mark.parametrize("failure", ["failed", "exception", "cancelled"])
 async def test_failed_or_cancelled_render_refunds_owned_reservation(tmp_path, monkeypatch, failure):
     async def fake_runner(*args, **kwargs):

@@ -11,17 +11,25 @@ from openharness.engine.query_engine import QueryEngine
 from openharness.engine.stream_events import AssistantTurnComplete, ErrorEvent, StreamEvent
 from openharness.hooks import HookEvent
 
+from geoharness.cartography.jobs import begin_map_request
 from geoharness.cartography.workflow import reset_map_workflow
 
 
 class GeoQueryEngine(QueryEngine):
     async def submit_message(self, prompt: str | ConversationMessage) -> AsyncIterator[StreamEvent]:
         # continue_pending uses the original budget. Only actual new user input resets it.
-        reset_map_workflow(self.tool_metadata)
         user_message = (
             prompt if isinstance(prompt, ConversationMessage)
             else ConversationMessage.from_user_text(prompt)
         )
+        reset_map_workflow(self.tool_metadata)
+        config = self.tool_metadata.get("geoharness_config")
+        if config is not None:
+            continuation = user_message.text.strip().strip("。.!！").lower() in {
+                "继续", "接着做", "continue", "resume",
+            }
+            begin_map_request(self.tool_metadata, cwd=self._cwd, config=config,
+                              continuation=continuation)
         if user_message.text.strip() and not self._tool_metadata.pop(
             "_suppress_next_user_goal", False,
         ):

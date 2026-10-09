@@ -833,7 +833,7 @@ def _validate_layout_bounds(layout: Any) -> None:
 
 
 def _layout_metadata(layout: Any) -> dict[str, Any]:
-    from qgis.core import QgsLayoutItemMap, QgsLayoutItemScaleBar
+    from qgis.core import QgsLayoutItemLabel, QgsLayoutItemMap, QgsLayoutItemScaleBar
 
     maps = []
     scale_bars = []
@@ -868,6 +868,8 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
         "regions": json.loads(layout.customProperty("geoharness/regions", "{}")),
         "font": json.loads(layout.customProperty("geoharness/font", "{}")),
         "bounds_check": _layout_bounds(layout),
+        "footer_text": (layout.itemById("footer_text").text()
+                        if isinstance(layout.itemById("footer_text"), QgsLayoutItemLabel) else ""),
     }
 
 
@@ -952,6 +954,22 @@ def _save_package(
     layer_info = [
         _snapshot_layer(layer, index, project, context) for index, layer in enumerate(layers)
     ]
+    facts = payload.get("analysis_facts")
+    if facts is None:
+        # Preserve the original provenance on user-edited exports as historical evidence.
+        # This does not certify edited layers or refresh their old statistics.
+        recorded, _ = project.readEntry("geoharness", "analysis_facts", "")
+        if recorded:
+            try:
+                facts = json.loads(recorded)
+            except (TypeError, ValueError):
+                facts = None
+    if isinstance(facts, dict):
+        facts_path = Path(context.output_path(None, "analysis/verified-facts.json"))
+        facts_path.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
+        project.writeEntry("geoharness", "analysis_facts", json.dumps(facts, ensure_ascii=False))
+    if payload.get("map_id"):
+        project.writeEntry("geoharness", "map_job_id", payload["map_id"])
     project_path = Path(context.output_path(None, "map." + payload.get("project_format", "qgz")))
     project.setPresetHomePath("")
     project.setFilePathStorage(Qgis.FilePathType.Relative)
@@ -1007,6 +1025,7 @@ def _save_package(
         context.run_dir / "data",
         context.run_dir / "styles",
         context.run_dir / "assets",
+        context.run_dir / "analysis",
     ):
         if directory.is_dir():
             files.extend(path for path in directory.rglob("*") if path.is_file())
@@ -1019,6 +1038,8 @@ def _save_package(
         "visual_review_status": "unverified",
         "layers": layer_info,
         "layout": layout_info,
+        "map_id": payload.get("map_id", ""),
+        "analysis": facts,
         "files": sorted({path.relative_to(context.run_dir).as_posix() for path in files}),
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1035,6 +1056,7 @@ def _save_package(
         "primary_map": str(preview),
         "layers": layer_info,
         "layout": manifest["layout"],
+        "analysis": facts,
     }
 
 

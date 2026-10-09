@@ -191,7 +191,7 @@ _TOOL_CATALOG = """\
 - **geo_raster_data**: Load/inspect local raster files (GeoTIFF/IMG/ASC/VRT)
   - Actions: list, inspect, stats
 - **geo_cartography**: Default PNG/PDF uses a structured QGIS layout and editable project
-  - Actions: symbolize, compose, export, full, project
+  - Actions: preflight, status, symbolize, compose, export, full, project
   - Follows bridge rules for analysis→symbolization mapping
   - Rendered maps are visually reviewed and presentation repairs are bounded by
     config.map_review.max_repairs. Pass review_task to preserve the user's map goal.
@@ -203,6 +203,11 @@ _TOOL_CATALOG = """\
     an explicit compatibility option; HTML/SVG retain their existing renderer. For Python maps,
     action=project with existing map_path and actual layer sources creates the
     engineering files without redrawing. Custom Python annotations may need QGIS edits.
+    Prefer a structured QGIS request over repeated Python scripts/source inspection for
+    standard maps. Use analysis_manifests to derive statistics/method/footer from actual
+    geo_analysis outputs. Distinguish metric CRS from display CRS. Never invent statistics.
+    Returned map_id is a persistent server UUID; use it for subsequent versions. action=status
+    reads actual stage evidence. A saved project or pixels alone cannot make quality passed.
   - Single layer: provide file_path, source_type+source_name, or geojson.
   - **MULTI-LAYER (thematic maps like 火灾态势总图)**: pass `layers` as a JSON
     array — e.g. layers='[{"source_type":"file","source_name":"西昌市行政区划"},
@@ -261,7 +266,8 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"Maximum presentation repair rounds: {config.map_review.max_repairs}.\n"
         f"All tools share a maximum of {config.map_review.max_reviews_per_request} "
         f"image reviews and {config.map_review.total_timeout_seconds:g} seconds per user "
-        f"request; each map allows {1 + config.map_review.max_repairs} versions.\n"
+        f"request; the active map workflow allows {1 + config.map_review.max_repairs} "
+        "successful render attempts. Changing aliases cannot replenish this budget.\n"
         "Prepare title, legend, layers, extent and readable labels before the first render. "
         "Use native cartography only when it preserves every required symbol class, "
         "background and annotation. Do not replace a rich custom map with a simpler "
@@ -271,7 +277,12 @@ def _build_execution_section(config: GeoConfig) -> str:
         "Set final limits/aspect before measured label placement; never give all names "
         "the same offset or put the detail panel over the main map. Provide a numbered "
         "table for omitted labels. Inspect the saved layout report before visual review. "
-        "Use one stable map_id across filenames, formats, Python and native tools. "
+        "Use the returned server map_id across filenames, formats, Python and native tools. "
+        "Prefer structured QGIS layouts and native analysis; do not repeatedly inspect "
+        "Python rendering internals for a standard map. Supply analysis_manifests for verified "
+        "output counts and methods, keeping metric/display CRS distinct. Use action=status "
+        "to report actual data/layout/visual/package/delivery stages; analysis_correctness "
+        "remains unverified because those checks do not recompute the spatial analysis. "
         "Fix a consolidated list of concrete errors/warnings; aesthetic preferences and "
         "info-only suggestions do not justify another version. After passed stop refining. "
         "On unverified or budget exhaustion stop repeated model calls, retain remaining "
@@ -310,17 +321,14 @@ def _build_bridge_rules_section(config: GeoConfig) -> str:
 
     for analysis_type, rule in config.cartography.bridge_rules.items():
         lines.append(
-            f"| {analysis_type} | {rule.render_method} | "
-            f"{rule.color_scheme} | {rule.n_classes} |"
+            f"| {analysis_type} | {rule.render_method} | {rule.color_scheme} | {rule.n_classes} |"
         )
 
     if not config.cartography.bridge_rules:
         lines.append("| (default) | categorized | Set1 | 5 |")
 
     lines.append("")
-    lines.append(
-        f"Default template: {config.cartography.default_template}"
-    )
+    lines.append(f"Default template: {config.cartography.default_template}")
     return "\n".join(lines)
 
 

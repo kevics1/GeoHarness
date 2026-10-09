@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -61,8 +62,40 @@ class GeoMapReviewTool(BaseTool):
                 output="Error: an existing PNG/JPEG/WebP map image is required.", is_error=True
             )
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        from geoharness.cartography.tracking import (
+            bind_map_job,
+            receipt_summary,
+            track_render_result,
+        )
+
+        try:
+            identity = bind_map_job(context, arguments.map_id, path)
+            from geoharness.cartography.jobs import map_job_receipt
+
+            existing = await asyncio.to_thread(
+                map_job_receipt,
+                context.metadata,
+                cwd=context.cwd,
+                config=config,
+                map_id=identity,
+                artifact_path=path,
+            )
+            if not any(
+                version.get("image_sha256") == digest for version in existing.get("versions", [])
+            ):
+                registered = await asyncio.to_thread(
+                    track_render_result,
+                    ToolResult(output="Existing map retained", metadata={"output_path": str(path)}),
+                    context,
+                    identity,
+                )
+                if registered.is_error:
+                    return registered
+        except (OSError, ValueError) as exc:
+            return ToolResult(output=f"Error: map receipt unavailable: {exc}", is_error=True)
         evidence = dict(arguments.evidence)
         layout_status = "unverified"
+        measured_layout = None
         layout_issues = []
         layout_path = path.with_suffix(".layout.json")
         if layout_path.is_file():
@@ -73,21 +106,33 @@ class GeoMapReviewTool(BaseTool):
                     and layout.get("scope") == "layout_geometry"
                 ):
                     keys = (
-                        "panel_overlaps", "label_overlaps", "clipped_labels", "overflow_text",
-                        "figure_text_overlaps", "clipped_figure_text", "text_panel_overlaps",
+                        "panel_overlaps",
+                        "label_overlaps",
+                        "clipped_labels",
+                        "overflow_text",
+                        "figure_text_overlaps",
+                        "clipped_figure_text",
+                        "text_panel_overlaps",
                         "panels_outside_canvas",
                     )
+                    if not all(isinstance(layout.get(key), list) for key in keys):
+                        raise ValueError("Layout geometry report has incomplete measured fields.")
+                    measured_layout = {**layout, "report_path": str(layout_path)}
                     for key in keys:
                         if layout.get(key):
-                            layout_issues.append(MapIssue(
-                                severity="error", location=key,
-                                description=(
-                                    f"Measured layout defect: {key}, count={len(layout[key])}."
-                                ),
-                            ))
+                            layout_issues.append(
+                                MapIssue(
+                                    severity="error",
+                                    location=key,
+                                    description=(
+                                        f"Measured layout defect: {key}, count={len(layout[key])}."
+                                    ),
+                                )
+                            )
                     layout_status = "issues" if layout_issues else "passed"
                     evidence["measured_layout"] = {
-                        "scope": "layout_geometry", "status": layout_status,
+                        "scope": "layout_geometry",
+                        "status": layout_status,
                         **{key: layout.get(key, []) for key in keys},
                     }
             except (OSError, ValueError, TypeError, AttributeError):
@@ -95,27 +140,71 @@ class GeoMapReviewTool(BaseTool):
         if layout_issues:
             # Fix known collisions first; avoid paying for an image already known to fail.
             result = MapReview(
-                status="issues", summary="Layout geometry has collisions or clipped content; "
-                "repair these before requesting visual review.", issues=layout_issues,
+                status="issues",
+                summary="Layout geometry has collisions or clipped content; "
+                "repair these before requesting visual review.",
+                issues=layout_issues,
             )
-            budget = {"review_cached": False, "review_budget_exhausted": False,
-                      "image_sha256": digest, "visual_review_status": "unverified"}
-            context.metadata.setdefault("map_workflow_state", {}).setdefault(
-                "cache", {}
-            )[digest] = result.model_dump()
+            budget = {
+                "review_cached": False,
+                "review_budget_exhausted": False,
+                "image_sha256": digest,
+                "visual_review_status": "unverified",
+            }
+            context.metadata.setdefault("map_workflow_state", {}).setdefault("cache", {})[
+                digest
+            ] = result.model_dump()
         else:
             result, budget = await review_with_budget(
-                path, config=config, task=arguments.task, evidence=evidence,
+                path,
+                config=config,
+                task=arguments.task,
+                evidence=evidence,
                 retry_invalid_response=arguments.retry_invalid_response,
-                metadata=context.metadata, map_id=arguments.map_id,
+                metadata=context.metadata,
+                map_id=identity,
                 client=context.metadata.get("map_review_client"),
             )
-        report = save_review(path, {"image_path": str(path), **result.model_dump(), **budget,
-                                    "layout_status": layout_status})
+        report = save_review(
+            path,
+            {
+                "image_path": str(path),
+                **result.model_dump(),
+                **budget,
+                "layout_status": layout_status,
+            },
+        )
+        from geoharness.cartography.jobs import record_map_review
+
+        try:
+            receipt = await asyncio.to_thread(
+                record_map_review,
+                identity,
+                context.metadata,
+                cwd=context.cwd,
+                config=config,
+                image_path=path,
+                review={
+                    "image_sha256": digest,
+                    "review_path": str(report),
+                    **result.model_dump(),
+                    "visual_review_status": budget.get("visual_review_status", result.status),
+                },
+                layout_status=layout_status if layout_status != "unverified" else None,
+                measured_layout=measured_layout,
+            )
+        except (OSError, ValueError) as exc:
+            return ToolResult(
+                output=f"Review retained at {report}; receipt update failed: {exc}",
+                is_error=True,
+                metadata={"review_path": str(report)},
+            )
         return ToolResult(
             output=(
                 result.model_dump_json(indent=2)
-                + f"\nReport: {report}\n"
+                + f"\nReport: {report}\nMap receipt: "
+                + json.dumps(receipt_summary(receipt), ensure_ascii=False)
+                + "\n"
                 + (
                     "Unchanged image: cached result; do not retry.\n"
                     if budget["review_cached"]
@@ -132,6 +221,8 @@ class GeoMapReviewTool(BaseTool):
                 "review_path": str(report),
                 "image_path": str(path),
                 "layout_status": layout_status,
+                "map_id": identity,
+                "map_receipt": receipt,
                 **budget,
             },
         )
