@@ -10,6 +10,38 @@ import pytest
 
 from geoharness.cartography.preflight import to_imshow_extent, validate_frames
 
+
+def test_datetime_categories_normalize_on_a_copy():
+    import pandas as pd
+
+    original = gpd.GeoDataFrame(
+        {"time": pd.to_datetime(["2020-03-30 19:00", None])},
+        geometry=[geometry.Point(101, 28), geometry.Point(101.1, 28.1)], crs=4326,
+    )
+    frame = {"gdf": original, "style": {
+        "renderer": "categorized", "field": "time",
+        "categories": [{"value": "2020/03/30 19:00:00.000"}, {"value": None}],
+    }}
+    validate_frames([frame], map_crs="EPSG:4326")
+    assert frame["gdf"]["time"].tolist() == ["2020-03-30T19:00:00", None]
+    assert frame["style"]["categories"][0]["value"] == "2020-03-30T19:00:00"
+    assert str(original["time"].dtype).startswith("datetime64")
+    json.loads(frame["gdf"].to_json())
+
+
+def test_mixed_date_field_preserves_ordinary_strings_and_timezone():
+    import pandas as pd
+
+    from geoharness.cartography.values import normalize_frame
+
+    original = gpd.GeoDataFrame(
+        {"time": [pd.Timestamp("2020-03-30T19:00:00+08:00"), "unknown", pd.NA]},
+        geometry=[geometry.Point(101, 28)] * 3, crs=4326,
+    )
+    normalized = normalize_frame(original)
+    assert normalized["time"].tolist() == ["2020-03-30T19:00:00+08:00", "unknown", None]
+    assert isinstance(original.loc[0, "time"], pd.Timestamp)
+
 gpd = pytest.importorskip("geopandas")
 geometry = pytest.importorskip("shapely.geometry")
 

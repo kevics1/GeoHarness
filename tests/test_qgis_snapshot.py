@@ -33,6 +33,31 @@ def _vector(path, *, changed=False, count=1):
     ).to_file(path, driver="GeoJSON")
 
 
+async def test_datetime_categories_reach_frozen_worker_as_matching_strings(tmp_path, monkeypatch):
+    source = tmp_path / "time.geojson"
+    source.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [101, 28]},
+         "properties": {"time": "2020/03/30 19:00:00.000"}},
+    ]}), encoding="utf-8")
+    original = source.read_bytes()
+
+    async def runner(action, payload, **kwargs):
+        spec = payload["layers"][0]
+        frame = gpd.read_file(spec["file_path"], layer=spec["layer_name"])
+        assert frame["time"].tolist() == ["2020-03-30T19:00:00"]
+        assert spec["style"]["categories"][0]["value"] == frame["time"].iloc[0]
+        return {"status": "succeeded", "result": {}}
+
+    monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
+    arguments = GeoQgisProjectInput(action="create", layers=[{
+        "file_path": str(source), "style": {"renderer": "categorized", "field": "time",
+        "categories": [{"value": "2020/03/30 19:00:00.000", "color": "#ff0000"}]},
+    }])
+    result = await GeoQgisProjectTool().execute(arguments, _context(tmp_path))
+    assert not result.is_error, result.output
+    assert source.read_bytes() == original
+
+
 @pytest.mark.parametrize("new_count", [1, 2])
 async def test_create_worker_uses_preflight_vector_after_original_changes(
     tmp_path, monkeypatch, new_count,

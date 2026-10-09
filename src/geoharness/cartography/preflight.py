@@ -20,6 +20,7 @@ from shapely import get_coordinates
 from shapely.geometry import box
 
 from geoharness._proj_fix import ensure_proj_data
+from geoharness.cartography.values import normalize_frame, normalize_style
 
 _BOUND_NAMES = ("xmin", "ymin", "xmax", "ymax")
 _FIELD_LIMIT = 64
@@ -232,6 +233,9 @@ def _vector(frame: dict, label: str, required: bool, coerce_numeric: bool) -> di
         raise ValueError(f"Layer {label!r} has no active geometry column.") from exc
     if not gdf.columns.is_unique:
         raise ValueError(f"Layer {label!r} fields must have unique names.")
+    gdf = normalize_frame(gdf)
+    frame["gdf"] = gdf
+    frame["style"] = normalize_style(gdf, frame.get("style") or {})
     source_crs = _crs(gdf.crs, name=f"Layer {label!r}")
     count = len(gdf)
     expected = _count_option(frame, "expected_feature_count", None, label)

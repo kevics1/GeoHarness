@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from geoharness.cartography.values import TEMPORAL_FIELDS, normalize_frame
+
 
 def _digest(path: Path) -> str:
     digest = hashlib.sha256()
@@ -20,7 +22,7 @@ def _digest(path: Path) -> str:
 class FrozenQgisInputs:
     directory: Path
     layers: list[dict[str, str]]
-    original_sources: list[dict[str, str]]
+    original_sources: list[dict[str, Any]]
     source_digests: dict[Path, str]
 
     def remember_source(self, path: Path) -> None:
@@ -90,6 +92,8 @@ def freeze_qgis_inputs(
                 selector, value = options.split("=", 1)
                 selected = int(value) if selector == "layerid" else value
             frame = gpd.read_file(path, **({"layer": selected} if selected != "" else {}))
+            frame = normalize_frame(frame)
+            snapshot.original_sources[-1]["temporal_fields"] = frame.attrs[TEMPORAL_FIELDS]
             target = snapshot.directory / f"layer_{index}.gpkg"
             layer_name = f"layer_{index}"
             # GPKG's default fid/geom names must not consume existing business fields.

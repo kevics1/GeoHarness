@@ -8,6 +8,7 @@ no original output fingerprints and therefore receive a narrower verification.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import re
@@ -18,6 +19,7 @@ from pyproj import CRS
 
 from geoharness._proj_fix import ensure_proj_data
 from geoharness.analysis.vector import _COUNT_SEMANTICS
+from geoharness.cartography.values import frame_content
 from geoharness.qgis.worker_context import WorkerContext
 
 _ACTIONS = {"buffer", "clip", "intersection", "distance", "count", "impact"}
@@ -225,7 +227,8 @@ def _read_outputs(
                         "Analysis output feature_count disagrees with actual features."
                     )
                 fingerprint["feature_count"] = len(features)
-                outputs[label] = {"path": path, "features": features, "content": _content(features)}
+                outputs[label] = {"path": path, "features": features,
+                                  "content": _content(features), "bytes": data}
         fingerprints[label] = fingerprint
     return outputs, fingerprints, "sha256_verified" if has_hashes else "legacy_count_verified"
 
@@ -295,9 +298,22 @@ def _mapped_outputs(
 
             if not isinstance(cached, gpd.GeoDataFrame) or cached.crs is None:
                 raise ValueError("Mapped analysis evidence requires a declared GeoDataFrame CRS.")
-            cached_content = _content(_features(json.loads(cached.to_crs(4326).to_json())))
             candidates = exact or list(outputs)
-            if not any(cached_content == outputs[label]["content"] for label in candidates):
+            matching = []
+            for label in candidates:
+                output = outputs[label]
+                features = output["features"]
+                generated_ids = (
+                    [f["id"] for f in features]
+                    if features and all("id" in f and "id" not in f["properties"]
+                                        for f in features) else None
+                )
+                if "driver_content" not in output:
+                    verified = gpd.read_file(io.BytesIO(output["bytes"]))
+                    output["driver_content"] = frame_content(verified, generated_ids=generated_ids)
+                if frame_content(cached, generated_ids=generated_ids) == output["driver_content"]:
+                    matching.append(label)
+            if not matching:
                 if exact:
                     raise ValueError("Mapped data changed after it was loaded; rerun preflight.")
                 continue

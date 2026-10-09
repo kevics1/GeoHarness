@@ -93,6 +93,35 @@ def test_cached_mapped_features_must_match_manifest_outputs(tmp_path):
         )
 
 
+@pytest.mark.parametrize("business_id", [False, True])
+def test_driver_datetime_and_feature_id_roundtrip_preserves_evidence(tmp_path, business_id):
+    manifest = _analysis(tmp_path, "distance")
+    entry = manifest["paths"]["result"]
+    path = Path(entry["geojson"])
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for index, feature in enumerate(document["features"]):
+        feature["properties"]["time"] = "2020/03/30 19:00:00.000" if index == 0 else None
+        if business_id:
+            feature["properties"]["id"] = "business-" + str(index)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    entry["geojson_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    _write_manifest(manifest)
+    cached = gpd.read_file(path)
+    assert str(cached["time"].dtype).startswith("datetime64")
+    facts = load_analysis_facts(
+        [manifest["manifest_path"]], cwd=tmp_path, read_roots=[tmp_path],
+        mapped_sources=[{"file_path": str(path), "gdf": cached}], display_crs="EPSG:3857",
+    )
+    assert facts["status"] == "verified"
+    assert entry["geojson_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    cached.loc[0, "id"] = "changed-id"
+    with pytest.raises(ValueError, match="changed after it was loaded"):
+        load_analysis_facts(
+            [manifest["manifest_path"]], cwd=tmp_path, read_roots=[tmp_path],
+            mapped_sources=[{"file_path": str(path), "gdf": cached}], display_crs="EPSG:3857",
+        )
+
+
 def test_impact_facts_use_real_counts_distinct_crs_and_output_fingerprints(tmp_path):
     manifest = _analysis(tmp_path, zones=True)
     facts = _facts(tmp_path, manifest)

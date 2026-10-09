@@ -16,6 +16,7 @@ from geoharness.cartography.project import _vector_style
 from geoharness.cartography.quality import save_review
 from geoharness.cartography.renderer import _layer_style_options
 from geoharness.cartography.sources import resolve_geodataframe
+from geoharness.cartography.values import normalize_frame, normalize_style
 from geoharness.cartography.workflow import review_with_budget
 from geoharness.files.publication import publish_directory
 from geoharness.tools.geo_qgis_project import (
@@ -74,6 +75,8 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
                 **rule,
             }
         )
+        gdf = normalize_frame(gdf)
+        options = normalize_style(gdf, options)
         gdf, derived = _vector_style(gdf, options, "layers" if args.layers else "single")
         styles = {
             "singleSymbol": "single",

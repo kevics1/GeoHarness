@@ -405,6 +405,17 @@ class GeoQgisProjectTool(BaseTool):
             "layers": [layer.model_copy(update=updates)
                        for layer, updates in zip(arguments.layers, snapshot.layers)],
         })
+        from geoharness.cartography.values import TEMPORAL_FIELDS, normalize_style
+
+        for layer, original in zip(frozen.layers, snapshot.original_sources):
+            if layer.style and original.get("temporal_fields"):
+                import geopandas as gpd
+
+                frame = gpd.read_file(layer.file_path, layer=layer.layer_name)
+                frame.attrs[TEMPORAL_FIELDS] = original["temporal_fields"]
+                layer.style = type(layer.style).model_validate(
+                    normalize_style(frame, layer.style.model_dump())
+                )
         report = self._preflight(frozen, context, snapshot=snapshot)
         # Analysis evidence was checked at original locators, against frozen GDFs.
         # Sources may change after this point: the worker only uses the snapshots.
@@ -444,6 +455,12 @@ class GeoQgisProjectTool(BaseTool):
                     selector, selected = options.split("=", 1)
                     name = int(selected) if selector == "layerid" else selected
                 gdf = gpd.read_file(path, **({"layer": name} if name else {}))
+                if snapshot:
+                    from geoharness.cartography.values import TEMPORAL_FIELDS
+
+                    gdf.attrs[TEMPORAL_FIELDS] = snapshot.original_sources[index].get(
+                        "temporal_fields", []
+                    )
                 frames.append({**common, "gdf": gdf, "label_field": layer.label_field,
                                "style": layer.style.model_dump() if layer.style else {}})
                 original_path = snapshot.original_sources[index]["file_path"] if snapshot else (
