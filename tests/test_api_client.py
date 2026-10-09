@@ -426,6 +426,54 @@ def tool_delta(arguments, *, index=0, name="geo_python", tool_id="call-invalid")
 
 
 @pytest.mark.asyncio
+async def test_truncated_call_recovers_once_without_repeating_valid_sibling(monkeypatch):
+    client, calls = mock_client(monkeypatch, [streamed(chunk(
+        text="Checking data", tool_calls=[tool_delta('{"code":"print('),
+            tool_delta('{"code":"print(1)"}', index=1, tool_id="call-valid")],
+        finish="length", usage=(12, 16384))), streamed(chunk(
+        text="Discard repair narration", tool_calls=[tool_delta('{"code":"print(2)"}',
+            name="geoharness_repair_0", tool_id="repair-new-id")],
+        finish="tool_calls", usage=(20, 60)))],
+        empty_response_fallback_model="configured-alternative")
+    events = [event async for event in client.stream_message(request())]
+    final = events[-1]
+    assert len(calls) == 2
+    assert calls[1]["model"] == "configured-alternative"
+    assert [tool["function"]["name"] for tool in calls[1]["tools"]] == ["geoharness_repair_0"]
+    assert [(tool.id, tool.input) for tool in final.message.tool_uses] == [
+        ("call-invalid", {"code": "print(2)"}), ("call-valid", {"code": "print(1)"})]
+    assert final.message.text == "Checking data"
+    assert final.usage.total_tokens == 16476
+    assert client.last_tool_argument_diagnostics[0]["recovered"] is True
+    assert any(isinstance(event, ApiRetryEvent) for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", ["invalid", "transport", "unexpected", "duplicate", "blank"])
+async def test_failed_argument_recovery_stays_bounded_and_retains_original_calls(
+    monkeypatch, second,
+):
+    arguments = ('{"code":"print(' if second == "invalid" else
+                 '{"code":" "}' if second == "blank" else '{"code":"print(9)"}')
+    name = "unrelated_tool" if second == "unexpected" else "geoharness_repair_0"
+    repair_calls = [tool_delta(arguments, name=name)]
+    if second == "duplicate":
+        repair_calls.append(tool_delta(arguments, name=name, index=1, tool_id="duplicate"))
+    recovery = (streamed(RuntimeError("transport broke")) if second == "transport" else
+        streamed(chunk(tool_calls=repair_calls,
+            finish="length", usage=(5, 10))))
+    client, calls = mock_client(monkeypatch, [streamed(chunk(
+        tool_calls=[tool_delta('{"code":"print('),
+            tool_delta('{"code":"print(1)"}', index=1, tool_id="call-valid")],
+        finish="length", usage=(10, 20))), recovery])
+    final = [event async for event in client.stream_message(request())][-1]
+    assert len(calls) == 2
+    assert "_geoharness_argument_error" in final.message.tool_uses[0].input
+    assert final.message.tool_uses[1].input == {"code": "print(1)"}
+    assert final.usage.total_tokens == (30 if second == "transport" else 45)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("arguments", "category", "finish"), [
     ('{"code":"print(', "invalid_json", "length"),
     ("{}", "missing_required_arguments", "tool_calls"),
@@ -437,7 +485,7 @@ async def test_invalid_tool_arguments_are_rejected_before_tools_can_execute(
 ):
     client, calls = mock_client(monkeypatch, [streamed(chunk(
         tool_calls=[tool_delta(arguments)], finish=finish, usage=(12, 16384),
-    ))], empty_response_fallback_model="configured-alternative")
+    ))], empty_response_fallback_model="configured-alternative", tool_argument_retries=0)
     events = [event async for event in client.stream_message(request())]
     final = events[-1]
     assert isinstance(final, ApiMessageCompleteEvent)
@@ -463,7 +511,7 @@ async def test_rejecting_invalid_parallel_call_keeps_valid_calls_and_streamed_te
         chunk(text="data", tool_calls=[tool_delta(
             json.dumps({"code": "print(1)"}), index=1, tool_id="call-valid",
         )], finish="length", usage=(12, 40)),
-    )])
+    )], tool_argument_retries=0)
     events = [event async for event in client.stream_message(request())]
     assert [event.text for event in events[:-1]] == ["Checking ", "data"]
     assert len(events[-1].message.tool_uses) == 2
@@ -589,7 +637,7 @@ async def test_invalid_arguments_continue_through_error_result_without_repeating
             tool_delta(json.dumps({"code": "valid once"}), index=1, tool_id="call-valid"),
         ], finish="length", usage=(12, 40))),
         streamed(chunk(tool_calls=[tool_delta(
-            json.dumps({"code": "repaired"}), tool_id="call-repaired",
+            json.dumps({"code": "repaired"}), tool_id="call-repaired", name="geoharness_repair_0",
         )], finish="tool_calls", usage=(18, 5))),
         streamed(chunk(text="Done", finish="stop", usage=(20, 2))),
     ], empty_response_fallback_model="configured-alternative")
@@ -603,15 +651,13 @@ async def test_invalid_arguments_continue_through_error_result_without_repeating
         max_turns=4,
     )
     _ = [event async for event in engine.submit_message("make a map")]
-    assert tool.calls == ["valid once", "repaired"]
+    assert tool.calls == ["repaired", "valid once"]
     assert len(calls) == 3
     results = [block for message in engine.messages for block in message.content
                if isinstance(block, ToolResultBlock)]
     invalid = next(block for block in results if block.tool_use_id == "call-invalid")
-    assert invalid.is_error
-    assert "invalid_json" in invalid.content
-    assert "json_error_position" in invalid.content
-    assert "no script was executed" in invalid.content
+    assert not invalid.is_error
+    assert invalid.content == "completed synthetic execution"
     assert "cut off" not in invalid.content
     assert engine.messages[-1].text == "Done"
     assert engine.total_usage.total_tokens == 97

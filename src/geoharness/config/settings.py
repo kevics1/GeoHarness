@@ -66,6 +66,10 @@ class AgentConfig(BaseModel):
     empty_response_fallback_model: str = ""
     empty_response_fallback_extra_body: dict[str, Any] = Field(default_factory=dict)
     empty_response_max_tokens: int | None = Field(default=None, ge=256, le=65536)
+    tool_argument_retries: int = Field(default=1, ge=0, le=1, description=(
+        "One targeted recovery for truncated invalid JSON calls; complete sibling calls "
+        "and prior tool results are preserved. Uses the configured empty-response fallback."
+    ))
 
     @field_validator("request_extra_body", "empty_response_fallback_extra_body")
     @classmethod

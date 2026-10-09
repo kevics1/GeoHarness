@@ -173,3 +173,8 @@
 - test01 原始12图层冻结请求以修复代码执行预检/新建/重新导出成功：侧栏58→63.998mm、详图比例0.4→0.3657；重导PNG摘要一致。证据：C:/Users/Administrator/AppData/Local/Temp/geoharness-test01-fixed-layout-t4oxuwdn/verification.json。原数据和旧交付未改。
 - 相关原有55项通过，新增多图层适配回归通过；ruff/CLI dry-run通过。初始测试12个带重复分组的分类图层确实超过A4可用高度，不能作为应当适配成功的输入；缩小到可容纳的10层案例并保留关闭auto-fit的失败诊断检验。
 - 阶段1独立评审补充：现存布局参数按实际元素读取，创建参数单列；页单位转换为mm，文字保留value/unit，仅Points提供pt，避免用户在QGIS换单位后返回错误尺寸。真实12x8inch、6mm图例的保存/重新导出回归通过；评审发现的边界已关闭。
+
+### 四项改进阶段2
+- length/max_tokens+invalid_json调用最多一次定向恢复；修复接口按原调用独立别名，成功后映射回原ID，保留同批完整调用和历史结果。缺字段/非对象JSON保留原拒绝逻辑，完整JSON即使length也正常执行。
+- 恢复模型和预算沿用既有配置，主模型不变；恢复消息仅开放残缺调用schema，传输不额外自动重试。失败或重复修复不执行，usage包含两次请求且可取消。
+- 真实上游parser+engine共38项回归通过，覆盖并行完整调用只执行一次、原ID保留、恢复未完成/意外工具/传输失败、token结算。原生单位回归中发现sizeForText返回QSizeF，已保留其mm测量（不能交给QgsLayoutSize转换器）；重新验证中。

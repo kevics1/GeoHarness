@@ -106,6 +106,8 @@ agent:
 服务没有返回用量时无法准确统计。恢复期间取消仍结算服务已经返回的用量；正文传输中断
 会保留收到的部分内容，并明确提示回答尚未完成，残缺的工具调用不会执行。
 
+工具调用因 `finish_reason=length/max_tokens` 返回残缺 JSON 时，默认还有一次定向参数恢复（`agent.tool_argument_retries: 1`，设0关闭）。恢复请求仅开放对应的修复接口，沿用配置的空回复恢复模式，完整调用和已有结果不重复执行；恢复后仍不完整、出现重复或传输失败时保留原诊断并拒绝该调用。恢复花费的 token 纳入本次记账；主模型配置不变。
+
 React TUI 中，停止、关闭或回收模型流会及时释放网络连接。模型重试流可由不同任务
 关闭，不再因 `ContextVar` token 的上下文不一致而产生后台异常。若本轮运行出现未捕获
 的异常，后端会显示一次具体错误并结束本轮，界面恢复输入状态；可以继续输入，
@@ -325,6 +327,8 @@ geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付�
 提供 `qgis_layout`/`layout` 的预检会在独立 QGIS 进程中测量真实字体、比例尺、图例与面板，不导出地图或工程、不占成图次数。仅检查数据且未提供布局时，预检保持无 QGIS 依赖。新建底栏根据实际可用宽度换行，按文字和比例尺高度扩展；页面放不下时，明确要求缩短备注或扩大页面。已保存工程的导出保留用户布局，不自动改写文字。
 
 新建布局默认启用 `legend_auto_fit`：根据 QGIS 实测图例尺寸加宽侧栏或缩短详图，详图至少保留20mm；不缩字号、不删类别、不自动改变纸张。仍放不下时返回 `content_metrics` 的必需/可用尺寸与实际字体证据。`effective_parameters`、`adaptations` 记录最终参数及调整原因。`legend_font_size_pt` 单独控制图例，`body_font_size_pt` 控制底栏；同时传常规 `layout.legend_font_size` 时，只有明确的 `qgis_layout.legend_font_size_pt` 优先于它。
+
+工程编辑后的有效参数读取实际元素；纸张尺寸统一为mm，文字保留实际值与单位，仅Points字号另提供pt字段。`creation_parameters` 保存创建模板参数。硬布局检查支持毫米场景；用户将整个布局场景单位改成其他单位时，导出保留布局，检查状态为未核验并返回原因，不误报通过。
 
 QGIS 原生新建/导出标记 `project_fidelity=saved_layout`，PNG、PDF 和预览从保存后重新打开的同一布局导出。给现有 Python/Matplotlib 图片补工程的 `action=project` 保留兼容，标记 `project_fidelity=reference`：QGIS 布局是参考布局，包内预览是原图副本，不能据此认定两者一致。需要同源交付请使用默认 QGIS 制图，再检查实际预览。
 
