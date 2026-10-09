@@ -31,4 +31,12 @@
 
 ## 验证状态
 
-阶段回归通过：Python 执行与权限 48 项；分析/事实/版本/交付初步整合 127 项；追加边界后相关整合 145 项、版本交付 30 项。最终评审确认的三处交付边界已修补：报告副本改动后恢复源仍标 changed/draft；selected 仅按 ID 能交付当前问题草稿；原位用户编辑不会被自动替换。最终交付相关 59 项、评审独立 7 项通过，独立审查无未解决确定缺陷（另有 175 项相关验证）。ruff 和 diff 检查通过。完整回归、全局安装及跨目录 CLI 验证待最终记录。
+阶段回归通过：Python 执行与权限 48 项；分析/事实/版本/交付初步整合 127 项；追加边界后相关整合 145 项、版本交付 30 项。最终评审确认的三处交付边界已修补：报告副本改动后恢复源仍标 changed/draft；selected 仅按 ID 能交付当前问题草稿；原位用户编辑不会被自动替换。最终交付相关 59 项、评审独立 7 项通过，独立审查无未解决确定缺陷（另有 175 项相关验证）。
+
+最终全量 **983 passed**，耗时 907.99 秒；195 条警告为依赖弃用及缺 CRS 测试夹具提示，零失败。ruff 与 diff 检查通过。主模型/凭证保持原配置，不修改上游 OpenHarness。
+
+全局 wheel 已更新到 `D:/Python312/Lib/site-packages/geoharness`，69 个 Python 模块和 6 份技能与源码逐字节一致。验证记录：`C:/Users/Administrator/AppData/Local/Temp/geoharness-final-wheel-04df372281eb45aeb3df2b03b7beb317/install-verification.json`。
+
+从 `F:/Desktop/Project/GeoHarness/example/test01` 启动安装版 `geoh version`、`geoh dry-run` 和 `geoh qgis-doctor` 均成功；15 个原生工具、QGIS 3.44.7 的 440 个算法可用，QGIS stderr 为空。真实 `geoh run --print --prompt ...` 中两项 MCP 连接成功，主模型仍为 `cbcn/deepseek-v4.1-flash(max)`；一次 geo_python 调用打印 WindowsPath、WindowsPath、list 后正常回复并以 0 退出，没有本次空回复/ContextVar异常，没有创建 `.openharness`。运行记录：`test01/.geoharness/runs/env_check-20261009T153536Z-8b7077d5529c/`。
+
+该启动验收只检查类型与工具链，未读取业务数据或生成业务地图。新建地图仍需要实际视觉审查；旧参考工程不会因安装更新自动变为与 Python 图片同源。

@@ -192,3 +192,6 @@
 - 验证证据C:/Users/Administrator/AppData/Local/Temp/geoharness-test01-area-layout-t6wer56a/verification.json；完整业务图未重绘。四项修复已完成，最终全量回归和只读审查正在执行，随后构建安装并跨目录验证。
 - 最后独立只读审查运行175项相关测试，确认三个交付边界：复制时报告改变后恢复、selected仅按ID无法选当前版、原位编辑被路径关联误当作可替换登记图。均已修补，报告摘要加入副本校验，selected按ID支持当前图，自动替换资格使用实际摘要匹配；59项交付回归、评审独立7项复核通过，无未解决确定缺陷。阶段3权限/契约与area复算亦经本轮独立审查。
 - 首轮全量运行在评审新发现修复前中止，不作为通过结果；已用最终源码重新启动全量。此前构建wheel待重建后再安装，未安装中间版本。
+- 最终全量983 passed（907.99秒），195条警告来自pyproj/Typer弃用及缺CRS测试夹具提示；ruff与diff检查通过。最后技能说明明确晕渲/详图/标签优先用QGIS，避免将原生已支持的需求自动转为Python。
+- 最终wheel构建/安装完成，D:/Python312/Lib/site-packages/geoharness的69个模块和6份技能逐字节与当前源码一致。安装证据C:/Users/Administrator/AppData/Local/Temp/geoharness-final-wheel-04df372281eb45aeb3df2b03b7beb317/install-verification.json。
+- 在F:/Desktop/Project/GeoHarness/example/test01运行安装版version/dry-run通过，QGIS3.44.7/440算法可用、stderr为空；实际主模型max调用geo_python成功，输出WindowsPath/WindowsPath/list并正常回复exit0，双MCP连接成功，未出现空回复/ContextVar异常，未创建.openharness。实际运行证据.geoharness/runs/env_check-20261009T153536Z-8b7077d5529c/。未复绘完整业务图、不把未视觉检查的核验图称为合格地图。
