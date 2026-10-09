@@ -172,3 +172,4 @@
 - 图例字号独立于底栏，常规字号能够进入原生布局；原生包 saved_layout，旧图片补工程 reference，工具/README/清单明确不同源。
 - test01 原始12图层冻结请求以修复代码执行预检/新建/重新导出成功：侧栏58→63.998mm、详图比例0.4→0.3657；重导PNG摘要一致。证据：C:/Users/Administrator/AppData/Local/Temp/geoharness-test01-fixed-layout-t4oxuwdn/verification.json。原数据和旧交付未改。
 - 相关原有55项通过，新增多图层适配回归通过；ruff/CLI dry-run通过。初始测试12个带重复分组的分类图层确实超过A4可用高度，不能作为应当适配成功的输入；缩小到可容纳的10层案例并保留关闭auto-fit的失败诊断检验。
+- 阶段1独立评审补充：现存布局参数按实际元素读取，创建参数单列；页单位转换为mm，文字保留value/unit，仅Points提供pt，避免用户在QGIS换单位后返回错误尺寸。真实12x8inch、6mm图例的保存/重新导出回归通过；评审发现的边界已关闭。

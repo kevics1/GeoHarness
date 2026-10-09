@@ -847,6 +847,7 @@ def _rectangle_problems(
 
 def _layout_bounds(layout: Any) -> dict[str, Any]:
     from qgis.core import (
+        Qgis,
         QgsLayoutItem,
         QgsLayoutItemLabel,
         QgsLayoutItemLegend,
@@ -856,7 +857,8 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
 
     if layout.customProperty("geoharness/template", "") != "structured-v1":
         return {"checked": False, "valid": None, "problems": []}
-    page = layout.pageCollection().page(0).pageSize()
+    page = layout.renderContext().measurementConverter().convert(
+        layout.pageCollection().page(0).pageSize(), Qgis.LayoutUnit.Millimeters)
     regions = json.loads(layout.customProperty("geoharness/regions", "{}"))
     rectangles = {}
     user_items = {}
@@ -925,8 +927,17 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
     maps = []
     scale_bars = []
     page = layout.pageCollection().page(0)
-    effective = ({"width_mm": page.pageSize().width(), "height_mm": page.pageSize().height()}
-                 if page else {})
+    converter = layout.renderContext().measurementConverter()
+    page_size = converter.convert(page.pageSize(), Qgis.LayoutUnit.Millimeters) if page else None
+    effective = ({"width_mm": page_size.width(), "height_mm": page_size.height()}
+                 if page_size else {})
+
+    def record_font(key: str, text_format: Any) -> None:
+        effective[key] = {"value": text_format.size(), "unit": text_format.sizeUnit().name}
+        if text_format.sizeUnit() == Qgis.RenderUnit.Points:
+            effective[key + "_pt"] = text_format.size()
+        else:
+            effective.pop(key + "_pt", None)
     for item in layout.items():
         if isinstance(item, QgsLayoutItemMap):
             extent = item.extent()
@@ -951,15 +962,16 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                     item.rect().height() / main.rect().height())
         elif isinstance(item, QgsLayoutItemLegend):
             effective["sidebar_width_mm"] = item.rect().width()
-            effective["legend_font_size_pt"] = item.style(
-                Qgis.LegendComponent.SymbolLabel).textFormat().size()
+            record_font("legend_font_size", item.style(
+                Qgis.LegendComponent.SymbolLabel).textFormat())
         elif isinstance(item, QgsLayoutItemLabel):
             key = {"title": "title_font_size_pt", "footer_text": "body_font_size_pt"}.get(
                 item.id())
             if key:
-                effective[key] = item.textFormat().size()
+                record_font(key.removesuffix("_pt"), item.textFormat())
         elif isinstance(item, QgsLayoutItemScaleBar):
-            effective.setdefault("body_font_size_pt", item.textFormat().size())
+            if "body_font_size" not in effective:
+                record_font("body_font_size", item.textFormat())
             scale_bars.append({
                 "id": item.id(), "units": item.units().name,
                 "units_per_segment": item.unitsPerSegment(), "segments": item.numberOfSegments(),

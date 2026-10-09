@@ -257,7 +257,7 @@ async def test_native_template_create_png_reopen_and_export_preserve_layout(
     script = """
 import os,sys
 from qgis.core import (
-    QgsApplication,QgsProject,QgsLayoutItemLabel,QgsLayoutPoint,QgsLayoutSize
+    QgsApplication,QgsProject,QgsLayoutItemLabel,QgsLayoutPoint,QgsLayoutSize,Qgis
 )
 QgsApplication.setPrefixPath(os.environ['QGIS_PREFIX_PATH'],True)
 app=QgsApplication([],False);app.initQgis()
@@ -270,6 +270,10 @@ note.attemptMove(QgsLayoutPoint(20,50));note.attemptResize(QgsLayoutSize(50,12))
 assert project.write()
 legend=layout.itemById('legend')
 legend.attemptMove(QgsLayoutPoint(70,55))
+layout.pageCollection().page(0).setPageSize(QgsLayoutSize(12,8,Qgis.LayoutUnit.Inches))
+style=legend.style(Qgis.LegendComponent.SymbolLabel)
+fmt=style.textFormat();fmt.setSize(6);fmt.setSizeUnit(Qgis.RenderUnit.Millimeters)
+style.setTextFormat(fmt);legend.setStyle(Qgis.LegendComponent.SymbolLabel,style)
 project.setFileName(sys.argv[2]);assert project.write()
 project.clear();app.exitQgis()
 """
@@ -303,6 +307,11 @@ project.clear();app.exitQgis()
     assert moved["result"]["layout"]["bounds_check"]["valid"] is False
     assert moved["result"]["quality_status"] == "draft"
     assert moved["result"]["layout"]["bounds_check"]["items"]["legend"][:2] == [70, 55]
+    parameters = moved["result"]["layout"]["effective_parameters"]
+    assert parameters["width_mm"] == pytest.approx(304.8)
+    assert parameters["height_mm"] == pytest.approx(203.2)
+    assert parameters["legend_font_size"] == {"value": 6, "unit": "Millimeters"}
+    assert "legend_font_size_pt" not in parameters
 
 
 @pytest.mark.parametrize("part", ["title", "legend", "footer"])
