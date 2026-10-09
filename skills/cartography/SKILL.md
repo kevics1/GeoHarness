@@ -73,7 +73,7 @@ geo_python 生成图片后调用 geo_map_review(file_path=..., task=..., evidenc
 
 geo_map_review 可登记实际图片与其布局报告，但不会给自定义脚本补造数据 preflight。缺少同图 data_checked 时，即使视觉 passed 最终也为 draft；单独跑一次预检不能自动变成当前图片的检查证明。
 
-有晕渲、放大图或密集重点标签时采用自定义布局，不能为获得工程而退回缺失要素的通用地图。使用 `geoharness.cartography.layout` 的 `create_map_figure(layout, title=..., subtitle=..., detail=True)` 预留主图、放大图、图例和说明的独立区域；先设置最终范围、比例，再用 `place_point_labels(ax, points, font_size=..., max_offset_points=...)` 测量文字边界并避让，禁止所有名字使用相同固定偏移。无法放下的标签使用编号与名单对应，不能静默丢弃重点点。`save_map_figure(page, output_path)` 保存成图及对应 SHA256 的 `.layout.json`，先处理 panel_overlaps、label_overlaps、clipped_labels、overflow_text，再进行视觉审查；布局报告仅证明已测的几何项。可参照 [Python 布局示例](references/python-layout.md)。
+晕渲、放大图和标签先使用 QGIS 的 raster_style、detail_extent、label_field/label_style；这些需求本身不需要改走 Python。需要图片与工程同源时保持原生 QGIS 路径。默认模板确实无法表达要求、已经选择 Python 自定义制图时，使用 `geoharness.cartography.layout` 的 `create_map_figure(layout, title=..., subtitle=..., detail=True)` 预留主图、放大图、图例和说明的独立区域；先设置最终范围、比例，再用 `place_point_labels(ax, points, font_size=..., max_offset_points=...)` 测量文字边界并避让，禁止所有名字使用相同固定偏移。无法放下的标签使用编号与名单对应，不能静默丢弃重点点。`save_map_figure(page, output_path)` 保存成图及对应 SHA256 的 `.layout.json`，先处理 panel_overlaps、label_overlaps、clipped_labels、overflow_text，再进行视觉审查；布局报告仅证明已测的几何项。可参照 [Python 布局示例](references/python-layout.md)。
 
 对已生成的地图，用 geo_cartography(action="project", map_path=实际图片, project_output_dir=新工程目录, layers=实际图层JSON, ...) 生成 QGIS 工程；output_path 兼容已有图片输入，该动作不重绘或审查。工程目录必须是工作区内尚不存在的新目录。传实际来源与样式，分类层明确 column/field_name、categories 和 colors，不能仅把“风险分级”写在 label 中。参数错误时修正参数，不能 action=full 另画简化图或换 map_id。工程预览必须是同一交付图；Python 自定义注记可能需在 QGIS 内参照预览补充，原脚本一并交付。
 
