@@ -149,6 +149,8 @@ class GeoDeliverTool(BaseTool):
                     selection_source = resolve(str(preview))
             initial_receipt = map_job_receipt(context.metadata, cwd=workspace, config=config,
                 map_id=arguments.map_id, artifact_path=selection_source)
+            if initial_receipt.get("job_id") and initial_receipt.get("artifact_registered"):
+                selection["selected_version"] = initial_receipt.get("selected_version")
             if (arguments.version_policy == "prefer_checked" and initial_receipt.get("job_id")
                     and initial_receipt.get("artifact_registered", False)):
                 stages = initial_receipt["stages"]
@@ -170,6 +172,13 @@ class GeoDeliverTool(BaseTool):
                         reason=candidate["reason"], project_available=bool(project_directory))
             if primary is None and not files and arguments.map_id and selection_source is not None:
                 primary = selection_source
+            elif (primary is None and not files and arguments.map_id
+                  and arguments.version_policy == "selected"
+                  and initial_receipt.get("image_path")):
+                primary = resolve(initial_receipt["image_path"])
+                packaged = initial_receipt["stages"]["packaged"]
+                if not project_directory and packaged["status"] == "passed":
+                    project_directory = packaged.get("project_dir") or ""
             if primary is not None and primary.suffix.lower() not in _MAP_SUFFIXES:
                 raise ValueError("Primary map must be a PNG/JPEG/WebP/PDF/SVG/HTML map artifact.")
             if primary is not None and primary not in files:
@@ -332,6 +341,12 @@ class GeoDeliverTool(BaseTool):
                 for item in packaged.get("files", [])
                 if item.get("sha256")
             }
+            # Rehash copied reports too: their sources can change and be restored
+            # between the two receipt reads, just like packaged data files.
+            for stage in receipt.get("stages", {}).values():
+                reference = stage.get("report_reference", {})
+                if reference.get("path") and reference.get("sha256"):
+                    expected_package[reference["path"]] = reference["sha256"]
             directory.mkdir(parents=True, exist_ok=True)
             destination = Path(tempfile.mkdtemp(prefix=arguments.name + "-", dir=directory))
             copied = []

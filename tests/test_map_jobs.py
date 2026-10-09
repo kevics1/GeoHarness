@@ -179,6 +179,12 @@ async def test_delivery_by_id_and_explicit_draft_preserve_selection_intent(tmp_p
     assert not explicit.is_error, explicit.output
     assert Path(explicit.metadata["primary_map"]).read_bytes() == bad.read_bytes()
     assert explicit.metadata["quality_status"] == "draft"
+    explicit_id = await tool.execute(GeoDeliverInput(
+        map_id=job_id, version_policy="selected"), context)
+    assert not explicit_id.is_error, explicit_id.output
+    assert Path(explicit_id.metadata["primary_map"]).read_bytes() == bad.read_bytes()
+    assert explicit_id.metadata["quality_status"] == "draft"
+    assert explicit_id.metadata["selection"]["selected_version"] == 2
     # An unrelated/new user edit must not be silently replaced just because an ID is supplied.
     unregistered = await tool.execute(GeoDeliverInput(
         map_id=job_id, primary_map=str(edited)), context)
@@ -186,6 +192,13 @@ async def test_delivery_by_id_and_explicit_draft_preserve_selection_intent(tmp_p
     assert Path(unregistered.metadata["primary_map"]).read_bytes() == edited.read_bytes()
     assert unregistered.metadata["quality_status"] == "draft"
     assert unregistered.metadata["selection"]["changed"] is False
+    bad.write_bytes(b"user edited the existing file")
+    edited_in_place = await tool.execute(GeoDeliverInput(
+        map_id=job_id, primary_map=str(bad)), context)
+    assert not edited_in_place.is_error, edited_in_place.output
+    assert Path(edited_in_place.metadata["primary_map"]).read_bytes() == bad.read_bytes()
+    assert edited_in_place.metadata["quality_status"] == "draft"
+    assert edited_in_place.metadata["selection"]["changed"] is False
 
 
 def test_candidate_excludes_changed_bound_report(tmp_path):
@@ -205,7 +218,10 @@ def test_candidate_excludes_changed_bound_report(tmp_path):
                            map_id=job_id)["delivery_candidate"] is None
 
 
-async def test_delivery_fallback_uses_older_visual_report_after_restart(tmp_path):
+@pytest.mark.parametrize("changed_during_copy", [False, True])
+async def test_delivery_fallback_uses_older_visual_report_after_restart(
+    tmp_path, monkeypatch, changed_during_copy,
+):
     from openharness.tools.base import ToolExecutionContext
 
     from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
@@ -226,10 +242,25 @@ async def test_delivery_fallback_uses_older_visual_report_after_restart(tmp_path
     failed.update(status="issues", clipped_figure_text=[{"text": "clipped"}])
     record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=failed)
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
+    if changed_during_copy:
+        copy = shutil.copy2
+
+        def mutate_then_restore(source, target):
+            if Path(source) != review_path:
+                return copy(source, target)
+            original = review_path.read_bytes()
+            try:
+                review_path.write_text("{}", encoding="utf-8")
+                return copy(source, target)
+            finally:
+                review_path.write_bytes(original)
+
+        monkeypatch.setattr("geoharness.tools.geo_deliver.shutil.copy2", mutate_then_restore)
     result = await GeoDeliverTool().execute(GeoDeliverInput(
         map_id=job_id, primary_map=str(bad)), context)
     assert not result.is_error, result.output
-    assert result.metadata["quality_status"] == "passed"
+    assert result.metadata["quality_status"] == ("draft" if changed_during_copy else "passed")
+    assert result.metadata["snapshot_status"] == ("changed" if changed_during_copy else "passed")
     assert result.metadata["review_status"] == "passed"
     assert any(Path(path).name == review_path.name for path in result.metadata["files"])
 

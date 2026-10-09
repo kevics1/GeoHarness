@@ -713,7 +713,11 @@ def _receipt(
             )
         if selected is not None:
             version = selected
-            result["artifact_registered"] = True
+            # A path still identifies stale history after an in-place user edit,
+            # but those new bytes have not been registered for automatic replacement.
+            result["artifact_registered"] = bool(
+                actual_digest and actual_digest == selected.get("image_sha256")
+            )
     if version is None:
         stages = {key: {"status": "unverified"} for key in _STAGES}
     else:
