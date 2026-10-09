@@ -341,13 +341,15 @@ def _mapped_outputs(
                 if cached is None:
                     raise ValueError("Derived map evidence requires actual cached features")
                 matches.extend({
-                    "output": label, "layer_index": index, "match": "derivation",
+                    "output": label, "layer_index": source.get("layer_index", index),
+                    "match": "derivation",
                     "source_feature_count": len(outputs[label]["features"]),
                     "mapped_feature_count": len(cached), "derivation": spec.model_dump(),
                 } for label in exact)
                 continue
             matches.extend(
-                {"output": label, "layer_index": index, "match": "path"} for label in exact
+                {"output": label, "layer_index": source.get("layer_index", index), "match": "path"}
+                for label in exact
             )
             continue
         if path.suffix.lower() not in {".geojson", ".json"}:
@@ -361,7 +363,7 @@ def _mapped_outputs(
         if _crs(declared or "EPSG:4326")[0] != CRS.from_epsg(4326):
             continue
         matches.extend(
-            {"output": label, "layer_index": index, "match": "content"}
+            {"output": label, "layer_index": source.get("layer_index", index), "match": "content"}
             for label, output in outputs.items()
             if content == output["content"]
         )
@@ -404,6 +406,33 @@ def _footer(analyses: list[dict]) -> str:
         ]
         lines.append("完整参数、计量CRS、显示CRS及验证范围见分析事实报告。")
     return "\n".join(lines)
+
+
+def infer_analysis_manifests(mapped_sources: list[dict], *, cwd: Path,
+                             read_roots: list[Path]) -> list[str]:
+    """Recognize only adjacent native manifests explicitly listing this local output."""
+    reader = _EvidenceReader(cwd, read_roots)
+    manifests = []
+    for source in mapped_sources:
+        try:
+            path = reader.path(source.get("file_path"))
+            manifest_path = reader.path(str(path.parent / "manifest.json"))
+            document = _json(reader.read(manifest_path, _MANIFEST_BYTES))
+            if not isinstance(document.get("action"), str) or (
+                document["action"] not in _ACTIONS
+            ) or not isinstance(
+                document.get("paths"), dict,
+            ):
+                continue
+            if not any(isinstance(entry, dict) and entry.get("geojson")
+                       and reader.path(entry["geojson"]) == path
+                       for entry in document["paths"].values()):
+                continue
+            if str(manifest_path) not in manifests:
+                manifests.append(str(manifest_path))
+        except ValueError:
+            continue
+    return manifests
 
 
 def load_analysis_facts(

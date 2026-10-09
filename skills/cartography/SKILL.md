@@ -13,6 +13,12 @@ description: 分析结果制图、图片检查与编辑工程交付。使用数�
 
 ## 原生制图
 
+日期分类由工具统一为保留时区的 ISO 字符串/null；不要删除 time 属性、生成 sort_order 或手写几何来绕过类型错误。需要子集、字段选择或地图注记时，在原生输出图层中传 derivation：feature_indices（0起始原输出行位置）、keep_fields、annotations（新列且每个选中要素一个值）。系统生成并核验副本，记录完整分析数与上图子集数；原字段/几何不能改写，注记不是统计证据。
+
+使用相同的分析来源规则，无论选择 geo_cartography 还是 geo_qgis_project。工具可识别明确列出实际输入文件的相邻原生清单；analysis_manifests 仍可显式提供。not_provided 表示未绑定分析依据，上一地图事实不会继承。用生成底栏记录统计及计量/显示 CRS，footer_text 仅写来源与上下文，不能写与清单冲突的计量 CRS。
+
+带 qgis_layout/layout 的 preflight 测量真实字体/图例/比例尺/底栏，不导出成图、不占版本。底栏自动换行与扩展高度；放不下时缩短备注或扩大页面，不反复增高同一错误参数。duplicate_error_blocked 表示相同确定性失败已返回，必须改变已诊断的参数或输入；暂时文件锁/超时另行处理。保留成功分析输出，不为逃避检查换工具、换 map_id 或重建几何。
+
 `geo_cartography` 的 PNG/PDF 默认使用 QGIS，复用数据解析和分类颜色，
 由真实工程的同一打印布局导出图片。需要直接定义本地图层时使用 `geo_qgis_project`；
 其 layers 是结构化数组，包含明确样式、字段和 CRS。

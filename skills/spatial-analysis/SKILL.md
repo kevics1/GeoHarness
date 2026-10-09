@@ -73,6 +73,8 @@ QGIS 分析结果可直接作为 `geo_qgis_project` 的真实图层创建可编�
 
 ## 交付
 
+制图子集使用原生分析输出路径加 derivation（feature_indices、keep_fields、annotations），保留可核验来源；不要删业务属性后另写几何文件来冒充完整结果。工具会区分完整分析数与实际上图数，新增地图注记不属于分析统计。日期/null 与驱动加入的 Feature.id 由制图工具处理，不改变原始文件；真实业务 ID、字段和几何变化仍会被拒绝。两个制图入口共用同一事实规则，计量 CRS 来自分析清单，显示 CRS 来自地图设置。
+
 用 geo_deliver 把数据结果、实际主图、QGIS 工程、脚本/manifest 和报告交付到当前工作目录 exports 的新子目录。传 primary_map 与实际 review_path，保留 map-receipt.json；工程与图片摘要/快照变化时旧证明失效，应核对新版本后重新交付。Python 图用 geo_cartography(action="project",map_path=...,project_output_dir=...) 和实际图层打包，不重新绘图或提升质量，不在脚本中绕过 RUN_DIR 复制文件。
 
 最终给出数量/距离/范围、方法、计量/显示 CRS、单位、计数口径和工具返回的路径。区分 quality_status 的 passed/draft 与阶段 issues/unverified/stale；只声称实际完成的核对，不把业务正确性或准确率评测写成已完成。

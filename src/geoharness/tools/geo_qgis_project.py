@@ -13,6 +13,7 @@ from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from geoharness.cartography.derivation import MapDerivation, derive_frame
+from geoharness.cartography.retry_guard import guard_map_errors
 from geoharness.cartography.snapshot import FrozenQgisInputs, freeze_qgis_inputs
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_map_render
 from geoharness.tools.geo_qgis import qgis_read_roots
@@ -252,12 +253,19 @@ class GeoQgisProjectTool(BaseTool):
         "Create/export packages snapshots as GPKG/TIFF and writes a new project plus a PNG "
         "preview exported from the same editable layout; optional PDF comes from that layout. "
         "Export preserves saved styles/layouts and never overwrites the source project. "
+        "Use layer.derivation for verified subsets/fields/annotations of native output files. "
+        "Native analysis manifests are shared with geo_cartography and may be inferred; "
+        "previous map facts are never inherited. Datetime categories normalize automatically. "
+        "preflight with layout measures actual fonts/footer/legend without exporting. "
+        "duplicate_error_blocked requires changing the diagnosed arguments or input data. "
         "Network/database layers are unsupported. Outputs are drafts until geo_map_review "
         "checks actual pixels. Keep the same map_id and use geo_deliver for final delivery."
     )
     input_model = GeoQgisProjectInput
 
-    async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
+    @guard_map_errors
+    async def execute(self, arguments: BaseModel, context: ToolExecutionContext,
+                      *, _source_bindings: list[dict] | None = None) -> ToolResult:
         assert isinstance(arguments, GeoQgisProjectInput)
         config = context.metadata.get("geoharness_config")
         if config is None:
@@ -269,10 +277,12 @@ class GeoQgisProjectTool(BaseTool):
         ):
             # Inputs remain alive through worker shutdown, including cancellation.
             with TemporaryDirectory(prefix="geoh-qgis-inputs-") as directory:
-                return await self._execute(arguments, context, Path(directory).resolve())
-        return await self._execute(arguments, context)
+                return await self._execute(arguments, context, Path(directory).resolve(),
+                                           source_bindings=_source_bindings)
+        return await self._execute(arguments, context, source_bindings=_source_bindings)
 
-    async def _execute(self, arguments, context, snapshot_directory=None) -> ToolResult:
+    async def _execute(self, arguments, context, snapshot_directory=None,
+                       *, source_bindings=None) -> ToolResult:
         config = context.metadata["geoharness_config"]
         preflight = None
         if arguments.action in {"create", "preflight"}:
@@ -280,6 +290,8 @@ class GeoQgisProjectTool(BaseTool):
                 if snapshot_directory is not None:
                     pending = asyncio.create_task(asyncio.to_thread(
                         self._freeze_and_preflight, arguments, context, snapshot_directory,
+                        **({"source_bindings": source_bindings} if source_bindings is not None
+                           else {}),
                     ))
                     try:
                         arguments, preflight = await asyncio.wait_for(
@@ -296,13 +308,14 @@ class GeoQgisProjectTool(BaseTool):
                     )
             except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
                 return ToolResult(output=f"Error: QGIS map preflight failed: {exc}", is_error=True,
-                                  metadata={"preflight_status": "failed", "render_executed": False})
+                                  metadata={"preflight_status": "failed", "render_executed": False,
+                                            "deterministic_error": isinstance(exc, ValueError)})
         from geoharness.qgis.runner import execute_qgis
 
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
         if preflight:
             payload.update(crs=preflight["display_crs"], map_extent=preflight["map_extent"])
-            facts = preflight.get("analysis") or context.metadata.get("map_analysis_facts")
+            facts = preflight.get("analysis")
             if facts and facts.get("status") == "verified":
                 from geoharness.cartography.provenance import apply_analysis_footer
 
@@ -310,7 +323,7 @@ class GeoQgisProjectTool(BaseTool):
                     payload = apply_analysis_footer(payload, facts)
                 except ValueError as exc:
                     return ToolResult(output=f"Error: analysis footer layout invalid: {exc}",
-                                      is_error=True)
+                                      is_error=True, metadata={"deterministic_error": True})
         if arguments.action == "preflight":
             if arguments.layout is not None and config.qgis.enabled:
                 try:
@@ -325,8 +338,10 @@ class GeoQgisProjectTool(BaseTool):
                                       is_error=True, metadata={"render_executed": False})
                 if result.get("status") != "succeeded":
                     return ToolResult(output="Error: QGIS layout preflight failed: "
-                                      + result.get("error_summary", "unknown layout error"),
-                                      is_error=True, metadata={"render_executed": False})
+                                      + (result.get("error_summary") or "unknown layout error"),
+                                      is_error=True, metadata={"render_executed": False,
+                                      "deterministic_error": (result.get("error_summary") or "")
+                                      .startswith("ValueError:")})
                 preflight["layout"] = result["result"]["layout"]
             elif arguments.layout is not None:
                 preflight["layout"] = {"bounds_check": {"checked": False, "valid": None},
@@ -399,7 +414,9 @@ class GeoQgisProjectTool(BaseTool):
         if result.get("status") != "succeeded" and reserved:
             refund_map_render(identity, context.metadata)
         details: dict[str, Any] = result.get("result") or {}
-        metadata = {**details, **result, "map_id": identity, "preflight": preflight}
+        metadata = {**details, **result, "map_id": identity, "preflight": preflight,
+                    "deterministic_error": (result.get("error_summary") or "")
+                    .startswith("ValueError:")}
         if metadata.get("project_file"):
             metadata["qgis_project"] = metadata["project_file"]
         response = ToolResult(
@@ -410,9 +427,7 @@ class GeoQgisProjectTool(BaseTool):
         if reserved and result.get("status") == "succeeded":
             from geoharness.cartography.tracking import track_render_result
 
-            analysis = (preflight or {}).get("analysis") or (
-                context.metadata.get("map_analysis_facts") if arguments.action == "create" else None
-            )
+            analysis = (preflight or {}).get("analysis")
             return await asyncio.to_thread(track_render_result, response, context, identity,
                                            preflight=preflight, analysis=analysis)
         return response
@@ -422,12 +437,17 @@ class GeoQgisProjectTool(BaseTool):
             "inspect", "preflight",
         }
 
-    def _freeze_and_preflight(self, arguments, context, directory):
+    def _freeze_and_preflight(self, arguments, context, directory, source_bindings=None):
         snapshot = freeze_qgis_inputs(
             [layer.model_dump(exclude_none=True) for layer in arguments.layers],
             directory=directory, cwd=Path(context.cwd),
             read_roots=qgis_read_roots(context.metadata["geoharness_config"], Path(context.cwd)),
         )
+        if source_bindings is not None:
+            if len(source_bindings) != len(snapshot.original_sources):
+                raise ValueError("Map bridge source bindings must match actual layers")
+            for original, binding in zip(snapshot.original_sources, source_bindings):
+                original.update(binding)
         frozen = arguments.model_copy(update={
             "layers": [layer.model_copy(update=updates)
                        for layer, updates in zip(arguments.layers, snapshot.layers)],
@@ -495,10 +515,13 @@ class GeoQgisProjectTool(BaseTool):
                 original_path = snapshot.original_sources[index]["file_path"] if snapshot else (
                     str(path)
                 )
+                derivation = layer.derivation.model_dump() if layer.derivation is not None else None
+                if snapshot and "derivation" in snapshot.original_sources[index]:
+                    derivation = snapshot.original_sources[index]["derivation"]
                 mapped_sources.append({"file_path": original_path, "gdf": gdf,
                                        "label": common["label"],
-                                       "derivation": layer.derivation.model_dump()
-                                       if layer.derivation is not None else None})
+                                       "layer_index": index,
+                                       "derivation": derivation})
         settings = config.cartography
         report = validate_frames(
             frames, map_crs=arguments.crs, map_extent=arguments.map_extent,
@@ -508,11 +531,18 @@ class GeoQgisProjectTool(BaseTool):
             minimum_span_projected=settings.minimum_span_projected,
             extent_padding=settings.extent_padding,
         )
-        if arguments.analysis_manifests:
-            from geoharness.cartography.facts import load_analysis_facts
+        from geoharness.cartography.facts import infer_analysis_manifests, load_analysis_facts
+
+        roots = qgis_read_roots(config, context.cwd)
+        manifests = list(dict.fromkeys([
+            *arguments.analysis_manifests,
+            *infer_analysis_manifests(mapped_sources, cwd=context.cwd, read_roots=roots),
+        ]))
+        report["analysis_evidence_status"] = "verified" if manifests else "not_provided"
+        if manifests:
 
             report["analysis"] = load_analysis_facts(
-                arguments.analysis_manifests, cwd=context.cwd,
+                manifests, cwd=context.cwd,
                 read_roots=qgis_read_roots(config, context.cwd), mapped_sources=mapped_sources,
                 display_crs=report["display_crs"],
             )

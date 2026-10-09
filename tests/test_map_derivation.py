@@ -69,3 +69,39 @@ async def test_qgis_preflight_checks_frozen_subset_against_full_native_analysis(
     report = result.metadata["preflight"]
     assert report["layers"][0]["feature_count"] == 1
     assert report["analysis"]["analyses"][0]["mapped_outputs"][0]["match"] == "derivation"
+
+
+async def test_native_manifest_is_inferred_and_conflicting_metric_crs_is_rejected(tmp_path):
+    manifest = _analysis(tmp_path, "distance")
+    source = manifest["paths"]["result"]["geojson"]
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
+        action="preflight", crs="EPSG:3857", layers=[{"file_path": source}],
+    ), context)
+    assert not result.is_error
+    assert result.metadata["preflight"]["analysis"]["analyses"][0]["metric_crs"] == "EPSG:32650"
+    result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
+        action="create", crs="EPSG:3857", layers=[{"file_path": source}],
+        layout={"footer_text": "计量CRS EPSG:3857"},
+    ), context)
+    assert result.is_error and "contradicts verified analysis" in result.output
+    assert not context.metadata.get("map_workflow_state", {}).get("maps")
+
+
+async def test_repaired_reference_output_invalidates_cached_failure(tmp_path):
+    from pathlib import Path
+
+    manifest = _analysis(tmp_path, "distance")
+    path = Path(manifest["paths"]["reference"]["geojson"])
+    before = path.read_bytes()
+    path.write_bytes(before + b"\n")
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    tool = GeoQgisProjectTool()
+    arguments = GeoQgisProjectInput(action="preflight", layers=[{
+        "file_path": manifest["paths"]["result"]["geojson"],
+    }])
+    assert (await tool.execute(arguments, context)).is_error
+    assert (await tool.execute(arguments, context)).metadata["duplicate_error_blocked"]
+    path.write_bytes(before)
+    result = await tool.execute(arguments, context)
+    assert not result.is_error, result.output

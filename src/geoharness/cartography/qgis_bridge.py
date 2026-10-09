@@ -49,6 +49,7 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
                 "kind": "raster",
                 "name": "Basemap",
                 "raster_style": {"renderer": "hillshade"},
+                "_source_binding": {"file_path": args.basemap_raster},
             }
         )
     for index, spec in enumerate(specs):
@@ -117,6 +118,10 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
                 "minimum_visible_features": spec.get(
                     "minimum_visible_features", 1 if spec.get("required", True) else 0
                 ),
+                "_source_binding": {
+                    "file_path": spec.get("file_path") or spec.get("source_name", ""),
+                    "derivation": spec.get("derivation"),
+                },
             }
         )
     return layers
@@ -215,8 +220,9 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
                 # Consume a writer failure without replacing the user's cancellation.
                 pass
             raise
+        bindings = [layer.pop("_source_binding") for layer in layers]
         native = GeoQgisProjectInput(
-            action="create",
+            action="preflight" if args.action == "preflight" else "create",
             layers=layers,
             title=args.title or args.layer_name,
             crs=args.map_crs,
@@ -225,13 +231,14 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
             output_format="pdf" if Path(args.output_path).suffix.lower() == ".pdf" else "png",
             dpi=args.layout.dpi,
             map_id=args.map_id,
+            analysis_manifests=args.analysis_manifests,
         )
-        result = await GeoQgisProjectTool().execute(native, context)
+        result = await GeoQgisProjectTool().execute(native, context, _source_bindings=bindings)
     except (ValueError, OSError, RuntimeError) as exc:
         return ToolResult(output=f"Error: QGIS map preparation failed — {exc}", is_error=True)
     finally:
         await asyncio.to_thread(shutil.rmtree, directory, True)
-    if result.is_error or not result.metadata.get("output_path"):
+    if args.action == "preflight" or result.is_error or not result.metadata.get("output_path"):
         return result
     if project_destination is not None:
         try:
@@ -329,5 +336,5 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
         context,
         args.map_id,
         preflight=context.metadata.get("map_preflight"),
-        analysis=context.metadata.get("map_analysis_facts"),
+        analysis=(result.metadata.get("preflight") or {}).get("analysis"),
     )

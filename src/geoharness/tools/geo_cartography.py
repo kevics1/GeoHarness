@@ -30,6 +30,7 @@ from typing import Any, Literal
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
+from geoharness.cartography.retry_guard import guard_map_errors
 from geoharness.cartography.workflow import (
     refund_map_render,
     reserve_map_render,
@@ -142,6 +143,10 @@ class GeoCartographyInput(BaseModel):
             "n_classes; categorized styles accept categories (ordered values or "
             "{value,label,color} objects) and colors (matching list or value-to-color object). "
             "These options may also be nested in style; unsupported styles are errors. "
+            "For map-only subsets of native analysis outputs, keep the original file_path and "
+            "use derivation={feature_indices:[zero-based rows],keep_fields:[attributes],"
+            "annotations:{new_field:[one scalar per selected feature]}}. "
+            "Geometry is retained; new annotations cannot overwrite source fields. "
             "For example field_name=RiskTier, categories=[High,Low], colors=[#d73027,#1a9850]. "
             "Layers draw in array "
             "order; output shows ONE combined map with a layer legend. Use "
@@ -238,12 +243,16 @@ class GeoCartographyTool(BaseTool):
         "Rendering returns an editable QGIS project with data and print layout. "
         "action=preflight checks fields, geometry, CRS, bounds and visible counts without drawing. "
         "action=project packages an existing map with its actual sources without redrawing. "
-        "Use analysis_manifests for output-backed statistics/method/footer. "
+        "Use analysis_manifests for output-backed statistics/method/footer; adjacent native "
+        "manifests may be inferred from actual outputs. Datetime categories are normalized. "
+        "With qgis_layout, preflight also measures layout without exporting. "
+        "duplicate_error_blocked requires changed arguments/data; preserve successful outputs. "
         "Returned map_id is the persistent task UUID; action=status reads its factual receipt. "
         "Keep that ID across all versions; use geo_deliver for final delivery."
     )
     input_model: type[BaseModel] = GeoCartographyInput
 
+    @guard_map_errors
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         """Execute the geo_cartography tool."""
         assert isinstance(arguments, GeoCartographyInput)
@@ -665,7 +674,9 @@ class GeoCartographyTool(BaseTool):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("%s failed", what)
-            return ToolResult(output=f"Error: {what} failed — {exc}", is_error=True)
+            return ToolResult(output=f"Error: {what} failed — {exc}", is_error=True,
+                              metadata={"deterministic_error": what == "map preflight"
+                                        and isinstance(exc, ValueError)})
 
     async def _render(
         self,
@@ -781,7 +792,7 @@ class GeoCartographyTool(BaseTool):
             lambda: self._preflight_blocking(args, rule, context),
             what="map preflight",
         )
-        if preflight.is_error or args.action == "preflight":
+        if preflight.is_error:
             return preflight
         args = args.model_copy(
             update={
@@ -792,6 +803,19 @@ class GeoCartographyTool(BaseTool):
         context.metadata["map_preflight"] = preflight.metadata["preflight"]
         renderer = args.renderer or config.cartography.static_renderer
         native = renderer == "qgis" and desired.suffix.lower() in {".png", ".pdf"}
+        if args.action == "preflight":
+            if native and args.qgis_layout is not None:
+                from geoharness.cartography.qgis_bridge import render_qgis_map
+
+                checked = await render_qgis_map(self, args, rule, context)
+                if checked.is_error:
+                    return checked
+                preflight.metadata["preflight"]["layout"] = (
+                    checked.metadata["preflight"].get("layout")
+                )
+                preflight.output = json.dumps(preflight.metadata["preflight"], ensure_ascii=False)
+            preflight.metadata["render_executed"] = False
+            return preflight
         if not native and args.basemap_raster and desired.suffix.lower() != ".html":
             from pyproj import CRS
 
@@ -953,23 +977,28 @@ class GeoCartographyTool(BaseTool):
         for index, frame in enumerate(frames[: len(specs)]):
             cache[f"layer_{index}" if args.layers else "single"] = frame["gdf"]
         context.metadata["map_analysis_facts"] = None
-        if args.analysis_manifests:
-            from geoharness.cartography.facts import load_analysis_facts
-            from geoharness.tools.geo_qgis import qgis_read_roots
+        from geoharness.cartography.facts import infer_analysis_manifests, load_analysis_facts
+        from geoharness.tools.geo_qgis import qgis_read_roots
+
+        mapped_sources = [
+            {"file_path": spec.get("file_path") or spec.get("source_name", ""),
+             "gdf": frame["gdf"], "label": spec.get("label", ""),
+             "derivation": spec.get("derivation")}
+            for spec, frame in zip(specs, frames)
+        ]
+        roots = qgis_read_roots(context.metadata["geoharness_config"], context.cwd)
+        manifests = list(dict.fromkeys([
+            *args.analysis_manifests,
+            *infer_analysis_manifests(mapped_sources, cwd=context.cwd, read_roots=roots),
+        ]))
+        report["analysis_evidence_status"] = "verified" if manifests else "not_provided"
+        if manifests:
 
             facts = load_analysis_facts(
-                args.analysis_manifests,
+                manifests,
                 cwd=context.cwd,
                 read_roots=qgis_read_roots(context.metadata["geoharness_config"], context.cwd),
-                mapped_sources=[
-                    {
-                        "file_path": spec.get("file_path") or spec.get("source_name", ""),
-                        "gdf": frame["gdf"],
-                        "label": spec.get("label", ""),
-                        "derivation": spec.get("derivation"),
-                    }
-                    for spec, frame in zip(specs, frames)
-                ],
+                mapped_sources=mapped_sources,
                 display_crs=report["display_crs"],
             )
             report["analysis"] = facts

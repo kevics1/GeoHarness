@@ -74,6 +74,34 @@ async def test_native_readonly_preflight_without_qgis(tmp_path):
     assert not (tmp_path / ".geoharness").exists()
 
 
+async def test_same_deterministic_preflight_error_is_not_executed_again(tmp_path, monkeypatch):
+    source, context = setup(tmp_path)
+    tool = GeoCartographyTool()
+    count = 0
+    original = tool._preflight_blocking
+
+    def counted(*args):
+        nonlocal count
+        count += 1
+        return original(*args)
+
+    monkeypatch.setattr(tool, "_preflight_blocking", counted)
+    arguments = GeoCartographyInput(action="preflight", layers=json.dumps([
+        {"file_path": str(source), "column": "missing", "render_method": "categorized"},
+    ]))
+    first = await tool.execute(arguments, context)
+    second = await tool.execute(arguments, context)
+    assert first.is_error and second.is_error
+    assert count == 1
+    assert second.metadata["duplicate_error_blocked"] is True
+    frame = gpd.read_file(source)
+    frame["missing"] = "new"
+    frame.to_file(source, driver="GeoJSON")
+    third = await tool.execute(arguments, context)
+    assert not third.is_error, third.output
+    assert count == 2
+
+
 async def test_native_numeric_string_rejected_before_qgis_or_budget(tmp_path, monkeypatch):
     source, context = setup(tmp_path)
     context.metadata["geoharness_config"] = GeoConfig()

@@ -39,7 +39,7 @@ def normalize_frame(frame):
     for name in fields & set(result.columns):
         result[name] = pd.Series(
             [temporal_value(value) if value is None or pd.isna(value)
-             or isinstance(value, (datetime, date, np.datetime64)) else value
+             or isinstance(value, (str, datetime, date, np.datetime64)) else value
              for value in result[name]], index=result.index, dtype=object,
         )
     result.attrs[TEMPORAL_FIELDS] = sorted(fields)

@@ -648,6 +648,7 @@ def _create_layout(
         _place_item(layout, legend, "legend", regions["legend"])
     footer = regions["footer"]
     text_x = footer[0]
+    required_height = footer[3]
     if spec.get("scale_bar", True):
         scale = QgsLayoutItemScaleBar(layout)
         scale.setStyle("Single Box")
@@ -668,6 +669,7 @@ def _create_layout(
         scale.setUnitLabel("km")
         _place_item(layout, scale, "scale_bar", [footer[0], footer[1], 1, 1])
         text_x += scale.rect().width() + spec.get("gap_mm", 5)
+        required_height = max(required_height, scale.rect().height() + 0.5)
     if spec.get("footer_text"):
         text_width = footer[0] + footer[2] - text_x
         if text_width < 20:
@@ -677,16 +679,16 @@ def _create_layout(
         label.setMargin(0)
         label.setVAlign(Qt.AlignTop)
         label.setText(_wrap_label_text(label, spec["footer_text"], text_width))
-        required_height = label.sizeForText().height() + 0.5
-        if required_height > footer[3]:
-            if _fit_attempt >= 3 or required_height > 100:
-                raise ValueError("footer_text exceeds its reserved rectangle; "
-                                 "shorten notes or increase page size")
-            resized = {**spec, "footer_height_mm": required_height}
-            _layout_regions(resized, title)  # Fail before exporting or packaging any map.
-            return _create_layout(project, layers, extent, {**payload, "layout": resized},
-                                  context, _fit_attempt=_fit_attempt + 1)
+        required_height = max(required_height, label.sizeForText().height() + 0.5)
         _place_item(layout, label, "footer_text", [text_x, footer[1], text_width, footer[3]])
+    if required_height > footer[3]:
+        if _fit_attempt >= 3 or required_height > 100:
+            raise ValueError("footer_text exceeds its reserved rectangle; "
+                             "shorten notes or increase page size")
+        resized = {**spec, "footer_height_mm": required_height}
+        _layout_regions(resized, title)  # Fail before exporting or packaging any map.
+        return _create_layout(project, layers, extent, {**payload, "layout": resized},
+                              context, _fit_attempt=_fit_attempt + 1)
     project.layoutManager().addLayout(layout)
     _validate_layout_bounds(layout)
     return layout
@@ -711,7 +713,7 @@ def _wrap_label_text(label: Any, text: str, width: float) -> str:
                     high = middle - 1
             if low == 0:
                 raise ValueError("footer_text font is too large for the available width")
-            boundary = paragraph.rfind(" ", 0, low + 1)
+            boundary = paragraph.rfind(" ", 0, low)
             if low < len(paragraph) and boundary > low // 2:
                 low = boundary + 1
             lines.append(paragraph[:low])

@@ -302,6 +302,30 @@ geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付�
 
 ## 默认静态制图
 
+日期字段在内存副本中转换成保留时区的 ISO 字符串，空日期保留为 null；分类值同步转换后写入工程，不需要用 Python 删除时间属性或重建几何。内容核验会区分真实业务 ID 与 GeoJSON 驱动自动加入的要素编号，仍拒绝业务属性或几何被修改的缓存。
+
+两个新建入口共用分析来源与状态规则。映射原生分析目录中的实际输出时，可自动识别旁边明确列出该文件的 manifest；也可以显式传 `analysis_manifests`。无分析依据的普通专题地图仍可生成，报告的 `analysis_evidence_status` 为 `not_provided`。上次地图的事实不会附加到新地图。计量 CRS 与显示 CRS 分别来自分析清单和地图参数；手写备注的计量 CRS 与清单冲突时，在生成图片前拒绝。
+
+需要只画分析结果的一部分时，在图层中使用 `derivation`，让系统从原输出生成可核验的制图子集；不要手工导出一个丢失来源的新文件。例如 `geo_qgis_project.layers` 中的一层可以写成：
+
+```json
+{
+  "file_path": ".geoharness/analysis/实际任务/result.geojson",
+  "derivation": {
+    "feature_indices": [7, 15, 0],
+    "keep_fields": ["name", "distance_m"],
+    "annotations": {"map_label": ["1", "2", "3"]}
+  },
+  "label_field": "map_label"
+}
+```
+
+`feature_indices` 是原输出中从 0 开始的行位置，省略时保留全部要素；上例位置仅示意，必须先查看实际数据。`keep_fields` 省略时保留全部属性，几何始终保留；`annotations` 每列必须与选中要素数一致，不能覆盖原字段。`geo_cartography.layers` 的 JSON 字符串支持同一 `derivation` 结构。来源核验记录完整结果数和上图子集数，注记不是新的分析统计。
+
+提供 `qgis_layout`/`layout` 的预检会在独立 QGIS 进程中测量真实字体、比例尺、图例与面板，不导出地图或工程、不占成图次数。仅检查数据且未提供布局时，预检保持无 QGIS 依赖。新建底栏根据实际可用宽度换行，按文字和比例尺高度扩展；页面放不下时，明确要求缩短备注或扩大页面。已保存工程的导出保留用户布局，不自动改写文字。
+
+同一请求内，相同参数和未变化的本地输入触发同一确定性检查错误时，工具返回已有诊断并标记 `duplicate_error_blocked`，不再重读或重绘。修改参数、数据、关联分析输出或读取配置后可以重新执行。文件锁、超时等暂时故障不会按确定性错误缓存；没有稳定本地身份的目录别名和 VRT 保留正常执行。该机制帮助避免无效循环，不能保证模型每次都给出正确参数。
+
 `geo_cartography(action="preflight", ...)` 与 `geo_qgis_project(action="preflight", ...)` 可先检查实际数据，不绘图、不生成工程，也不消耗成图或视觉审查预算。正常新建地图会在预留预算前自动先执行同样的检查。检查 CRS、有效/有限几何、符号与标签字段、分类/分级、数值类型、指定要素总数，并返回主图/详图中的几何相交数量。相交计数不证明符号没有被遮挡；栅格只核验范围相交，不据此宣称像素值或语义正确。
 
 显式 `map_extent` 使用 `{xmin,ymin,xmax,ymax}` 或四元组 `[xmin,ymin,xmax,ymax]`，必须同时指定显示坐标系（`geo_cartography.map_crs` 或 `geo_qgis_project.crs`）；`detail_extent` 同属该坐标系。不要直接把 GIS 四元组作为 `imshow.extent`，它的顺序是 `[xmin,xmax,ymin,ymax]`。没有指定范围时按对齐后的图层自动生成，单点/零跨度通过配置中的 minimum_span_geographic/minimum_span_projected 扩展。

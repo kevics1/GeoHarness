@@ -27,6 +27,7 @@ _BUDGET_LOCK = threading.RLock()
 
 
 def reset_map_workflow(metadata: dict[str, Any]) -> None:
+    metadata.pop("map_deterministic_errors", None)
     with _BUDGET_LOCK:
         state = metadata.setdefault("map_workflow_state", {})
         state.clear()

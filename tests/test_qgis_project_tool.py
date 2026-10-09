@@ -59,6 +59,52 @@ def _create(**updates) -> GeoQgisProjectInput:
     )
 
 
+async def test_unrelated_previous_analysis_cannot_attach_to_new_thematic_map(tmp_path, monkeypatch):
+    payloads = []
+
+    async def runner(action, payload, **kwargs):
+        payloads.append(payload)
+        return {"status": "succeeded", "result": {}}
+
+    monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
+    context = _context(tmp_path)
+    context.metadata["map_analysis_facts"] = {
+        "status": "verified", "analyses": [], "footer_text": "旧地图的统计",
+    }
+    result = await GeoQgisProjectTool().execute(_create(), context)
+    assert not result.is_error, result.output
+    assert "analysis_facts" not in payloads[0]
+    assert "旧地图" not in (payloads[0].get("layout") or {}).get("footer_text", "")
+
+
+async def test_qgis_deterministic_layout_failure_is_cached_but_transient_failure_is_not(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    async def runner(action, payload, **kwargs):
+        calls.append(action)
+        return {"status": "failed", "error_summary": "ValueError: footer_text exceeds bounds"}
+
+    monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
+    tool, context = GeoQgisProjectTool(), _context(tmp_path)
+    first = await tool.execute(_create(), context)
+    second = await tool.execute(_create(), context)
+    assert first.is_error and second.metadata["duplicate_error_blocked"]
+    assert len(calls) == 1
+    json.dumps(context.metadata["map_deterministic_errors"])
+
+    async def transient(action, payload, **kwargs):
+        calls.append(action)
+        return {"status": "failed", "error_summary": "PermissionError: file temporarily locked"}
+
+    monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", transient)
+    context = _context(tmp_path)
+    await tool.execute(_create(), context)
+    await tool.execute(_create(), context)
+    assert len(calls) == 3
+
+
 @pytest.mark.parametrize(
     "payload",
     [

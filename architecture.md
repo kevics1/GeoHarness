@@ -57,11 +57,17 @@ Processing。结果层必须持久化后才返回，摘要记录字段、数量�
 
 ## 分析事实与地图任务
 
-`cartography/facts.py` 仅接受 `analysis_manifests` 指向的原生 geo_analysis 清单。
+`cartography/facts.py` 仅接受显式传入或由实际输出路径识别到的原生 geo_analysis 清单。
 它读取实际 GeoJSON/CSV、核对清单输出 SHA256 和计数，检查 impact 标记与阈值/选集
 一致性，并要求输出匹配当前实际地图图层。新清单使用 sha256_verified；没有原始摘要
 的旧清单仅作 legacy_count_verified，不能升级为完整性证明。任意自由文字、
 QGIS Processing 或 Python 清单不作为这个接口的统计证据。
+
+`values.py` 在副本中规范日期/null 与分类值。内容比较使用已经核对的输出字节，经同一 GDAL/GeoPandas 读取后比较；只有能匹配原始 Feature.id 且属性里不存在业务 id 时，才排除驱动加入的编号。`derivation.py` 用原输出行位置、字段选择和新注记列生成地图视图，核验期从已验证字节重建该视图并与实际冻结图层比较，不把声明当作证据。来源记录同时保留完整分析数和上图数。
+
+两个入口通过显式 `_source_bindings` 连接桥接副本与原始分析路径，直接 QGIS 请求不继承上下文中上一地图的事实。提供布局的 preflight 经独立 QGIS 的 `project_preflight` 测量字体、图例、比例尺与底栏，不导出图片/工程；底栏按实际字体和宽度换行并扩展高度。已保存工程仍按用户布局导出。
+
+`retry_guard.py` 仅缓存明确的确定性校验失败，以参数、配置、读取范围和本地输入文件状态判断是否重复；关联分析输出与常见伴随文件也参与判断。失败期间输入变化、目录别名或 VRT 等无稳定身份的来源不缓存，暂时文件锁/超时不缓存。缓存使用可序列化对象，在真实用户输入时清理；它不替代内容摘要验证，也不增加回合/制图预算。
 
 `provenance.py` 从上述输出核对结果生成 QGIS 说明栏，分别记录计量 CRS、导出 CRS
 和地图显示 CRS；用户 footer_text 追加为备注。分析事实同时存入工程元数据及回执。
