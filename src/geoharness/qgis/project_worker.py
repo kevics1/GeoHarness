@@ -571,7 +571,8 @@ def _place_item(layout: Any, item: Any, name: str, rect: list[float]) -> None:
 
 
 def _create_layout(
-    project: Any, layers: list[Any], extent: Any, payload: dict[str, Any], context: Any
+    project: Any, layers: list[Any], extent: Any, payload: dict[str, Any], context: Any,
+    *, _fit_attempt: int = 0,
 ) -> Any:
     from qgis.core import (
         Qgis,
@@ -672,14 +673,50 @@ def _create_layout(
         if text_width < 20:
             raise ValueError("Scale bar leaves less than 20mm for footer_text")
         label = QgsLayoutItemLabel(layout)
-        label.setText(spec["footer_text"])
         label.setTextFormat(body_format)
         label.setMargin(0)
         label.setVAlign(Qt.AlignTop)
+        label.setText(_wrap_label_text(label, spec["footer_text"], text_width))
+        required_height = label.sizeForText().height() + 0.5
+        if required_height > footer[3]:
+            if _fit_attempt >= 3 or required_height > 100:
+                raise ValueError("footer_text exceeds its reserved rectangle; "
+                                 "shorten notes or increase page size")
+            resized = {**spec, "footer_height_mm": required_height}
+            _layout_regions(resized, title)  # Fail before exporting or packaging any map.
+            return _create_layout(project, layers, extent, {**payload, "layout": resized},
+                                  context, _fit_attempt=_fit_attempt + 1)
         _place_item(layout, label, "footer_text", [text_x, footer[1], text_width, footer[3]])
     project.layoutManager().addLayout(layout)
     _validate_layout_bounds(layout)
     return layout
+
+
+def _wrap_label_text(label: Any, text: str, width: float) -> str:
+    """Measure the actual QgsLayoutItemLabel font, including CJK and explicit lines."""
+    if len(text) > 20000:
+        raise ValueError("footer_text exceeds the bounded layout text limit")
+    lines = []
+    for paragraph in text.split("\n"):
+        if not paragraph:
+            lines.append("")
+        while paragraph:
+            low, high = 0, len(paragraph)
+            while low < high:
+                middle = (low + high + 1) // 2
+                label.setText(paragraph[:middle])
+                if label.sizeForText().width() <= width - 0.5:
+                    low = middle
+                else:
+                    high = middle - 1
+            if low == 0:
+                raise ValueError("footer_text font is too large for the available width")
+            boundary = paragraph.rfind(" ", 0, low + 1)
+            if low < len(paragraph) and boundary > low // 2:
+                low = boundary + 1
+            lines.append(paragraph[:low])
+            paragraph = paragraph[low:]
+    return "\n".join(lines)
 
 
 def _layer_metadata(layer: Any) -> dict[str, Any]:
@@ -1138,10 +1175,10 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
 
     project = QgsProject.instance()
     project.clear()
-    payload = {**payload, "strict_layout": action == "project_create"}
+    payload = {**payload, "strict_layout": action in {"project_create", "project_preflight"}}
     preprocessor_id = None
     try:
-        if action == "project_create":
+        if action in {"project_create", "project_preflight"}:
             layers = [_new_layer(spec, context) for spec in payload.get("layers", [])]
             if not layers:
                 raise ValueError("create requires at least one local vector/raster layer")
@@ -1161,6 +1198,8 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             extent = _extent(project, layers, payload.get("map_extent"))
             project.viewSettings().setDefaultViewExtent(QgsReferencedRectangle(extent, crs))
             layout = _create_layout(project, layers, extent, payload, context)
+            if action == "project_preflight":
+                return {"layout": _layout_metadata(layout), "render_executed": False}
             return _save_package(project, layout, layers, payload, context)
         if action not in {"project_inspect", "project_export"}:
             raise ValueError(f"Unsupported QGIS project action: {action}")

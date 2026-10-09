@@ -26,6 +26,7 @@ _ACTIONS = {
     "project_create",
     "project_inspect",
     "project_export",
+    "project_preflight",
 }
 
 

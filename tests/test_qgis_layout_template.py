@@ -85,6 +85,35 @@ def test_rectangle_validation_identifies_page_overflow_and_item_collisions():
     assert "main_map/legend: rectangles overlap" in problems
 
 
+async def test_real_footer_wrap_uses_font_metrics_before_export(tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    settings = QgisConfig()
+    try:
+        discover_qgis(settings, cwd=tmp_path)
+    except (ValueError, RuntimeError, OSError) as exc:
+        pytest.skip(f"Independent QGIS installation required: {exc}")
+    source = tmp_path / "source.geojson"
+    gpd.GeoDataFrame({"name": ["site"]}, geometry=[Point(101, 28)], crs=4326).to_file(source)
+    text = ("统计（核验分析）：蔓延范围内受威胁居民点2处。应急避难场所23处，总容量36.9万人；"
+            "最近者西昌学院南校区，距当前火场5.96km。计量CRS EPSG:32648。" * 3)
+    result = await execute_qgis("project_preflight", {
+        "layers": [{"file_path": str(source)}], "title": "底栏自动排版",
+        "crs": "EPSG:32647", "map_extent": [800000, 3060000, 840000, 3100000],
+        "layout": QgisProjectLayout(width_mm=420, height_mm=297, margin_mm=10,
+            footer_text=text, footer_height_mm=10, body_font_size_pt=9).model_dump(),
+    }, cwd=tmp_path, settings=settings, read_roots=[tmp_path])
+    assert result["status"] == "succeeded", result.get("error_summary")
+    layout = result["result"]["layout"]
+    assert layout["bounds_check"]["valid"] is True
+    assert "\n" in layout["footer_text"]
+    assert layout["footer_text"].replace("\n", "") == text
+    assert layout["regions"]["footer"][3] > 10
+    assert not list(Path(result["run_dir"]).glob("*.png"))
+    assert not list(Path(result["run_dir"]).glob("*.qgz"))
+
+
 @pytest.fixture
 def native_settings(tmp_path):
     settings = QgisConfig(outputs_dir=str(tmp_path / "native-outputs"))
@@ -248,7 +277,7 @@ async def test_native_template_rejects_content_overflow_without_exporting_previe
     if part == "title":
         payload["title"] = "超长标题" * 100
     elif part == "footer":
-        payload["layout"]["footer_text"] = "说明文字" * 100
+        payload["layout"]["footer_text"] = "说明文字" * 1000
     else:
         payload["layers"][0]["style"]["ranges"][0]["label"] = "超长图例" * 100
     result = await execute_qgis(

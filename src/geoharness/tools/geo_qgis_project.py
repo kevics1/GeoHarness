@@ -264,7 +264,9 @@ class GeoQgisProjectTool(BaseTool):
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
         if not config.qgis.enabled and arguments.action != "preflight":
             return ToolResult(output="Error: QGIS integration is disabled.", is_error=True)
-        if arguments.action == "create":
+        if arguments.action == "create" or (
+            arguments.action == "preflight" and arguments.layout is not None and config.qgis.enabled
+        ):
             # Inputs remain alive through worker shutdown, including cancellation.
             with TemporaryDirectory(prefix="geoh-qgis-inputs-") as directory:
                 return await self._execute(arguments, context, Path(directory).resolve())
@@ -295,9 +297,6 @@ class GeoQgisProjectTool(BaseTool):
             except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
                 return ToolResult(output=f"Error: QGIS map preflight failed: {exc}", is_error=True,
                                   metadata={"preflight_status": "failed", "render_executed": False})
-            if arguments.action == "preflight":
-                return ToolResult(output=json.dumps(preflight, ensure_ascii=False, indent=2),
-                                  metadata={"preflight": preflight, "render_executed": False})
         from geoharness.qgis.runner import execute_qgis
 
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
@@ -312,6 +311,28 @@ class GeoQgisProjectTool(BaseTool):
                 except ValueError as exc:
                     return ToolResult(output=f"Error: analysis footer layout invalid: {exc}",
                                       is_error=True)
+        if arguments.action == "preflight":
+            if arguments.layout is not None and config.qgis.enabled:
+                try:
+                    result = await execute_qgis(
+                        "project_preflight", payload, cwd=Path(context.cwd), settings=config.qgis,
+                        read_roots=[*qgis_read_roots(config, Path(context.cwd)),
+                                    *([snapshot_directory]
+                                      if snapshot_directory is not None else [])],
+                    )
+                except (OSError, ValueError, RuntimeError) as exc:
+                    return ToolResult(output=f"Error: QGIS layout preflight failed: {exc}",
+                                      is_error=True, metadata={"render_executed": False})
+                if result.get("status") != "succeeded":
+                    return ToolResult(output="Error: QGIS layout preflight failed: "
+                                      + result.get("error_summary", "unknown layout error"),
+                                      is_error=True, metadata={"render_executed": False})
+                preflight["layout"] = result["result"]["layout"]
+            elif arguments.layout is not None:
+                preflight["layout"] = {"bounds_check": {"checked": False, "valid": None},
+                                       "reason": "QGIS is disabled"}
+            return ToolResult(output=json.dumps(preflight, ensure_ascii=False, indent=2),
+                              metadata={"preflight": preflight, "render_executed": False})
         identity = arguments.map_id or map_identity(
             arguments.title or Path(arguments.project_path).stem or "qgis-map"
         )
