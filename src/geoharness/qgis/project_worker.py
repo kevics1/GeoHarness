@@ -897,8 +897,7 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
             ):
                 problems.append(f"{name}: legend content exceeds its reserved rectangle")
         elif isinstance(item, QgsLayoutItemLabel):
-            minimum = layout.renderContext().measurementConverter().convert(
-                item.sizeForText(), Qgis.LayoutUnit.Millimeters)
+            minimum = item.sizeForText()  # QSizeF in millimetres, unlike pageSize/sizeWithUnits.
             if minimum.width() > w + 0.05 or (
                 minimum.height() > h + 0.05
             ):
