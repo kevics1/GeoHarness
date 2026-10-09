@@ -31,6 +31,80 @@ async def run_script(tmp_path: Path, code: str, **kwargs):
     )
 
 
+async def test_qgis_diagnostics_are_exact_read_only_files_not_a_directory_grant(tmp_path):
+    job = tmp_path / ".geoharness/qgis/doctor-test"
+    job.mkdir(parents=True)
+    for name in ("request.json", "result.json", "stdout.txt", "stderr.txt"):
+        (job / name).write_text("diagnostic", encoding="utf-8")
+    (job / "manifest.json").write_text(json.dumps({"run_dir": str(job)}), encoding="utf-8")
+    (job / "other.txt").write_text("private", encoding="utf-8")
+    (job.parent / "config.yaml").write_text("private", encoding="utf-8")
+    (job / ".profile").mkdir()
+    config = GeoConfig()
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
+    code = f"""
+from pathlib import Path
+p = Path({str(job)!r})
+for name in ('request.json','result.json','manifest.json','stdout.txt','stderr.txt'):
+    assert (p/name).read_text()
+for target, operation in [(p/'request.json','write'),(p/'other.txt','read'),
+                          (p.parent/'config.yaml','read'),(p/'.profile','list'),(p,'list')]:
+    try:
+        if operation=='write':target.write_text('changed')
+        elif operation=='list':list(target.iterdir())
+        else:target.read_text()
+    except PermissionError:pass
+    else:raise AssertionError(f'Unexpected grant: {{target}}')
+print('five diagnostics read; other paths and writes denied')
+"""
+    result = await GeoPythonTool().execute(GeoPythonInput(code=code), context)
+    assert not result.is_error, result.output
+    assert result.metadata["execution_contract"]["DATA_DIRS"] == "list[Path]"
+    assert (job / "request.json").read_text(encoding="utf-8") == "diagnostic"
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    ("DATA_DIRS.split(':')", "DATA_DIRS is list[Path]"),
+    ("from shapely.geometry import Point\nPoint(0,0).to_crs(3857)", "GeoSeries"),
+    ("(SOURCE_CWD/'outside.txt').write_text('x')", "RUN_DIR"),
+])
+async def test_python_failures_return_specific_contract_hints(tmp_path, code, expected):
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    result = await GeoPythonTool().execute(GeoPythonInput(code=code), context)
+    assert result.is_error
+    assert expected in json.dumps(result.metadata["recovery_hints"])
+    assert result.metadata["error_summary"]
+
+
+def test_qgis_diagnostic_discovery_rejects_redirected_files_and_mismatched_runs(tmp_path):
+    from geoharness.tools.geo_python import qgis_diagnostic_files
+
+    root = tmp_path / "qgis"
+    job = root / "job"
+    job.mkdir(parents=True)
+    manifest = job / "manifest.json"
+    manifest.write_text(json.dumps({"run_dir": str(tmp_path)}), encoding="utf-8")
+    assert qgis_diagnostic_files(root) == ()
+    manifest.write_text(json.dumps({"run_dir": str(job)}), encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    try:
+        (job / "request.json").symlink_to(outside)
+        (root / "linked-job").symlink_to(job, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Filesystem link permission unavailable: {exc}")
+    assert qgis_diagnostic_files(root) == (manifest,)
+
+
+async def test_explicit_read_files_never_grant_credentials(tmp_path):
+    credential = tmp_path / ".env"
+    credential.write_text("synthetic", encoding="utf-8")
+    result = await run_script(tmp_path, f"open({str(credential)!r}).read()",
+                              read_files=(credential,))
+    assert result["exit_code"] != 0
+    assert "PermissionError" in result["stderr"]
+
+
 async def test_real_gis_analysis_writes_vector_image_and_raster(tmp_path: Path):
     data = tmp_path / "输入数据"
     data.mkdir()

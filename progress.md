@@ -178,3 +178,9 @@
 - length/max_tokens+invalid_json调用最多一次定向恢复；修复接口按原调用独立别名，成功后映射回原ID，保留同批完整调用和历史结果。缺字段/非对象JSON保留原拒绝逻辑，完整JSON即使length也正常执行。
 - 恢复模型和预算沿用既有配置，主模型不变；恢复消息仅开放残缺调用schema，传输不额外自动重试。失败或重复修复不执行，usage包含两次请求且可取消。
 - 真实上游parser+engine共38项回归通过，覆盖并行完整调用只执行一次、原ID保留、恢复未完成/意外工具/传输失败、token结算。原生单位回归中发现sizeForText返回QSizeF，已保留其mm测量（不能交给QgsLayoutSize转换器）；重新验证中。
+
+### 四项改进阶段3
+- Python契约现在明确区分Path与list[Path]，响应给execution_contract；list.split、Shapely.to_crs、输出范围和读取范围错误附真实匹配的recovery_hints，不重试脚本、不猜CRS。
+- 最近64个QGIS任务经manifest.run_dir与规范路径核验，仅五项诊断文件获得只读授权；父子进程冻结文件身份，不允许链接转移、目录枚举或写入，敏感文件名仍拒绝。font_file明确工作区/数据字体范围，系统字体用font_family。
+- Python执行完整48项回归通过；原始test01 QGIS request.json实际可读且打印12层，Path/List类型正确。证据C:/Users/Administrator/AppData/Local/Temp/geoharness-python-contract-check-j_1_6z0e/verification.json。
+- 额外精确文件验证已加入，单独复核五文件只读与凭证拒绝；ruff和CLI dry-run通过。阶段3只读评审工具因账户usage limit未能完成，主Agent继续进行边界检查并将在最终回归验证；没有把未运行评审称作通过。

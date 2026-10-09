@@ -84,7 +84,10 @@ class QgisLabelStyle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     font_family: str = "Microsoft YaHei"
-    font_file: str = ""
+    font_file: str = Field(default="", description=(
+        "Optional TTF/TTC/OTF file in workspace/data read roots. For installed system fonts "
+        "prefer font_family; explicit system-directory paths are not granted."
+    ))
     size_pt: float = Field(default=9, ge=5, le=40)
     color: str = "#222222"
     buffer_size_mm: float = Field(default=0.8, ge=0, le=5)
@@ -162,7 +165,10 @@ class QgisProjectLayout(BaseModel):
     )
     footer_text: str = ""
     font_family: str = "Microsoft YaHei"
-    font_file: str = ""
+    font_file: str = Field(default="", description=(
+        "Optional TTF/TTC/OTF file in workspace/data read roots. For installed fonts "
+        "prefer font_family; explicit system-directory paths are not granted."
+    ))
     title_font_size_pt: float = Field(default=18, ge=8, le=40)
     body_font_size_pt: float = Field(default=9, ge=5, le=20)
     legend_font_size_pt: float | None = Field(default=None, ge=5, le=20)

@@ -108,6 +108,10 @@ agent:
 
 工具调用因 `finish_reason=length/max_tokens` 返回残缺 JSON 时，默认还有一次定向参数恢复（`agent.tool_argument_retries: 1`，设0关闭）。恢复请求仅开放对应的修复接口，沿用配置的空回复恢复模式，完整调用和已有结果不重复执行；恢复后仍不完整、出现重复或传输失败时保留原诊断并拒绝该调用。恢复花费的 token 纳入本次记账；主模型配置不变。
 
+`geo_python` 注入 `SOURCE_CWD: Path`、`RUN_DIR: Path` 和 `DATA_DIRS: list[Path]`，直接迭代 `DATA_DIRS`；环境变量 `os.environ['DATA_DIRS']` 才是按 `os.pathsep` 分隔的字符串。所有输出写到 `RUN_DIR / filename` 或相对文件名，由 `geo_deliver` 负责工作区交付。工具返回 `execution_contract`，对已知的类型、投影或路径错误返回 `recovery_hints`，保留真实退出状态，不自动重试脚本。
+
+配置 QGIS 输出目录中最近64个有清单的任务，仅其 `request.json`、`result.json`、`manifest.json`、`stdout.txt`、`stderr.txt` 可由 Python 精确只读访问；使用 QGIS 工具返回的文件路径。不会授予整个目录、`.profile` 或父配置目录，也不能写这些文件；链接转移和敏感文件名仍受保护。Shapely 几何本身没有 CRS，投影转换用 `gpd.GeoSeries([geometry], crs=已核实的源CRS).to_crs(目标CRS).iloc[0]`。缓冲、裁剪、相交、距离、分区计数和影响分析优先用 `geo_analysis`，其他算法用 `geo_qgis` 的 search→help→run 获得实际参数，避免读取工具源码猜 API。
+
 React TUI 中，停止、关闭或回收模型流会及时释放网络连接。模型重试流可由不同任务
 关闭，不再因 `ContextVar` token 的上下文不一致而产生后台异常。若本轮运行出现未捕获
 的异常，后端会显示一次具体错误并结束本轮，界面恢复输入状态；可以继续输入，

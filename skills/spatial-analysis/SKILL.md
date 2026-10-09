@@ -7,7 +7,9 @@ description: 地理空间分析入口。聚焦叠加、缓冲、距离、分区�
 
 先明确用户问题、输入图层、分析对象、距离/范围口径与交付要求。仅询问不能从数据或配置得到、并会改变分析结果的信息。
 
-工具文本返回准确的产物路径、统计和最多 20 行属性预览；不要猜测输出文件名。完整属性/manifest 用 geo_python 按返回路径读取。SOURCE_CWD、RUN_DIR 是 Path 全局变量，同时也提供同名环境变量；DATA_DIRS 全局变量是路径集合，环境变量按 os.pathsep 分隔。脚本当前目录为 RUN_DIR。
+工具文本返回准确的产物路径、统计和最多 20 行属性预览；不要猜测输出文件名。完整属性/manifest 用 geo_python 按返回路径读取。SOURCE_CWD、RUN_DIR 是 Path 全局变量；DATA_DIRS 是 list[Path]，直接迭代，仅环境变量版本需要按 os.pathsep 拆分。脚本当前目录及唯一输出目录为 RUN_DIR，交付复制交给 geo_deliver。
+
+QGIS 返回的五项既有诊断文件 request/result/manifest/stdout/stderr 可用精确路径只读查看，不枚举 .geoharness/qgis 或 .profile。读取工具的 execution_contract/recovery_hints，避免重复错误。Shapely 几何没有 .to_crs，转换时用 GeoSeries 声明已核实源CRS再投影。QGIS 字体优先 font_family，显式 font_file 用工作区/数据目录内的字体文件，不在 Python 中写工作区/fonts。
 
 ## 检查输入
 

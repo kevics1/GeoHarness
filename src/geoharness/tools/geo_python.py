@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import math
 from pathlib import Path
@@ -13,6 +14,57 @@ from pydantic import BaseModel, Field, model_validator
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_python_render
 from geoharness.config.settings import CartographyConfig, ExecutionConfig
 from geoharness.execution import execute_python
+
+
+def qgis_diagnostic_files(root: Path) -> tuple[Path, ...]:
+    """Grant only fixed diagnostics of recent completed jobs, without following links."""
+    root = root.resolve()
+    if not root.is_dir():
+        return ()
+    files = []
+    try:
+        jobs = heapq.nlargest(64, (path for path in root.iterdir()
+            if path.is_dir() and path.absolute() == path.resolve()),
+            key=lambda path: path.stat().st_mtime_ns)
+    except OSError:
+        return ()
+    for job in jobs:
+        manifest = job / "manifest.json"
+        try:
+            if manifest.resolve() != manifest or manifest.stat().st_size > 1024 * 1024:
+                continue
+            record = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or Path(record.get("run_dir", "")).resolve() != job:
+                continue
+            for name in (
+                "request.json", "result.json", "manifest.json", "stdout.txt", "stderr.txt",
+            ):
+                path = job / name
+                if path.is_file() and path.resolve() == path:
+                    files.append(path)
+        except (OSError, ValueError, TypeError):
+            continue
+    return tuple(files)
+
+
+def python_recovery_hints(code: str, stderr: str) -> list[str]:
+    hints = []
+    if "DATA_DIRS" in code and "'list' object has no attribute 'split'" in stderr:
+        hints.append("DATA_DIRS is list[Path]: iterate it directly. Only "
+                     "os.environ['DATA_DIRS'].split(os.pathsep) returns environment paths.")
+    if "object has no attribute 'to_crs'" in stderr:
+        hints.append("Shapely geometry has no CRS: use "
+                     "gpd.GeoSeries([geometry], crs=verified_source_crs)"
+                     ".to_crs(target_crs).iloc[0]. "
+                     "Verify the actual source CRS before declaring it.")
+    if "Analysis may write only inside its run directory" in stderr:
+        hints.append("Write to RUN_DIR / filename or a relative filename. "
+                     "Use geo_deliver for workspace delivery; do not copy to workspace/fonts.")
+    if "Read path is outside allowed" in stderr:
+        hints.append("Read only returned QGIS diagnostic files, not the QGIS directory/profile. "
+                     "For QGIS fonts prefer font_family; explicit font_file must be in authorized "
+                     "data/workspace. Do not inspect system directories or tool source code.")
+    return hints
 
 
 class GeoPythonInput(BaseModel):
@@ -60,10 +112,14 @@ class GeoPythonTool(BaseTool):
         "GeoPandas, Shapely, pandas, matplotlib (Agg) and rasterio are available. "
         "SOURCE_CWD and DATA_DIRS identify read-only source folders; RUN_DIR is the only "
         "allowed output folder and is also the working directory. "
-        "These paths are injected as Python Path globals and environment variables; "
-        "the DATA_DIRS environment variable uses os.pathsep-separated paths. "
+        "Injected: SOURCE_CWD: Path, RUN_DIR: Path, DATA_DIRS: list[Path] (iterate directly). "
+        "Only os.environ['DATA_DIRS'] is an os.pathsep-separated string. "
         "Configured analysis, map and previous Python run outputs "
-        "are available as read-only inputs. "
+        "are read-only. Existing QGIS request/result/manifest/stdout/stderr files are readable; "
+        "QGIS directory listing/profile access is not allowed. Shapely geometries have no CRS; "
+        "transform them via gpd.GeoSeries([geometry], crs=verified_source_crs).to_crs(target_crs). "
+        "Prefer geo_analysis for buffer/clip/intersection/distance/count/impact; "
+        "for other installed GIS operations use geo_qgis search then help then run. "
         "Use relative output filenames or RUN_DIR / filename. Network and subprocesses "
         "are unavailable. Returns script, manifest, stdout/stderr and generated file paths. "
         "Inspect results and send generated PNG maps to geo_map_review before delivery. "
@@ -145,6 +201,12 @@ class GeoPythonTool(BaseTool):
             if directory:
                 directories.append(Path(directory).expanduser())
         read_dirs = tuple(directories)
+        qgis_directory = getattr(getattr(config, "qgis", None), "outputs_dir", "")
+        diagnostic_files = ()
+        if qgis_directory:
+            qgis_root = Path(qgis_directory).expanduser()
+            qgis_root = qgis_root if qgis_root.is_absolute() else context.cwd / qgis_root
+            diagnostic_files = qgis_diagnostic_files(qgis_root)
         try:
             result = await execute_python(
                 code=arguments.code,
@@ -155,6 +217,7 @@ class GeoPythonTool(BaseTool):
                 timeout_seconds=timeout,
                 max_output_chars=execution.max_output_chars,
                 read_dirs=read_dirs,
+                read_files=diagnostic_files,
             )
         except (OSError, ValueError) as exc:
             if reserved:
@@ -170,11 +233,18 @@ class GeoPythonTool(BaseTool):
             else ("succeeded" if result["exit_code"] == 0 else "failed")
         )
         result = {"status": status, **result}
+        result["execution_contract"] = {
+            "SOURCE_CWD": "Path", "RUN_DIR": "Path", "DATA_DIRS": "list[Path]",
+            "DATA_DIRS_environment": "str separated by os.pathsep",
+            "output_directory": result.get("run_dir"),
+            "qgis_diagnostics": "Exact request/result/manifest/stdout/stderr files of recent jobs",
+        }
         if status != "succeeded":
             if reserved:
                 refund_map_render(identity, context.metadata)
             lines = result["stderr"].strip().splitlines()
             result["error_summary"] = lines[-1][:500] if lines else status
+            result["recovery_hints"] = python_recovery_hints(arguments.code, result["stderr"])
         response = ToolResult(
             output=json.dumps(result, ensure_ascii=False, indent=2),
             is_error=result["timed_out"] or result["exit_code"] != 0,

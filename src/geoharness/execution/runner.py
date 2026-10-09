@@ -81,6 +81,7 @@ async def execute_python(
     timeout_seconds: float,
     max_output_chars: int,
     read_dirs: tuple[Path, ...] = (),
+    read_files: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     """Save and execute a script, returning and persisting its reproducibility record."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
@@ -106,10 +107,18 @@ async def execute_python(
         resolved = str(directory.resolve())
         if resolved not in read_roots:
             read_roots.append(resolved)
+    exact_files = []
+    for file in read_files:
+        file = Path(file).expanduser()
+        file = Path(os.path.abspath(file if file.is_absolute() else cwd / file))
+        if not file.is_file() or file.resolve() != file:
+            raise ValueError("Exact read_files must be existing files without redirected links")
+        exact_files.append(str(file))
     spec = run_dir / ".execution.json"
     spec.write_text(
         json.dumps(
-            {"run_dir": str(run_dir), "read_roots": read_roots, "source_cwd": str(cwd)},
+            {"run_dir": str(run_dir), "read_roots": read_roots, "source_cwd": str(cwd),
+             "read_files": exact_files},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -191,6 +200,9 @@ def _install_guards(spec: dict[str, Any]) -> None:
     """Install Python audit checks and native GIS file checks in the child."""
     run_dir = Path(spec["run_dir"]).resolve()
     data_roots = [Path(value).resolve() for value in spec["read_roots"]]
+    # Parent freezes canonical file identities. Resolving again here could grant a
+    # different target if a file/parent link changes between discovery and startup.
+    read_files = {Path(value).absolute() for value in spec.get("read_files", [])}
     runtime_roots = {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()}
     # Matplotlib reads font files lazily, after imports and after the audit hook.
     if system_root := os.environ.get("SYSTEMROOT", os.environ.get("SystemRoot")):
@@ -241,14 +253,15 @@ def _install_guards(spec: dict[str, Any]) -> None:
             lower_parts.add(selected_root.name.lower())
         filename = path.name.lower()
         names = {filename, Path(text).name.lower()}
-        sensitive = (
-            lower_parts & denied_parts
-            or any(name.startswith(".env") for name in names)
+        sensitive_name = (
+            any(name.startswith(".env") for name in names)
             or any(re.match(r"(?:secret|secrets|credentials)(?:[._-]|$)", name) for name in names)
             or any(name in {"id_rsa", "id_ed25519"} for name in names)
             or any(name.endswith((".pem", ".key", ".p12", ".pfx")) for name in names)
         )
-        if sensitive or not allowed_roots:
+        exact_file = (path in read_files and Path(os.path.abspath(text)) == path
+                      and path.is_file())
+        if sensitive_name or (lower_parts & denied_parts or not allowed_roots) and not exact_file:
             raise PermissionError(f"Read path is outside allowed data/runtime directories: {path}")
         return path
 
