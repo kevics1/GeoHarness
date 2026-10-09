@@ -10,6 +10,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from xml.sax.saxutils import escape
 
+import geopandas as gpd
 import pytest
 from openharness.tools.base import ToolExecutionContext
 from pydantic import ValidationError
@@ -25,6 +26,18 @@ from geoharness.qgis.project_worker import (
 )
 from geoharness.qgis.worker_context import WorkerContext
 from geoharness.tools.geo_qgis_project import GeoQgisProjectInput, GeoQgisProjectTool
+
+
+@pytest.fixture(autouse=True)
+def source_for_create_contracts(tmp_path):
+    from shapely.geometry import Point
+
+    directory = tmp_path / "data"
+    directory.mkdir(exist_ok=True)
+    gpd.GeoDataFrame({"risk": ["high", "low"], "name": ["A", "B"]},
+                     geometry=[Point(0, 0), Point(1, 1)], crs=4326).to_file(
+        directory / "source.geojson", driver="GeoJSON",
+    )
 
 
 def _context(tmp_path: Path, *, enabled: bool = True, repairs: int = 2) -> ToolExecutionContext:
@@ -137,6 +150,7 @@ async def test_create_forwards_styles_and_roots_and_flattens_delivery_metadata(
                     "field": "risk",
                     "categories": [
                         {"value": "high", "label": "High risk", "color": "#ff0000"},
+                        {"value": "low", "label": "Low risk", "color": "#00ff00"},
                     ],
                 },
                 "label_field": "name",

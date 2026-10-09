@@ -83,6 +83,61 @@ def _polygons() -> gpd.GeoDataFrame:
     )
 
 
+def test_single_redraw_retains_explicit_extent(tmp_path, monkeypatch):
+    gdf = _polygons()
+    bounds = [-1, -1, 8, 5]
+    output = tmp_path / "original.png"
+    render_map(gdf, column="value", output_path=output, extent=bounds)
+    package = export_map_project(tmp_path / "single-extent", layers=[{"gdf": gdf, "label": "A"}],
+                                 output_path=output, extent=bounds,
+                                 render_kwargs={"mode": "single", "column": "value"})
+    original = render_map
+    called = {}
+
+    def capture(*args, **kwargs):
+        called.update(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("geoharness.cartography.renderer.render_map", capture)
+    redraw_map_project(package["project_file"], output_path=tmp_path / "single-redraw.png")
+    assert called["extent"] == bounds
+
+
+def test_html_project_extent_matches_basemap_crs_and_redraw(tmp_path, monkeypatch):
+    from pyproj import CRS, Transformer
+
+    extent = [99.9, 29.9, 100.2, 30.2]
+    raster_bounds = Transformer.from_crs(4326, 32647, always_xy=True).transform_bounds(*extent)
+    raster = tmp_path / "utm.tif"
+    with rasterio.open(raster, "w", driver="GTiff", count=1, width=20, height=20,
+                       dtype="uint8", crs="EPSG:32647",
+                       transform=from_bounds(*raster_bounds, 20, 20)) as dataset:
+        dataset.write(np.ones((1, 20, 20), dtype="uint8"))
+    gdf = gpd.GeoDataFrame(geometry=[Point(100, 30), Point(100.1, 30.1)], crs=4326)
+    original_map = tmp_path / "original.html"
+    render_layers([{"gdf": gdf, "label": "Points"}], output_path=original_map,
+                  extent=extent, extent_crs="EPSG:4326", basemap_raster=str(raster))
+    package = export_map_project(tmp_path / "html-project",
+                                 layers=[{"gdf": gdf, "label": "Points"}],
+                                 output_path=original_map, extent=extent, extent_crs="EPSG:4326",
+                                 render_kwargs={"mode": "layers", "basemap_raster": str(raster)})
+    manifest = json.loads(Path(package["project_file"]).read_text(encoding="utf-8"))
+    assert CRS.from_user_input(manifest["project_crs"]) == CRS.from_epsg(32647)
+    np.testing.assert_allclose(manifest["extent"], raster_bounds)
+    original = render_layers
+    called = {}
+
+    def capture(*args, **kwargs):
+        called.update(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("geoharness.cartography.renderer.render_layers", capture)
+    result = redraw_map_project(package["project_file"], output_path=tmp_path / "redraw.html")
+    assert result.is_file()
+    assert CRS.from_user_input(called["extent_crs"]) == CRS.from_epsg(32647)
+    np.testing.assert_allclose(called["extent"], raster_bounds)
+
+
 def _single(tmp_path: Path, method: str = "graduated") -> dict[str, str]:
     gdf = _polygons()
     kwargs = {

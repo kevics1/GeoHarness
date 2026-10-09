@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from geoharness.cartography.workflow import (
     refund_map_render,
@@ -35,7 +35,7 @@ from geoharness.cartography.workflow import (
     review_with_budget,
 )
 from geoharness.config.settings import CartographyConfig, MapLayout
-from geoharness.tools.geo_qgis_project import QgisProjectLayout
+from geoharness.tools.geo_qgis_project import QgisExtent, QgisProjectLayout
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +62,15 @@ _FORMAT_SUFFIXES = {
 class GeoCartographyInput(BaseModel):
     """Input model for geo_cartography tool."""
 
-    action: Literal["symbolize", "compose", "export", "full", "project"] = Field(
+    action: Literal["symbolize", "compose", "export", "full", "project", "preflight"] = Field(
         default="full",
         description=(
             "symbolize: plan symbolization for a layer (no rendering); "
             "compose: describe map composition elements; "
             "export: arrange elements and write the map file; "
             "full: symbolize + compose + export in one step; "
-            "project: create an editable QGIS project for an existing output map"
+            "project: create an editable QGIS project for an existing output map; "
+            "preflight: read-only source, field, CRS and window checks without rendering"
         ),
     )
     layer_name: str = Field(
@@ -176,10 +177,8 @@ class GeoCartographyInput(BaseModel):
     qgis_layout: QgisProjectLayout | None = Field(
         default=None, description="Native layout: main map, optional detail, legend and footer.",
     )
-    map_extent: list[float] | None = Field(
+    map_extent: list[float] | QgisExtent | None = Field(
         default=None,
-        min_length=4,
-        max_length=4,
         validation_alias=AliasChoices("map_extent", "project_extent"),
         description=(
             "Actual map-frame xmin,ymin,xmax,ymax in project/output CRS. "
@@ -187,6 +186,24 @@ class GeoCartographyInput(BaseModel):
             "Use the existing map's bounds when context layers extend beyond its frame."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_extent(self) -> GeoCartographyInput:
+        if isinstance(self.map_extent, QgisExtent):
+            self.map_extent = [self.map_extent.xmin, self.map_extent.ymin,
+                               self.map_extent.xmax, self.map_extent.ymax]
+        if self.map_extent is not None:
+            import math
+
+            if len(self.map_extent) != 4 or not all(map(math.isfinite, self.map_extent)):
+                raise ValueError("map_extent requires four finite xmin,ymin,xmax,ymax coordinates")
+            if self.map_extent[0] >= self.map_extent[2] or self.map_extent[1] >= self.map_extent[3]:
+                raise ValueError("map_extent must have positive width and height")
+            if not self.map_crs and self.action != "project":
+                raise ValueError("explicit map_extent requires map_crs")
+        if self.qgis_layout and self.qgis_layout.detail_extent and not self.map_crs:
+            raise ValueError("explicit detail_extent requires map_crs")
+        return self
 
 
 class GeoCartographyTool(BaseTool):
@@ -200,6 +217,7 @@ class GeoCartographyTool(BaseTool):
         "type. Provide a data source (file_path/source_type+source_name/geojson) "
         "to actually render; omit it to get a symbolization plan only. "
         "Rendering returns an editable QGIS project with data and print layout. "
+        "action=preflight checks fields, geometry, CRS, bounds and visible counts without drawing. "
         "action=project packages an existing map with its actual sources without redrawing. "
         "Keep the same map_id across all versions; use geo_deliver for final delivery."
     )
@@ -235,6 +253,11 @@ class GeoCartographyTool(BaseTool):
             return self._compose(args, template_path)
         if args.action == "project":
             return await self._project_only(args, bridge_rules, outputs_dir, context)
+        if args.action == "preflight":
+            if not self._has_source(args):
+                return ToolResult(output="Error: preflight requires data sources", is_error=True)
+            rule = self._get_bridge_rule(args.analysis_type or _THEMATIC_RULE_KEY, bridge_rules)
+            return await self._render(args, rule, outputs_dir, context)
         if args.action == "export":
             return await self._export(args, bridge_rules, outputs_dir, context)
         if args.action == "full":
@@ -366,6 +389,12 @@ class GeoCartographyTool(BaseTool):
             from geoharness.cartography.renderer import _layer_style_options
 
             _layer_style_options(item)
+            if "required" in item and not isinstance(item["required"], bool):
+                raise ValueError("Layer required must be a boolean")
+            for key in ("expected_feature_count", "minimum_visible_features"):
+                if key in item and (not isinstance(item[key], int) or isinstance(item[key], bool)
+                                    or item[key] < 0):
+                    raise ValueError(f"Layer {key} must be a nonnegative integer")
             out.append(item)
         return out
 
@@ -426,6 +455,8 @@ class GeoCartographyTool(BaseTool):
             gdf = cache["single"]
             if gdf.crs is None:
                 raise ValueError("Data source has no CRS; explicitly declare it before mapping.")
+            if args.map_crs:
+                gdf = gdf.to_crs(args.map_crs)
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
         except Exception as exc:  # network / driver failures
@@ -447,6 +478,7 @@ class GeoCartographyTool(BaseTool):
                 color_scheme=scheme,
                 n_classes=n_classes,
                 title=title,
+                extent=args.map_extent,
                 **({"layout": args.layout} if output_path.suffix.lower() != ".html" else {}),
             )
         except ValueError as exc:
@@ -510,6 +542,8 @@ class GeoCartographyTool(BaseTool):
                         catalog=catalog,
                     )
                 gdf = cache[cache_key]
+                if args.map_crs:
+                    gdf = gdf.to_crs(args.map_crs)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Layer %d (%s) failed to resolve", i, name)
                 return ToolResult(
@@ -518,6 +552,8 @@ class GeoCartographyTool(BaseTool):
                     ),
                     is_error=True,
                 )
+            if gdf.empty and not spec.get("required", True):
+                continue
             total_features += len(gdf)
             layers.append(
                 {
@@ -538,6 +574,7 @@ class GeoCartographyTool(BaseTool):
                 layout=args.layout,
                 raster_cache=source_cache,
                 extent=args.map_extent,
+                extent_crs=args.map_crs,
             )
         except ValueError as exc:
             return ToolResult(output=f"Error: {exc}", is_error=True)
@@ -699,6 +736,33 @@ class GeoCartographyTool(BaseTool):
                 "layout": args.layout or config.map_review.layout,
             }
         )
+        preflight = await self._run_off_loop(
+            lambda: self._preflight_blocking(args, rule, context), what="map preflight",
+        )
+        if preflight.is_error or args.action == "preflight":
+            return preflight
+        args = args.model_copy(update={
+            "map_crs": preflight.metadata["preflight"]["display_crs"],
+            "map_extent": preflight.metadata["preflight"]["map_extent"],
+        })
+        context.metadata["map_preflight"] = preflight.metadata["preflight"]
+        renderer = args.renderer or config.cartography.static_renderer
+        native = renderer == "qgis" and desired.suffix.lower() in {".png", ".pdf"}
+        if not native and args.basemap_raster and desired.suffix.lower() != ".html":
+            from pyproj import CRS
+
+            raster_report = next(layer for layer in preflight.metadata["preflight"]["layers"]
+                                 if layer["kind"] == "raster")
+            same_crs = (
+                CRS.from_user_input(raster_report["source_crs"])
+                == CRS.from_user_input(args.map_crs)
+            )
+            if not same_crs:
+                return ToolResult(output="Error: Matplotlib requires the basemap CRS; use QGIS "
+                                  "to reproject the backdrop to map_crs.", is_error=True)
+        if not native and args.qgis_layout is not None:
+            return ToolResult(output="Error: qgis_layout requires QGIS PNG/PDF output",
+                              is_error=True)
         import hashlib
 
         identity = (
@@ -727,8 +791,7 @@ class GeoCartographyTool(BaseTool):
             ).hexdigest()[:16]
         )
         args = args.model_copy(update={"map_id": identity})
-        renderer = args.renderer or config.cartography.static_renderer
-        if renderer == "qgis" and desired.suffix.lower() in {".png", ".pdf"}:
+        if native:
             from geoharness.cartography.qgis_bridge import render_qgis_map
 
             return await render_qgis_map(self, args, rule, context)
@@ -747,7 +810,56 @@ class GeoCartographyTool(BaseTool):
             refund_map_render(identity, context.metadata)
             return result
         checked = await self._inspect_and_repair(args, rule, outputs_dir, context, result)
-        return await self._attach_project(args, rule, context, checked)
+        attached = await self._attach_project(args, rule, context, checked)
+        attached.metadata["preflight"] = preflight.metadata["preflight"]
+        return attached
+
+    def _preflight_blocking(self, args, rule, context) -> ToolResult:
+        import json
+
+        from geoharness.cartography.preflight import validate_frames
+        from geoharness.cartography.renderer import _layer_style_options
+        from geoharness.cartography.sources import resolve_geodataframe
+
+        specs = self._parse_layers(args.layers)
+        if not specs:
+            specs = [{"source_type": args.source_type, "file_path": args.file_path,
+                      "source_name": args.source_name, "geojson": args.geojson,
+                      "label": args.layer_name or args.source_name or "Map"}]
+        frames = []
+        cache = context.metadata["_map_source_cache"]
+        for index, spec in enumerate(specs):
+            gdf = resolve_geodataframe(
+                source_type=spec.get("source_type", ""), file_path=spec.get("file_path", ""),
+                source_name=spec.get("source_name", ""), geojson_text=spec.get("geojson", ""),
+                catalog=context.metadata.get("data_catalog"),
+            )
+            options = _layer_style_options(spec) if args.layers else {
+                **rule, "column": args.field_name,
+                "render_method": rule.get("render_method", "categorized") if args.field_name
+                else "none",
+            }
+            frames.append({"gdf": gdf, "style": options, "label": spec.get("label", ""),
+                           "label_field": spec.get("label_field", ""),
+                           "required": spec.get("required", True),
+                           "expected_feature_count": spec.get("expected_feature_count"),
+                           "minimum_visible_features": spec.get("minimum_visible_features",
+                               1 if spec.get("required", True) else 0)})
+        if args.basemap_raster:
+            frames.append({"raster_path": args.basemap_raster, "label": "Basemap"})
+        settings = context.metadata["geoharness_config"].cartography
+        report = validate_frames(
+            frames, map_crs=args.map_crs, map_extent=args.map_extent,
+            detail_extent=(args.qgis_layout.detail_extent.model_dump()
+                           if args.qgis_layout and args.qgis_layout.detail_extent else None),
+            minimum_span_geographic=settings.minimum_span_geographic,
+            minimum_span_projected=settings.minimum_span_projected,
+            extent_padding=settings.extent_padding,
+        )
+        for index, frame in enumerate(frames[:len(specs)]):
+            cache[f"layer_{index}" if args.layers else "single"] = frame["gdf"]
+        return ToolResult(output=json.dumps(report, ensure_ascii=False, indent=2),
+                          metadata={"preflight": report})
 
     async def _inspect_and_repair(
         self,
@@ -957,6 +1069,10 @@ class GeoCartographyTool(BaseTool):
                         geojson_text=str(spec.get("geojson") or ""),
                         catalog=catalog,
                     )
+                if args.map_crs:
+                    gdf = gdf.to_crs(args.map_crs)
+                if gdf.empty and not spec.get("required", True):
+                    continue
                 layers.append(
                     {
                         "gdf": gdf,
@@ -1011,6 +1127,7 @@ class GeoCartographyTool(BaseTool):
                     result.metadata.get("final_layout") or (args.layout or MapLayout()).model_dump()
                 ),
                 extent=args.map_extent,
+                extent_crs=args.map_crs,
                 publication_settings=context.metadata["geoharness_config"].publication,
             )
 
@@ -1162,4 +1279,4 @@ class GeoCartographyTool(BaseTool):
     def is_read_only(self, arguments: BaseModel) -> bool:
         """symbolize/compose only plan; export/full write files."""
         assert isinstance(arguments, GeoCartographyInput)
-        return arguments.action in ("symbolize", "compose")
+        return arguments.action in ("symbolize", "compose", "preflight")

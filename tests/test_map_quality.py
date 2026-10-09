@@ -454,8 +454,8 @@ async def test_review_artifacts_preserve_sources_and_cache_basemap(tmp_path, mon
     assert result.metadata["reviewed_artifact"] == "static_png_preview"
     assert all(path.read_bytes() == original for path, original in originals.items())
     assert Path(result.metadata["preview_path"]).parent != tmp_path
-    # Exports and the portable snapshot reuse the exact raster already drawn.
-    assert sum(Path(path).resolve() == basemap.resolve() for path in reads) == 1
+    # Preflight reads its header once; exports and the project reuse the pixel cache.
+    assert sum(Path(path).resolve() == basemap.resolve() for path in reads) == 2
 
 
 @pytest.mark.asyncio

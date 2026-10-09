@@ -20,6 +20,9 @@ data:
   file_dir: .
 cartography:
   static_renderer: qgis
+  minimum_span_geographic: 0.02
+  minimum_span_projected: 1000
+  extent_padding: 0.05
   outputs_dir: exports
   bridge_rules:
     impact:

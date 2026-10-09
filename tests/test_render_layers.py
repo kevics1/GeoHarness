@@ -227,4 +227,4 @@ class TestLayersToolParam:
             context,
         )
         assert res.is_error
-        assert "could not be loaded" in res.output
+        assert "map preflight failed" in res.output

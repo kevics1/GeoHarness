@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -151,11 +152,21 @@ class CartographyConfig:
     default_template: str = ""
     outputs_dir: str = "exports"
     static_renderer: str = "qgis"
+    minimum_span_geographic: float = 0.02
+    minimum_span_projected: float = 1000
+    extent_padding: float = 0.05
     bridge_rules: dict[str, BridgeRule] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.static_renderer not in {"qgis", "matplotlib"}:
             raise ValueError("cartography.static_renderer must be qgis or matplotlib")
+        if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0
+               for value in (self.minimum_span_geographic, self.minimum_span_projected)):
+            raise ValueError("cartography minimum extent spans must be positive")
+        if isinstance(self.extent_padding, bool) or not math.isfinite(self.extent_padding) or not (
+            0 <= self.extent_padding <= 1
+        ):
+            raise ValueError("cartography.extent_padding must be between 0 and 1")
 
 
 @dataclass(frozen=True)
@@ -293,6 +304,9 @@ def _parse_cartography(raw: dict[str, Any] | None) -> CartographyConfig:
         default_template=template,
         outputs_dir=outputs_dir,
         static_renderer=raw.get("static_renderer", "qgis"),
+        minimum_span_geographic=raw.get("minimum_span_geographic", 0.02),
+        minimum_span_projected=raw.get("minimum_span_projected", 1000),
+        extent_padding=raw.get("extent_padding", 0.05),
         bridge_rules=rules,
     )
 

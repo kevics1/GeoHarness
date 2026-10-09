@@ -104,7 +104,7 @@ async def test_corrupt_source_is_a_tool_error_before_render(tmp_path):
         ),
         context,
     )
-    assert result.is_error and "preparation failed" in result.output
+    assert result.is_error and "map preflight failed" in result.output
     assert not context.metadata["map_workflow_state"].get("maps")
 
 
@@ -152,7 +152,8 @@ async def test_cancelled_source_preparation_preserves_cancellation(tmp_path, mon
     task = asyncio.create_task(
         GeoCartographyTool().execute(
             GeoCartographyInput(
-                geojson='{"type":"FeatureCollection","features":[]}',
+                geojson='{"type":"FeatureCollection","features":[{"type":"Feature",'
+                        '"properties":{},"geometry":{"type":"Point","coordinates":[1,1]}}]}',
                 output_format="png",
             ),
             context,

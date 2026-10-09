@@ -43,6 +43,7 @@ _RENDER_KEYS = {
     "add_legend",
     "add_scalebar",
     "add_north_arrow",
+    "extent",
 }
 _LAYER_KEYS = {
     "color", "column", "field_name", "render_method", "color_scheme", "n_classes",
@@ -778,6 +779,7 @@ def export_map_project(
     render_kwargs: dict[str, Any],
     layout: MapLayout | None = None,
     extent: list[float] | None = None,
+    extent_crs: str = "",
     publication_settings: Any = None,
 ) -> dict[str, Any]:
     """Snapshot an actual native render into a portable editable project.
@@ -868,8 +870,19 @@ def export_map_project(
             ):
                 raise ValueError("Project extent needs finite xmin, ymin, xmax, ymax bounds.")
             canvas_extent = [float(value) for value in extent]
+            if extent_crs:
+                from pyproj import Transformer
+
+                canvas_extent = list(Transformer.from_crs(
+                    extent_crs, crs, always_xy=True,
+                ).transform_bounds(*canvas_extent, errcheck=True))
+                if not np.isfinite(canvas_extent).all() or (
+                    canvas_extent[0] >= canvas_extent[2] or canvas_extent[1] >= canvas_extent[3]
+                ):
+                    raise ValueError("Project extent transformation produced invalid bounds")
+            kwargs["extent"] = canvas_extent
             if mode == "layers":
-                kwargs["extent"] = canvas_extent
+                kwargs["extent_crs"] = crs
         preview_name = "preview" + preview.suffix.lower()
         shutil.copyfile(preview, staging / preview_name)
         preview_sha256 = hashlib.sha256((staging / preview_name).read_bytes()).hexdigest()
@@ -977,6 +990,7 @@ def redraw_map_project(project_file: str | Path, *, output_path: str | Path | No
     kwargs = {key: value for key, value in kwargs.items() if key in {"title", "figsize", "dpi"}}
     if "extent" in project.render_kwargs:
         kwargs["extent"] = project.render_kwargs["extent"]
+        kwargs["extent_crs"] = project.project_crs
     return render_layers(
         layers, output_path=output, basemap_raster=basemap, layout=project.layout, **kwargs
     )

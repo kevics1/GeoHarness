@@ -51,13 +51,17 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
             }
         )
     for index, spec in enumerate(specs):
-        gdf = resolve_geodataframe(
-            source_type=spec.get("source_type") or "file",
-            source_name=spec.get("source_name", ""),
-            file_path=spec.get("file_path", ""),
-            geojson_text=spec.get("geojson", ""),
-            catalog=context.metadata.get("data_catalog"),
-        )
+        cache = context.metadata.get("_map_source_cache", {})
+        key = f"layer_{index}" if args.layers else "single"
+        gdf = cache.get(key)
+        if gdf is None:
+            gdf = resolve_geodataframe(
+                source_type=spec.get("source_type") or "file",
+                source_name=spec.get("source_name", ""), file_path=spec.get("file_path", ""),
+                geojson_text=spec.get("geojson", ""), catalog=context.metadata.get("data_catalog"),
+            )
+        if gdf.empty and not spec.get("required", True):
+            continue
         if gdf.crs is None:
             raise ValueError(f"Layer {index + 1} has no CRS; explicitly declare it before mapping")
         options = (
@@ -103,6 +107,10 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
                 "style": style,
                 "label_field": spec.get("label_field", ""),
                 "label_style": spec.get("label_style"),
+                "required": spec.get("required", True),
+                "expected_feature_count": len(gdf),
+                "minimum_visible_features": spec.get("minimum_visible_features",
+                                                     1 if spec.get("required", True) else 0),
             }
         )
     return layers
@@ -294,6 +302,7 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
             "review_path": str(report),
             "quality_status": "draft",
             "repair_count": 0,
+            "preflight": context.metadata.get("map_preflight"),
             **budget,
         },
     )

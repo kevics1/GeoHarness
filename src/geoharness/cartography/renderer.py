@@ -509,6 +509,7 @@ def render_static(
     add_scalebar: bool = True,
     add_north_arrow: bool = True,
     layout: MapLayout | None = None,
+    extent: list[float] | None = None,
 ) -> Path:
     """Render a static map to PNG / PDF / SVG and return the written path."""
     _configure_matplotlib()
@@ -555,6 +556,9 @@ def render_static(
                 markersize=options.point_size, aspect="equal", alpha=alpha,
             )
 
+    if extent is not None:
+        ax.set_xlim(extent[0], extent[2])
+        ax.set_ylim(extent[1], extent[3])
     if title:
         ax.set_title(title, fontsize=options.title_font_size, fontweight="bold", pad=12)
 
@@ -614,6 +618,7 @@ def render_interactive(
     output_path: Any,
     tiles: str = "OpenStreetMap",
     tooltip_fields: list[str] | None = None,
+    extent: list[float] | None = None,
 ) -> Path:
     """Render an interactive Leaflet map (HTML) via folium; return the path."""
     import folium
@@ -630,6 +635,10 @@ def render_interactive(
     view["_geoh_weight"] = weights if weights else [1.2] * len(view)
 
     bounds = view.total_bounds
+    if extent is not None:
+        from pyproj import Transformer
+
+        bounds = Transformer.from_crs(gdf.crs, 4326, always_xy=True).transform_bounds(*extent)
     center = [(bounds[1] + bounds[3]) / 2.0, (bounds[0] + bounds[2]) / 2.0]
     fmap = folium.Map(location=center, tiles=tiles, control_scale=True)
 
@@ -891,6 +900,7 @@ def render_layers(
     layout: MapLayout | None = None,
     raster_cache: dict[str, Any] | None = None,
     extent: list[float] | None = None,
+    extent_crs: str = "",
 ) -> Path:
     """Compose several layers onto ONE output map.
 
@@ -963,7 +973,7 @@ def render_layers(
 
                 with rasterio.open(basemap_raster) as source:
                     native_crs = source.crs
-            native_crs = native_crs or layers[0]["gdf"].crs
+            native_crs = extent_crs or native_crs or layers[0]["gdf"].crs
             extent = list(Transformer.from_crs(native_crs, 4326, always_xy=True).transform_bounds(
                 *extent
             ))

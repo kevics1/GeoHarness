@@ -107,6 +107,9 @@ class QgisProjectLayer(BaseModel):
     raster_style: QgisRasterStyle | None = None
     label_field: str = ""
     label_style: QgisLabelStyle | None = None
+    required: bool = True
+    expected_feature_count: int | None = Field(default=None, ge=0)
+    minimum_visible_features: int = Field(default=1, ge=0)
 
     @model_validator(mode="after")
     def validate_kind(self) -> QgisProjectLayer:
@@ -175,7 +178,7 @@ class QgisProjectLayout(BaseModel):
 class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["create", "inspect", "export"]
+    action: Literal["create", "inspect", "export", "preflight"]
     layers: list[QgisProjectLayer] = Field(
         default_factory=list,
         max_length=64,
@@ -186,7 +189,7 @@ class GeoQgisProjectInput(BaseModel):
     )
     title: str = ""
     crs: str = Field(default="", description="Explicit project CRS, e.g. EPSG:3857.")
-    map_extent: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    map_extent: list[float] | QgisExtent | None = None
     layout: QgisProjectLayout | None = None
     layout_name: str = Field(
         default="", description="Saved layout to export; required if ambiguous."
@@ -199,7 +202,7 @@ class GeoQgisProjectInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
-        if self.action == "create":
+        if self.action in {"create", "preflight"}:
             if not self.layers:
                 raise ValueError("create requires at least one local layer")
             if self.project_path:
@@ -209,18 +212,28 @@ class GeoQgisProjectInput(BaseModel):
         elif self.layers or self.crs or self.map_extent is not None or self.layout is not None:
             raise ValueError("inspect/export preserves the saved project's layers, CRS and layout")
         if self.map_extent is not None:
+            if isinstance(self.map_extent, QgisExtent):
+                self.map_extent = [self.map_extent.xmin, self.map_extent.ymin,
+                                   self.map_extent.xmax, self.map_extent.ymax]
+            if len(self.map_extent) != 4:
+                raise ValueError("map_extent requires four coordinates")
             xmin, ymin, xmax, ymax = self.map_extent
             if not all(math.isfinite(value) for value in self.map_extent):
                 raise ValueError("map_extent must contain finite coordinates")
             if xmin >= xmax or ymin >= ymax:
                 raise ValueError("map_extent must be xmin,ymin,xmax,ymax with positive area")
+            if not self.crs:
+                raise ValueError("explicit map_extent requires crs")
+        if self.layout and self.layout.detail_extent and not self.crs:
+            raise ValueError("explicit detail_extent requires crs")
         return self
 
 
 class GeoQgisProjectTool(BaseTool):
     name = "geo_qgis_project"
     description = (
-        "Create a real editable QGIS project, inspect one, or export a user-edited saved layout. "
+        "Preflight map data/fields/CRS/extents without rendering, create an editable QGIS "
+        "project, inspect one, or export a user-edited saved layout. "
         "QGIS runs offscreen in a separate process. Create accepts local vector/raster layers, "
         "explicit category colors/fields, labels, CRS and extent; layer order is bottom first. "
         "Create/export packages snapshots as GPKG/TIFF and writes a new project plus a PNG "
@@ -236,8 +249,21 @@ class GeoQgisProjectTool(BaseTool):
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
-        if not config.qgis.enabled:
+        if not config.qgis.enabled and arguments.action != "preflight":
             return ToolResult(output="Error: QGIS integration is disabled.", is_error=True)
+        preflight = None
+        if arguments.action in {"create", "preflight"}:
+            try:
+                preflight = await asyncio.wait_for(
+                    asyncio.to_thread(self._preflight, arguments, context),
+                    timeout=config.qgis.timeout_seconds,
+                )
+            except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
+                return ToolResult(output=f"Error: QGIS map preflight failed: {exc}", is_error=True,
+                                  metadata={"preflight_status": "failed", "render_executed": False})
+            if arguments.action == "preflight":
+                return ToolResult(output=json.dumps(preflight, ensure_ascii=False, indent=2),
+                                  metadata={"preflight": preflight, "render_executed": False})
         from geoharness.qgis.runner import execute_qgis
 
         identity = arguments.map_id or map_identity(
@@ -249,6 +275,8 @@ class GeoQgisProjectTool(BaseTool):
             if stop is not None:
                 return ToolResult(output=stop, metadata={"render_budget_exhausted": True})
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
+        if preflight:
+            payload.update(crs=preflight["display_crs"], map_extent=preflight["map_extent"])
         # NULL is a real category key, rather than an absent optional setting.
         for source, packed in zip(arguments.layers, payload.get("layers", [])):
             if source.style is not None:
@@ -276,7 +304,7 @@ class GeoQgisProjectTool(BaseTool):
         if result.get("status") != "succeeded" and reserved:
             refund_map_render(identity, context.metadata)
         details: dict[str, Any] = result.get("result") or {}
-        metadata = {**details, **result, "map_id": identity}
+        metadata = {**details, **result, "map_id": identity, "preflight": preflight}
         return ToolResult(
             output=json.dumps(result, ensure_ascii=False, indent=2),
             is_error=result.get("status") != "succeeded",
@@ -284,4 +312,49 @@ class GeoQgisProjectTool(BaseTool):
         )
 
     def is_read_only(self, arguments: BaseModel) -> bool:
-        return isinstance(arguments, GeoQgisProjectInput) and arguments.action == "inspect"
+        return isinstance(arguments, GeoQgisProjectInput) and arguments.action in {
+            "inspect", "preflight",
+        }
+
+    def _preflight(self, arguments, context) -> dict:
+        import geopandas as gpd
+        import rasterio
+
+        from geoharness.cartography.preflight import validate_frames
+        from geoharness.qgis.project_worker import _local_source
+        from geoharness.qgis.worker_context import WorkerContext
+
+        config = context.metadata["geoharness_config"]
+        guard = WorkerContext(Path(context.cwd), Path(context.cwd),
+                              qgis_read_roots(config, Path(context.cwd)))
+        frames = []
+        for layer in arguments.layers:
+            path, options = _local_source(layer.file_path, guard)
+            common = {"label": layer.name or path.stem, "required": layer.required,
+                      "expected_feature_count": layer.expected_feature_count,
+                      "minimum_visible_features": layer.minimum_visible_features if layer.required
+                      else (layer.minimum_visible_features
+                            if "minimum_visible_features" in layer.model_fields_set else 0)}
+            if layer.kind == "raster":
+                if layer.raster_style:
+                    with rasterio.open(path) as source:
+                        if layer.raster_style.band > source.count:
+                            raise ValueError(f"Raster band {layer.raster_style.band} is missing")
+                frames.append({**common, "raster_path": str(path)})
+            else:
+                name: str | int = layer.layer_name
+                if not name and options:
+                    selector, selected = options.split("=", 1)
+                    name = int(selected) if selector == "layerid" else selected
+                gdf = gpd.read_file(path, **({"layer": name} if name else {}))
+                frames.append({**common, "gdf": gdf, "label_field": layer.label_field,
+                               "style": layer.style.model_dump() if layer.style else {}})
+        settings = config.cartography
+        return validate_frames(
+            frames, map_crs=arguments.crs, map_extent=arguments.map_extent,
+            detail_extent=(arguments.layout.detail_extent.model_dump()
+                           if arguments.layout and arguments.layout.detail_extent else None),
+            coerce_numeric=False, minimum_span_geographic=settings.minimum_span_geographic,
+            minimum_span_projected=settings.minimum_span_projected,
+            extent_padding=settings.extent_padding,
+        )
