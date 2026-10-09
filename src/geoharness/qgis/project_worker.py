@@ -857,6 +857,9 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
 
     if layout.customProperty("geoharness/template", "") != "structured-v1":
         return {"checked": False, "valid": None, "problems": []}
+    if layout.units() != Qgis.LayoutUnit.Millimeters:
+        return {"checked": False, "valid": None, "problems": [],
+                "reason": "Bounds check requires a millimetre scene; saved layout preserved"}
     page = layout.renderContext().measurementConverter().convert(
         layout.pageCollection().page(0).pageSize(), Qgis.LayoutUnit.Millimeters)
     regions = json.loads(layout.customProperty("geoharness/regions", "{}"))
@@ -869,33 +872,35 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
             continue
         name = item.id() or item.uuid()
         rect = item.mapRectToScene(item.rect())
+        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
         if name not in {*regions, "scale_bar", "footer_text"}:
             # User annotations, north arrows and inset decorations legitimately
             # overlap maps. Preserve them; pixel review assesses their placement.
-            user_items[name] = [rect.x(), rect.y(), rect.width(), rect.height()]
+            user_items[name] = [x, y, w, h]
             continue
-        rectangles[name] = [rect.x(), rect.y(), rect.width(), rect.height()]
+        rectangles[name] = [x, y, w, h]
         owner = regions.get("footer") if name in {"scale_bar", "footer_text"} else regions.get(name)
         if owner is not None:
-            x, y, width, height = owner
-            if rect.left() < x - 0.05 or rect.top() < y - 0.05 or (
-                rect.right() > x + width + 0.05 or rect.bottom() > y + height + 0.05
+            ox, oy, width, height = owner
+            if x < ox - 0.05 or y < oy - 0.05 or (
+                x + w > ox + width + 0.05 or y + h > oy + height + 0.05
             ):
                 problems.append(f"{name}: item exceeds its reserved rectangle")
         if isinstance(item, QgsLayoutItemLegend):
             minimum = QgsLegendRenderer(item.model(), item.legendSettings()).minimumSize()
             content_metrics[name] = {
                 "required_mm": [minimum.width(), minimum.height()],
-                "available_mm": [item.rect().width(), item.rect().height()],
+                "available_mm": [w, h],
             }
-            if minimum.width() > item.rect().width() + 0.05 or (
-                minimum.height() > item.rect().height() + 0.05
+            if minimum.width() > w + 0.05 or (
+                minimum.height() > h + 0.05
             ):
                 problems.append(f"{name}: legend content exceeds its reserved rectangle")
         elif isinstance(item, QgsLayoutItemLabel):
-            minimum = item.sizeForText()
-            if minimum.width() > item.rect().width() + 0.05 or (
-                minimum.height() > item.rect().height() + 0.05
+            minimum = layout.renderContext().measurementConverter().convert(
+                item.sizeForText(), Qgis.LayoutUnit.Millimeters)
+            if minimum.width() > w + 0.05 or (
+                minimum.height() > h + 0.05
             ):
                 problems.append(f"{name}: label text exceeds its reserved rectangle")
     problems.extend(_rectangle_problems(rectangles, page.width(), page.height()))
@@ -961,7 +966,8 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                 effective["detail_height_ratio"] = (
                     item.rect().height() / main.rect().height())
         elif isinstance(item, QgsLayoutItemLegend):
-            effective["sidebar_width_mm"] = item.rect().width()
+            effective["sidebar_width_mm"] = converter.convert(
+                item.sizeWithUnits(), Qgis.LayoutUnit.Millimeters).width()
             record_font("legend_font_size", item.style(
                 Qgis.LegendComponent.SymbolLabel).textFormat())
         elif isinstance(item, QgsLayoutItemLabel):
