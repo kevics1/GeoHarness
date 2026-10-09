@@ -789,7 +789,10 @@ def _layer_symbolization(
 ) -> tuple[dict[str, Any], list[str], list[tuple[str, str]], list[float] | None,
            list[dict[str, Any]] | None]:
     """Use identical row colors and category definitions for native and QGIS maps."""
+    from geoharness.cartography.values import normalize_style
+
     options = _layer_style_options(layer)
+    options = normalize_style(gdf, options)
     kind = _geom_kind(gdf)
     column, method = options["column"], options["render_method"]
     if column and column not in gdf:

@@ -13,10 +13,19 @@ from openharness.tools.base import ToolResult
 
 def _fingerprint(tool, arguments, context) -> str | None:
     payload = arguments.model_dump(mode="json")
+    if payload.get("project_path"):
+        # Saved projects can reference external layers, fonts and images. Their
+        # dependency graph is not established at this seam; do not cache failures.
+        return None
     paths = []
 
     def collect(value):
         if isinstance(value, dict):
+            raster = value.get("basemap_raster") or (
+                value.get("file_path") if value.get("kind") == "raster" else None
+            )
+            if raster:
+                raise ValueError("Raster dependencies have no stable local identity")
             for key, item in value.items():
                 if key in {"file_path", "project_path", "basemap_raster", "font_file"} and item:
                     paths.append(item)
@@ -65,7 +74,8 @@ def _fingerprint(tool, arguments, context) -> str | None:
                 except (ValueError, OSError, TypeError, AttributeError):
                     return None
         files = {}
-        for value in paths:
+        remaining = 64 * 1024 * 1024
+        for value in dict.fromkeys(paths):
             if not isinstance(value, str) or "://" in value or "|" in value or value.startswith(
                 ("\\\\", "//"),
             ):
@@ -75,9 +85,11 @@ def _fingerprint(tool, arguments, context) -> str | None:
             try:
                 stat = path.stat()
                 files[str(path)] = [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
-                if path.suffix.lower() == ".vrt":
-                    return None  # Referenced data can change without changing the VRT.
-                if path.suffix.lower() in {".shp", ".gpkg", ".tif", ".tiff"}:
+                if path.suffix.lower() in {
+                    ".vrt", ".tif", ".tiff", ".img", ".asc", ".dem", ".png", ".jpg", ".jpeg",
+                }:
+                    return None  # GDAL can read dependencies not covered by filename patterns.
+                if path.suffix.lower() in {".shp", ".gpkg"}:
                     pattern = path.stem + ".*" if path.suffix.lower() == ".shp" else path.name + "*"
                     for companion in path.parent.glob(pattern):
                         details = companion.stat()
@@ -85,6 +97,20 @@ def _fingerprint(tool, arguments, context) -> str | None:
                                                  details.st_ctime_ns]
             except FileNotFoundError:
                 files[str(path)] = None
+        for value, identity in files.items():
+            if identity is None:
+                continue
+            if not config or identity[0] > remaining:
+                return None
+            checked = guard.read_path(value)
+            digest = hashlib.sha256()
+            with checked.open("rb") as stream:
+                while data := stream.read(min(1024 * 1024, remaining + 1)):
+                    remaining -= len(data)
+                    if remaining < 0:
+                        return None
+                    digest.update(data)
+            identity.append(digest.hexdigest())
         settings = ([asdict(value) if is_dataclass(value) else value.model_dump(mode="json")
                      for value in (config.cartography, config.qgis)] if config else None)
         return hashlib.sha256(json.dumps(

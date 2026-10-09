@@ -105,3 +105,16 @@ async def test_repaired_reference_output_invalidates_cached_failure(tmp_path):
     path.write_bytes(before)
     result = await tool.execute(arguments, context)
     assert not result.is_error, result.output
+
+
+async def test_mixed_scalar_annotations_match_the_actual_gpkg_snapshot(tmp_path):
+    manifest = _analysis(tmp_path, "distance")
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
+        action="preflight", layers=[{
+            "file_path": manifest["paths"]["result"]["geojson"],
+            "derivation": {"annotations": {"note": ["A", 2]}},
+        }], layout={"footer_text": "混合注记"},
+    ), context)
+    assert not result.is_error, result.output
+    assert result.metadata["preflight"]["analysis_evidence_status"] == "verified"

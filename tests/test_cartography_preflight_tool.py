@@ -102,6 +102,43 @@ async def test_same_deterministic_preflight_error_is_not_executed_again(tmp_path
     assert count == 2
 
 
+async def test_same_size_source_edit_with_restored_mtime_invalidates_error(tmp_path):
+    import os
+
+    source, context = setup(tmp_path)
+    original_stat = source.stat()
+    tool = GeoCartographyTool()
+    arguments = GeoCartographyInput(action="preflight", layers=json.dumps([
+        {"file_path": str(source), "column": "other", "render_method": "categorized"},
+    ]))
+    assert (await tool.execute(arguments, context)).is_error
+    assert (await tool.execute(arguments, context)).metadata["duplicate_error_blocked"]
+    source.write_bytes(source.read_bytes().replace(b'"value"', b'"other"'))
+    os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    result = await tool.execute(arguments, context)
+    assert not result.is_error, result.output
+
+
+@pytest.mark.parametrize("extension", ["tif", "tiff", "img", "asc", "dem", "png", "jpg", "jpeg"])
+def test_raster_dependencies_cannot_leave_a_stale_error_cache(tmp_path, extension):
+    from geoharness.cartography.retry_guard import _fingerprint
+
+    source, context = setup(tmp_path)
+    raster = tmp_path / f"base.{extension}"
+    raster.write_bytes(b"raster fixture")
+    worldfile = tmp_path / "base.tfw"
+    worldfile.write_text("1\n0\n0\n-1\n100\n100\n")
+    arguments = GeoCartographyInput(action="preflight", file_path=str(source),
+                                    basemap_raster=str(raster))
+    assert _fingerprint(GeoCartographyTool(), arguments, context) is None
+    worldfile.write_text("1\n0\n0\n-1\n200\n200\n")
+    assert _fingerprint(GeoCartographyTool(), arguments, context) is None
+    native = GeoQgisProjectInput(action="preflight", layers=[
+        {"file_path": str(raster), "kind": "raster"},
+    ])
+    assert _fingerprint(GeoQgisProjectTool(), native, context) is None
+
+
 async def test_native_numeric_string_rejected_before_qgis_or_budget(tmp_path, monkeypatch):
     source, context = setup(tmp_path)
     context.metadata["geoharness_config"] = GeoConfig()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 
@@ -54,5 +55,10 @@ def derive_frame(frame, specification):
     if fields is not None:
         result = result[[*fields, geometry]].copy()
     for name, values in spec.annotations.items():
-        result[name] = values
+        series = pd.Series(values, index=result.index)
+        if series.dtype == object:
+            # GPKG stores mixed scalar/object attributes as text. Normalize the
+            # new annotations before freezing so validation compares actual data.
+            series = series.map(lambda value: None if pd.isna(value) else str(value))
+        result[name] = series
     return result

@@ -153,3 +153,10 @@
 - 阶段4：显式桥接来源、禁止继承上次地图事实、自动识别相邻原生清单、同输入确定性失败去重及变化后恢复。152项相关回归和59项专项通过，ruff/diff检查通过。使用指南、架构及两份已授权项目技能已更新。
 - 真实会话第65条请求用原数据/时间分类生成地图和工程成功，三份清单参与核验，原输出摘要不变；说明栏改用工具生成事实，纠正计量32648/显示32647。未调用视觉审查，质量为draft。新工程在用户test/exports/20261009-fire-regression。
 - 全量pytest运行中，独立只读review子任务已恢复运行；等待结论后构建安装全局wheel并跨目录验证。用户.env.example与主模型/凭证/原数据保持不动。
+
+- 独立只读评审完成；ID证明、混合注记、日期颜色字典及mixed scalar、Windows同状态缓存、保存工程/栅格外部依赖问题均已关闭，无剩余Critical/Important/Minor。最终相关180 passed，ruff/diff通过；上一轮完整943 passed，最后版本全量正在执行。
+- wheel已构建，包含全部六份项目技能；开始替换全局安装，随后核对源码与安装包、跨目录CLI与真实派生图层预检。
+
+- 全局D:/Python312已安装最终wheel；69个Python模块和6份技能逐项字节一致，PATH解析geoh为D:/Python312/Scripts/geoh.exe。用户目录version/dry-run正常，test目录实际run --print双MCP连接、主模型max正常回复并exit0，未创建.openharness。
+- 安装版QGIS doctor成功（3.44.7、440算法）；真实23→3派生图层预检通过，统计保持23且源摘要不变。安装版读回新增回归QGIS工程：10层有效、EPSG32647有效、布局bounds有效，工程与预览摘要不变。真实视觉未调用，回归地图仍为draft。
+- 最后版本全量956 passed（553.86秒），ruff/diff与独立评审通过；四阶段修复、文档、安装和跨目录验证均完成。回归产物在test/exports/20261009-fire-regression；已运行会话需退出重启以加载新安装。原有.env.example修改仍独立保留。

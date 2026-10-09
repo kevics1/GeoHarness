@@ -103,6 +103,8 @@ def test_driver_datetime_and_feature_id_roundtrip_preserves_evidence(tmp_path, b
         feature["properties"]["time"] = "2020/03/30 19:00:00.000" if index == 0 else None
         if business_id:
             feature["properties"]["id"] = "business-" + str(index)
+        else:
+            feature["properties"].pop("id", None)
     path.write_text(json.dumps(document), encoding="utf-8")
     entry["geojson_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     _write_manifest(manifest)
@@ -115,6 +117,27 @@ def test_driver_datetime_and_feature_id_roundtrip_preserves_evidence(tmp_path, b
     assert facts["status"] == "verified"
     assert entry["geojson_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     cached.loc[0, "id"] = "changed-id"
+    with pytest.raises(ValueError, match="changed after it was loaded"):
+        load_analysis_facts(
+            [manifest["manifest_path"]], cwd=tmp_path, read_roots=[tmp_path],
+            mapped_sources=[{"file_path": str(path), "gdf": cached}], display_crs="EPSG:3857",
+        )
+
+
+def test_numeric_feature_fid_does_not_authorize_a_new_id_attribute(tmp_path):
+    manifest = _analysis(tmp_path, "distance")
+    entry = manifest["paths"]["result"]
+    path = Path(entry["geojson"])
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for index, feature in enumerate(document["features"]):
+        feature["id"] = index
+        feature["properties"].pop("id", None)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    entry["geojson_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    _write_manifest(manifest)
+    cached = gpd.read_file(path)
+    assert "id" not in cached.columns  # Numeric IDs became driver FIDs, not attributes.
+    cached["id"] = list(range(len(cached)))
     with pytest.raises(ValueError, match="changed after it was loaded"):
         load_analysis_facts(
             [manifest["manifest_path"]], cwd=tmp_path, read_roots=[tmp_path],

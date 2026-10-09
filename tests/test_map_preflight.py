@@ -42,6 +42,46 @@ def test_mixed_date_field_preserves_ordinary_strings_and_timezone():
     assert normalized["time"].tolist() == ["2020-03-30T19:00:00+08:00", "unknown", None]
     assert isinstance(original.loc[0, "time"], pd.Timestamp)
 
+
+def test_datetime_palette_keys_reach_the_existing_style_renderer():
+    import pandas as pd
+
+    from geoharness.cartography.project import _vector_style
+    from geoharness.cartography.values import normalize_frame, normalize_style
+
+    frame = normalize_frame(gpd.GeoDataFrame(
+        {"time": pd.to_datetime(["2020-03-30 19:00"])},
+        geometry=[geometry.Point(101, 28)], crs=4326,
+    ))
+    style = {"column": "time", "render_method": "categorized",
+             "categories": ["2020/03/30 19:00:00.000"],
+             "colors": {"2020/03/30 19:00:00.000": "#ff0000"}}
+    _, result = _vector_style(frame, style, "layers")
+    assert result["categories"][0]["value"] == "2020-03-30T19:00:00"
+    assert result["categories"][0]["color"] == "#ff0000"
+    style["colors"]["2020-03-30T19:00:00"] = "#0000ff"
+    with pytest.raises(ValueError, match="duplicate category"):
+        normalize_style(frame, style)
+
+
+def test_mixed_temporal_categories_preserve_numeric_and_boolean_business_values():
+    import pandas as pd
+
+    from geoharness.cartography.values import normalize_frame, normalize_style
+
+    values = [pd.Timestamp("2020-03-30 19:00"), 17, True, None]
+    frame = normalize_frame(gpd.GeoDataFrame(
+        {"time": values}, geometry=[geometry.Point(101, 28)] * 4, crs=4326,
+    ))
+    style = normalize_style(frame, {
+        "field": "time", "categories": [{"value": value} for value in values],
+        "colors": {values[0]: "#ff0000", 17: "#00ff00", True: "#0000ff"},
+    })
+    assert [category["value"] for category in style["categories"]] == frame["time"].tolist()
+    assert style["categories"][1]["value"] == 17
+    assert style["categories"][2]["value"] is True
+    assert list(style["colors"]) == ["2020-03-30T19:00:00", 17, True]
+
 gpd = pytest.importorskip("geopandas")
 geometry = pytest.importorskip("shapely.geometry")
 

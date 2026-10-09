@@ -307,6 +307,9 @@ def _mapped_outputs(
             for label in candidates:
                 output = outputs[label]
                 features = output["features"]
+                if "driver_frame" not in output:
+                    output["driver_frame"] = gpd.read_file(io.BytesIO(output["bytes"]))
+                source_frame = output["driver_frame"]
                 derivation = source.get("derivation")
                 if derivation is not None:
                     from geoharness.cartography.derivation import MapDerivation, derive_frame
@@ -315,19 +318,21 @@ def _mapped_outputs(
                     indices = (spec.feature_indices if spec.feature_indices is not None
                                else list(range(len(features))))
                     selected_features = [features[i] for i in indices if i < len(features)]
-                    verified = derive_frame(gpd.read_file(io.BytesIO(output["bytes"])), spec)
+                    verified = derive_frame(source_frame, spec)
                 else:
                     selected_features = features
                 generated_ids = (
                     [f["id"] for f in selected_features]
-                    if selected_features and all("id" in f and "id" not in f["properties"]
-                                                 for f in selected_features) else None
+                    if "id" in source_frame.columns and selected_features
+                    and all("id" in f and "id" not in f["properties"] for f in features)
+                    and source_frame["id"].tolist() == [f["id"] for f in features]
+                    else None
                 )
                 if derivation is not None:
                     expected_content = frame_content(verified, generated_ids=generated_ids)
                 elif "driver_content" not in output:
-                    verified = gpd.read_file(io.BytesIO(output["bytes"]))
-                    output["driver_content"] = frame_content(verified, generated_ids=generated_ids)
+                    output["driver_content"] = frame_content(source_frame,
+                                                              generated_ids=generated_ids)
                 if derivation is None:
                     expected_content = output["driver_content"]
                 if frame_content(cached, generated_ids=generated_ids) == expected_content:

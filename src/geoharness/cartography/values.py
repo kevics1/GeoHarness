@@ -13,9 +13,11 @@ from pandas.api.types import is_datetime64_any_dtype
 TEMPORAL_FIELDS = "geoharness_temporal_fields"
 
 
-def temporal_value(value: Any) -> str | None:
+def temporal_value(value: Any) -> Any:
     if value is None or pd.isna(value):
         return None
+    if not isinstance(value, (str, datetime, date, np.datetime64)):
+        return value
     try:
         return pd.Timestamp(value).isoformat()
     except (ValueError, TypeError):
@@ -38,9 +40,7 @@ def normalize_frame(frame):
     result = frame.copy()
     for name in fields & set(result.columns):
         result[name] = pd.Series(
-            [temporal_value(value) if value is None or pd.isna(value)
-             or isinstance(value, (str, datetime, date, np.datetime64)) else value
-             for value in result[name]], index=result.index, dtype=object,
+            [temporal_value(value) for value in result[name]], index=result.index, dtype=object,
         )
     result.attrs[TEMPORAL_FIELDS] = sorted(fields)
     return result
@@ -56,6 +56,14 @@ def normalize_style(frame, style: dict) -> dict:
                 else temporal_value(item)
                 for item in result["categories"]
             ]
+        if isinstance(result.get("colors"), dict):
+            colors = {}
+            for value, color in result["colors"].items():
+                value = temporal_value(value)
+                if value in colors:
+                    raise ValueError("Datetime colors keys normalize to a duplicate category")
+                colors[value] = color
+            result["colors"] = colors
     return result
 
 
