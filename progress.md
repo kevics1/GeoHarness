@@ -195,3 +195,14 @@
 - 最终全量983 passed（907.99秒），195条警告来自pyproj/Typer弃用及缺CRS测试夹具提示；ruff与diff检查通过。最后技能说明明确晕渲/详图/标签优先用QGIS，避免将原生已支持的需求自动转为Python。
 - 最终wheel构建/安装完成，D:/Python312/Lib/site-packages/geoharness的69个模块和6份技能逐字节与当前源码一致。安装证据C:/Users/Administrator/AppData/Local/Temp/geoharness-final-wheel-04df372281eb45aeb3df2b03b7beb317/install-verification.json。
 - 在F:/Desktop/Project/GeoHarness/example/test01运行安装版version/dry-run通过，QGIS3.44.7/440算法可用、stderr为空；实际主模型max调用geo_python成功，输出WindowsPath/WindowsPath/list并正常回复exit0，双MCP连接成功，未出现空回复/ContextVar异常，未创建.openharness。实际运行证据.geoharness/runs/env_check-20261009T153536Z-8b7077d5529c/。未复绘完整业务图、不把未视觉检查的核验图称为合格地图。
+
+### test02 前置契约与质量修正（2026-10-10）
+- 完整会话显示模型提前拿到栅格32647，仍用32648几何直接mask；分别确认新RUN_DIR误用、日期拼错、manifest无实际mappedoutput、globaltoolartifact/目录被拒、实际preview被拒及QGIS审图使用Matplotlib参数。
+- 数据子任务82项通过；主整合224项通过（464.33秒），审图/API/预算组113项通过（213.67秒）。新真实QGIS回归8项通过（34.74秒），验证保存重开PAL毫米偏移/priority/无label障碍。不把后续审查新修改算作已被这些旧运行覆盖。
+- 实际test02两张栅格/32648几何通过mask_raster裁剪422×349，旧data/PNG hash一致；actualpreview及project.json可读。新实际审图返回QGIS毫米/pt建议和detail_map，issues真实保留；原业务图未重绘。
+- 独立审查发现的测量签名、图层类型、真实历史边界均已修正并回归；二次独立复核因账户限额未完成，由主Agent检查验证。默认成功成图5版、审图5次、失败退款不变；尚未安装全局或修改本机预算配置。
+- 首轮全量1044 passed/1旧断言失败；用结构化证据断言替代versions子串判断。最新71项审图/回执/真实QGIS相关通过，ruff和阶段CLI通过；有效点放置模式下无效distance/offset建议过滤已提交9fea666，最终全量重新执行。
+- 最新真实审图返回网关HTTP502，诊断provider/unverified正确，旧图及receipt SHA未变。证据geoharness-test02-review-wy3ob39o/verification.json，不宣称当前服务正常。
+- 最终完整回归1051 passed（542.37秒）、ruff/diff通过；已安装全局wheel，73源码模块与6技能逐字节一致。仅同步本机max_repairs=4/max_reviews_per_request=5，主模型max及其他配置/凭证引用保持。
+- 安装版test02的version/dry-run与QGIS3.44.7/440算法通过，无.openharness；去除PYTHONPATH后实际裁剪及preview/project.json读取再次成功，原文件摘要不变。证据geoharness-test02-prevention-s2h5vq2a/verification.json和geoharness-test02-final-wheel-78c4273d2cd147278ce1dfa05a55a59d/install-verification.json。
+- 模型列表端点也返回502，本轮未进行主模型端到端或业务整图验收；不机械重试或改主模型，不把旧第三版改标通过。报告diagnostics/2026-10-10-test02-prevention-validation.md已写明边界。

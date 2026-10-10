@@ -212,11 +212,17 @@ impact 的影响条件是相交或最短距离不超过阈值。分区按 inters
 
 原生分析每次独立保存 GeoJSON、CSV、统计和 manifest，记录来源、参数、计量/导出 CRS 和计数口径；默认目录为工作区内 `.geoharness/analysis/`。未知 CRS 和无效几何会报错，不静默按 WGS84 处理。
 
-在 `geo_cartography` 或 `geo_qgis_project` 的新建请求中传入 `analysis_manifests`（最多8个实际 geo_analysis 清单路径），系统会读取对应输出，核对 SHA256、要素计数、impact 的距离阈值/affected 标记及影响选集，并要求至少一份输出确实用于当前地图图层。新清单的输出摘要必须一致；旧清单没有原始 SHA256 时只核对现存输出计数，并明确缩小验证范围。任意 Python/QGIS 清单或自由文字不属于此接口支持的统计证据。
+在 `geo_cartography` 或 `geo_qgis_project` 的新建请求中传入 `analysis_manifests`（最多8个实际 geo_analysis 清单路径），系统会读取对应输出，核对 SHA256、要素计数、impact 的距离阈值/affected 标记及影响选集，并要求每份清单都至少有一份输出确实用于当前地图图层或声明的 `layer.derivation`。新清单的输出摘要必须一致；旧清单没有原始 SHA256 时只核对现存输出计数，并明确缩小验证范围。任意 Python/QGIS 清单或自由文字不属于此接口支持的统计证据。
 
 QGIS 说明栏中的方法、数量、阈值和计量 CRS 来自上述核对结果，显示 CRS 单独取当前地图设置。`footer_text` 的自由文字作为备注保留，不能冒充已核对统计。这里验证的是持久输出的一致性，没有重新计算原始空间运算；`analysis_correctness` 仍为 `unverified`。复杂分析仍须另外核验方法、输入与结果。
 
 Python 每次保留 analysis.py、stdout.txt、stderr.txt、manifest.json 和产物清单，默认在 `.geoharness/runs/`。SOURCE_CWD、DATA_DIRS、RUN_DIR 是脚本全局变量，也提供同名环境变量；环境中的 DATA_DIRS 按 os.pathsep 分隔。当前目录为 RUN_DIR，输出只写 RUN_DIR 或相对文件名。配置的分析、制图和既有运行产物目录可只读访问，仍拒绝凭证文件和源文件写入；超时终止并等待子进程。
+
+数据 `list` 自动检查最多8个文件的实际元信息，尚未检查的文件会明确提示；使用前应调用 `inspect`。工具成功后保留真实路径、CRS、范围、字段/几何/数量或栅格大小、波段、分辨率、dtype、nodata，供后续模型请求使用。覆盖数据或修改 Shapefile 的 `.prj/.dbf` 等会使旧记录失效。栅格发现只读取头信息，不扫描像素。
+
+Python 中 `GEO_DATA` 是已测元信息字典，`PREVIOUS_OUTPUTS` 是已有产物的 `list[Path]`。每次调用的 `RUN_DIR` 都是新目录；上一轮文件应使用工具返回的实际路径，不能拼日期或放进新 `RUN_DIR` 读取。裁剪使用 `mask_raster(raster_path, GeoSeries/GeoDataFrame, crop=True)`，它将带已知 CRS 的几何变换到栅格实际 CRS 并检查相交。分析投影与栅格投影可以不同；裸 Shapely 列表不能交给这个入口，因为无法核实其 CRS。返回值与 `rasterio.mask.mask` 相同，为数组和 transform。
+
+Python 可只读读取已核验 QGIS 任务返回的诊断文件、预览图和 `project.json`，以便测量真实图片；不会授予整个 QGIS 目录、数据副本目录或 profile，也不能修改这些文件。布局/图层枚举用 `geo_qgis_project(action="inspect",project_path=...)` 或实际 `result.json`，不读取全局 `tool_artifacts`。清单与地图绑定失败会返回具体清单、原生产物路径和当前图层；选择对应产物或其 `layer.derivation`，不能为通过检查附加无关统计。
 
 一次被识别为制图的 Python 脚本可能生成多张图片；系统按最后写出的图片登记一个 primary_map 候选和一个版本，map_candidates 列出全部图片候选。这些附件不是连续修订版；需要审查另一张图时明确选择它。geo_map_review 再次审查已登记旧图会更新该版本的检查，不增加新的成图版本。
 
@@ -250,7 +256,7 @@ Python 每次保留 analysis.py、stdout.txt、stderr.txt、manifest.json 和产
 | packaged | 同图预览、工程清单与工程文件摘要 |
 | delivered | 实际复制的交付文件和主图摘要 |
 
-缺少证据的阶段为 unverified；布局或视觉检查报告问题时可为 issues，文件改变使旧证据失效时为 stale。`quality_status=passed` 要求同一张图的 data_checked、rendered、layout_checked、visual_checked 全部为 passed；其余为 draft。范围仅为地图数据合同、已测布局几何和图片视觉检查，`analysis_correctness` 永远为 unverified。打包或交付成功不会补齐缺失检查。
+缺少证据的阶段为 unverified；布局或视觉检查报告问题时可为 issues，文件改变使旧证据失效时为 stale。`quality_status=passed` 要求同一张图的 data_checked、rendered、layout_checked、visual_checked 全部为 passed；其余为 draft。范围仅为地图数据合同、已测布局几何和图片视觉检查。当前 `analysis_correctness=unverified` 表示没有独立复算原始空间分析，不表示分析已经失败；输出摘要、计数和已复算面积的验证结果及范围另见 analysis facts 的 `verification`/`verification_scope`。打包或交付成功不会补齐缺失检查。
 
 修改图片、QGIS 工程、已登记数据副本或交付文件后，旧摘要绑定的证明不能继续用于新文件；状态查询会标记受影响阶段 stale。保存修改后应导出新图，核对数据、布局并审查新图，再重新交付。完整交付包含 `map-receipt.json`；该回执是当时的快照，当前状态以重新查询结果为准。
 
@@ -258,9 +264,13 @@ Python 每次保留 analysis.py、stdout.txt、stderr.txt、manifest.json 和产
 
 新建 QGIS 地图时，系统先将受控读取的图层保存为临时 GPKG/GeoTIFF，再对该数据副本预检并交给 QGIS 渲染；检查与成图使用同一份数据。冻结输入、预检失败不占成图次数，临时副本在读取线程和 QGIS 进程结束后清理。已有用户工程的 inspect/export 保留原数据、样式和布局，导出不覆盖输入工程。
 
-geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，最多两轮，可配置为 0 或 1 轮。Matplotlib 路径可自动应用支持的呈现补丁并重绘；默认 QGIS 路径检查实际布局 PNG，由 Agent 根据具体问题调整支持的样式/布局参数后重绘，当前工具不自动应用审图补丁。不会因为 info 提示或单纯审美建议再画一版。报告由工具返回实际路径；Matplotlib 自动修正前地图和预览保存在成图旁独立 `.review-*` 目录。
+geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，默认最多4轮修正，`map_review.max_repairs` 可配置为0–4。Matplotlib 路径可自动应用支持的呈现补丁并重绘；默认 QGIS 路径检查实际布局 PNG，由 Agent 根据具体问题调整支持的样式/布局参数后重绘，当前工具不自动应用审图补丁。不会因为 info 提示或单纯审美建议再画一版。报告由工具返回实际路径；Matplotlib 自动修正前地图和预览保存在成图旁独立 `.review-*` 目录。
 
-原生工具、Python 制图及独立审查共享一次用户请求的预算。当前请求默认最多初版加两轮成功修正；执行失败会释放该次成图预留。所有地图合计默认最多4次模型审查、120秒实际调用耗时；不计空间分析、渲染、生成工程和写报告的间隔，并发调用预留可用时间，完成后按实际耗时结算。预算与持久任务身份分开，改文件名、别名或切换已存在的历史 map_id 都不会补充当前请求额度。相同图片和审图配置的结果会缓存，失败也不会盲目重试；明确修正模型/token/provider参数后允许再次检查。真实用户新输入重置预算，历史地图与回执仍保留。
+原生工具、Python 制图及独立审查共享一次用户请求的预算。当前请求默认最多5次成功成图（初版加4轮修正）；执行失败会释放该次成图预留。所有地图合计默认最多5次模型审查、120秒实际调用耗时；不计空间分析、渲染、生成工程和写报告的间隔，并发调用预留可用时间，完成后按实际耗时结算。预算与持久任务身份分开，改文件名、别名或切换已存在的历史 map_id 都不会补充当前请求额度。相同图片和审图配置的结果会缓存，失败也不会盲目重试；明确修正模型/token/provider参数后允许再次检查。真实用户新输入重置预算，历史地图与回执仍保留。
+
+QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定优先级、符号大小和详图；这是规划提示，不是视觉通过证明。`label_style` 支持 `placement`、`distance_mm`、`offset_x_mm/offset_y_mm`、`priority`（0最低、10最高）；`around_point` 使用距离，固定 X/Y 偏移应使用 `over_point`。`style.obstacle=true` 可让未标注的重要几何参与 PAL 避让，但不能保证所有标签显示，也不能阻止线符号本身压盖面。疏散线压盖主体应调整实际线宽/透明度/图层顺序，或在本请求内改用详图/分图。
+
+审图通过实际图片与工程清单摘要核实后端。QGIS 返回 `qgis_patch`（布局毫米、字体pt、图层毫米/透明度及标签设置），图层用实际0-based `layer_index`；Matplotlib 才使用英寸 `layout_patch`。不适用的补丁保留诊断而不作为修复依据。`issue_code` 和前两版问题摘要帮助识别重复遮挡，`next_strategy` 可建议当前请求内改布局/详图/分图；模型需要使用真实坐标确定范围。审查不会直接应用补丁，下一次真实渲染后仍须复查。没有可靠后端证据时只给问题与策略。
 
 有放大图和密集重点点时，Python 可使用 `geoharness.cartography.layout` 的 create_map_figure、place_point_labels、save_map_figure。它预留主图、放大图、图例、说明的独立区域，按渲染后的文字边界避让；放不下的名字保留省略记录，使用编号对应名单。保存 `.layout.json` 记录分区相交、标签相交/裁切和图例/说明越界，与实际图片 SHA256 绑定。geo_map_review 先检查对应报告；明确的布局缺陷先修正，再调用视觉服务。
 

@@ -49,17 +49,21 @@ QGIS 使用 qgis_layout 的主图、可选 detail_extent、图例与 footer_text
 
 工具显式把图片和任务/图层/参数摘要送入视觉模型，检查空白、图层可见性、图例对应、文字乱码/遮挡、范围与布局。文件落盘不代表检查通过。
 
-将具体错误/警告合并为一份呈现修正清单，最多 map_review.max_repairs 轮（默认2）。Matplotlib 路径可应用支持的呈现补丁自动重绘；默认 QGIS 路径会检查导出的图片，Agent 按实际问题修改支持的布局/样式参数并重绘，不能声称工具已经自动应用补丁。保留修正前地图与报告；不要因审美偏好、info 提示或无法确认的问题重绘，不自动改动源数据、分析口径或阈值。
+将具体错误/警告合并为一份呈现修正清单，最多 map_review.max_repairs 轮（默认4，总计5次成功成图）。Matplotlib 路径可应用支持的呈现补丁自动重绘；默认 QGIS 路径会检查导出的图片，Agent 按实际问题修改支持的布局/样式参数并重绘，不能声称工具已经自动应用补丁。保留修正前地图与报告；不要因审美偏好、info 提示或无法确认的问题重绘，不自动改动源数据、分析口径或阈值。
 
 工具返回系统 UUID 作为 map_id；后续文件名、格式、Python/原生版本、审图与交付沿用它，不另造别名绕过预算。持久回执默认在工作区 .geoharness/maps/，cartography.jobs_dir 必须为工作区子目录。用户“继续/接着做/continue/resume”关联当前或最近持久任务；每次真实用户输入重置请求预算，内部恢复与自动续跑不重置。
 
-同一用户请求的所有工具共享审查次数及时间预算，默认最多4次、120秒实际服务调用时间，不计中间分析、渲染和写报告耗时；当前请求最多初版加2轮成功成图，失败释放成图预留。预算与持久 UUID 分开，切换历史 map_id 也不补充额度。相同图片/审图配置使用缓存，失败也不盲目重试。实际检查完成后停止无依据的完善；视觉 unverified 或预算耗尽时停止视觉重试，有版本额度时仍可统一修复已测明确布局问题，随后草稿交付。
+同一用户请求的所有工具共享审查次数及时间预算，默认最多5次、120秒实际服务调用时间，不计中间分析、渲染和写报告耗时；当前请求最多初版加4轮成功成图，失败释放成图预留。预算与持久 UUID 分开，切换历史 map_id 也不补充额度。相同图片/审图配置使用缓存，失败也不盲目重试。实际检查完成后停止无依据的完善；视觉 unverified 或预算耗尽时停止视觉重试，有版本额度时仍可统一修复已测明确布局问题，随后草稿交付。
+
+首版先用 QGIS preflight 查看 composition 密度提示；密集重点点使用 PAL priority/distance 或实际坐标 detail_extent，不等耗尽预算再建议分图。label_style 的 around_point 用 distance_mm；精确 offset_x_mm/offset_y_mm 选择 over_point，priority 为整数0–10。未标注的重要面/线可显式 style.obstacle=true。疏散线压盖主体用实际 width_mm/opacity/顺序修正，不能把 PAL 标签设置当成线符号避让。
+
+审图 QGIS 使用 qgis_patch（毫米/pt），Matplotlib 使用 layout_patch（英寸/平方pt），不混用。图层修改只用已核实的0-based layer_index；issues/issue_code、前两版摘要、实际剩余额度与 next_strategy 用来合并修正。同类遮挡修正后仍出现时，在当前请求还有额度时使用详图或分图，保留所需图层和分析口径；详图范围来自实际坐标，不能从图片猜。返回建议尚未执行，下一版仍检查实际图片。data/layout/package passed 不会覆盖 visual issues。
 
 - passed：该项实际检查通过；visual_checked=passed 不等于最终质量通过。
 - issues：存在剩余问题，报告具体内容。
 - unverified：检查关闭、模型不可用、格式无法核实或回复无效；不宣称地图正确。
 
-用 `geo_cartography(action="status",map_id=...)` 读取已有回执和当前文件摘要，也可按 map_path 查询已登记图片；status 不创建任务或增加检查结果。分别报告 parameters、data_checked、rendered、layout_checked、visual_checked、packaged、delivered 的实际状态。quality_status=passed 要求同图数据、实际渲染、已测布局和实际视觉检查均为 passed；缺少证据为 draft，文件改变导致旧阶段 stale。analysis_correctness 永远 unverified，打包不能提升质量。
+用 `geo_cartography(action="status",map_id=...)` 读取已有回执和当前文件摘要，也可按 map_path 查询已登记图片；status 不创建任务或增加检查结果。分别报告 parameters、data_checked、rendered、layout_checked、visual_checked、packaged、delivered 的实际状态。quality_status=passed 要求同图数据、实际渲染、已测布局和实际视觉检查均为 passed；缺少证据为 draft，文件改变导致旧阶段 stale。当前 analysis_correctness=unverified 表示未独立复算原始空间分析，不代表分析失败；另说明实际输出摘要/计数/面积核验的 verification_scope，打包不能提升质量。
 
 非白像素比例和颜色检出最多证明文件有绘制内容，不能证明图层、对象数量、类别或不存在压盖，也不能替代失败的视觉审查。服务失败时明确说“地图已生成，视觉审查未完成，作为草稿交付”，说明实际原因和问题。QGIS label_field/放置设置与 bounds_check 只覆盖对应字段和已测元素边界，不证明所有标签已显示、位置及业务语义正确。
 

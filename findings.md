@@ -182,3 +182,18 @@
 - Python执行契约返回Path/list类型，只授予合法最近QGIS任务五项诊断文件精确只读；链接、目录、凭证、越界写入继续拒绝。
 - 真实预测蔓延数据面积sum48.110519km²、union33.149636km²。原生area及地图事实复算可避免将累计时次相加称为覆盖。实际三图层保存QGZ重开导出PNG与首次PNG同摘要，未视觉审查，不宣称业务图完全正确。
 - 最新问题版本不再必然作为默认交付：优先摘要未变化且全检查passed候选，再选布局passed草稿及其工程/真实报告；用户明确selected仍可保留指定问题图，未登记另存图保留自身。
+
+## test02 前置错误与剩余质量（2026-10-09）
+
+- risk_analysis在EPSG32648几何上直接调用rasterio.mask，实际报Input shapes do not overlap raster；模型事后改32647。需核实发现/inspect上下文及实际栅格头，再验证统一几何到栅格CRS的正确处理，而非强制所有分析使用栅格CRS。
+- prep_layers读取当前新RUN_DIR的上一轮蔓延并集文件，实际不存在；buffer输入路径的20261015与真实20261009任务目录不同，属于产物定位误用。
+- read_receipt读取全局tool_artifacts被拒；read_project_json枚举QGIS目录被拒；measure_png读取实际QGISpreview.png也被拒。前两项需要正确诊断入口，最后一项说明现有精确五文件只读不足以支持实际图片测量。
+- 三版均visual issues。第三版仍有编号/避难点重叠、主图大块空白和底栏文字过密；QGIS布局几何passed未证明地图标签正确。视觉patch给出width/height英寸及point_size等旧Matplotlib字段，需核实原生QGIS适用建议与模型修正链。
+- 完整会话更正：模型在risk_analysis前已经inspect两张栅格并得到EPSG32647/30m/2202×2419，仍将32648 raw Shapely用于mask。因此不是仅漏查头信息，必须持续保留实际元信息并提供带CRS几何的操作入口。
+- 数据发现/缓存/动态模型上下文、GEO_DATA/PREVIOUS_OUTPUTS、mask_raster与QGIS精确preview/project.json只读已经实现。真实test02两栅格均用32648几何裁出422×349，数据与原PNG摘要未变；证据临时geoharness-test02-prevention-y5w7neg2/verification.json。
+- 新QGIS后端审图真实返回issues、毫米/pt qgis_patch及detail_map；原第三版缺陷仍存在，不把接口修复称为旧图修好。证据临时geoharness-test02-review-om64esqo/verification.json。
+- PyQGIS saved-project重新inspect保持OverPoint/毫米偏移/priority10/无标签障碍factor3；真实labelingResults验证around_point忽略X/Y、使用dist，OverPoint反之，已补契约。
+- 独立审查复现三项P2：patch缺图层类型/几何验证、共享预算UUID覆盖真实地图历史、metadata消费时新stat绑定旧CRS。三项均已修正并补回归；限额过大上下文亦已修复。后续独立闭环复核遇账户usage limit未完成，主Agent完成代码检查和回归，不将二次独立复核宣称通过。
+- 首轮全量1044 passed/1 failed，唯一失败是旧测试以versions子串误拒新remaining_render_versions提示。断言改为解析证据，确认无完整版本列表、首轮history为空和剩余额度为0；最新相关71 passed，另过滤已核验点放置模式下无效distance/offset字段。最终源码已重新启动全量回归。
+- 最后真实审图API返回HTTP502/InternalServerError，正确标记provider阶段unverified，不是模型JSON/本地ValidationError。旧PNG和receipt摘要均未变；证据geoharness-test02-review-wy3ob39o/verification.json。未对同图同配置机械重试，不把此前API成功当作当前网关健康。
+- 最终1051项全量通过，安装版73模块/6技能一致，实际预算已同步五版/五次审图。test02的独立QGIS环境和实际数据裁剪/精确图片读取通过；网关模型列表同样502，主模型业务端到端尚未验证，原图未重绘。

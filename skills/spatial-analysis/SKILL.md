@@ -15,6 +15,10 @@ QGIS 返回的五项既有诊断文件 request/result/manifest/stdout/stderr 可
 
 本地数据用 geo_vector_data，数据库数据用 geo_db_data；确认几何类型、字段、CRS 和范围。load 的概况没有完整几何，不要手工重建 GeoJSON。未知 CRS 需要明确声明；已有 CRS 用变换，不重新贴标签。检查空/无效几何和阈值；计量使用米制投影。原生分析默认按全部输入范围选择适用的 UTM，跨带或极地等范围需要显式配置 analysis.metric_crs。
 
+本地 vector/raster list 自动检查最多8个文件并保留实际元信息，未检查项使用前 inspect。模型后续请求和 Python 的 GEO_DATA 保留已测 CRS/范围、字段或栅格分辨率/band/dtype/nodata；文件修改使旧记录失效。Metric分析可以使用不同于栅格的投影，但每次 overlay/mask 必须把带已知CRS几何转换到目标栅格CRS。Python 优先 mask_raster(path, GeoSeries/GeoDataFrame, crop=True)，不把裸 Shapely 列表直接交给不同投影的 rasterio.mask。
+
+每次 geo_python 都创建新的 RUN_DIR；读取上一轮产物用工具返回的真实路径或 PREVIOUS_OUTPUTS，不猜日期、不从当前 RUN_DIR找旧文件。Python可读已核验QGIS诊断、预览图、project.json，目录枚举与profile继续拒绝；完整图层/布局用geo_qgis_project inspect或实际result.json。analysis_manifests每个都要对应实际原生产物或layer.derivation；绑定失败按返回的具体清单/产物路径修正，不附无关图层或统计绕过。
+
 ## 执行空间运算
 
 QGIS 启用且可用时，优先复用其 Processing：先 `geo_qgis(action="doctor")` 确认运行环境，
