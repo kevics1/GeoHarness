@@ -112,7 +112,34 @@ async def test_old_around_point_offset_suggestion_keeps_valid_visual_findings(im
     assert result.issues[0].description == ISSUES["issues"][0]["description"]
     assert result.qgis_patch.layers[0].label_style.placement == "around_point"
     assert result.qgis_patch.layers[0].label_style.priority == 10
+    assert result.qgis_patch.layers[0].label_style.offset_y_mm is None
+    assert "ignores" in result.diagnostics["ignored_qgis_layer_fields"][0]["reason"]
     assert result.next_strategy.strategy == "detail_map"
+
+
+@pytest.mark.parametrize("placement,recorded_mode,expected", [
+    ("around_point", None, {"placement": "around_point", "distance_mm": 2, "priority": 8}),
+    ("over_point", None, {"placement": "over_point", "offset_x_mm": 3, "priority": 8}),
+    ("auto", "OverPoint", {"placement": "auto", "distance_mm": 2, "priority": 8}),
+    (None, "OrderedPositionsAroundPoint", {"distance_mm": 2, "priority": 8}),
+    (None, "OverPoint", {"offset_x_mm": 3, "priority": 8}),
+    (None, None, {"distance_mm": 2, "priority": 8}),
+])
+async def test_point_patch_filters_unused_fields_for_verified_effective_mode(
+    image, placement, recorded_mode, expected,
+):
+    reviewer = Reviewer({**ISSUES, "qgis_patch": {"layers": [{
+        "layer_index": 0, "label_style": {"placement": placement, "distance_mm": 2,
+                                         "offset_x_mm": 3, "priority": 8},
+    }]}})
+    result = await review_map(image, config=GeoConfig(), task="Inspect",
+                              evidence={"backend": "qgis", "render_metadata": {"layers": [{
+                                  "kind": "vector", "geometry_type": "Point",
+                                  "label_style": {"placement": recorded_mode},
+                              }]}}, client=reviewer)
+    assert result.status == "issues" and result.issues
+    assert result.qgis_patch.layers[0].label_style.model_dump(exclude_none=True) == expected
+    assert result.diagnostics["ignored_qgis_layer_fields"]
 
 
 @pytest.mark.parametrize("geometry,placement", [

@@ -121,7 +121,12 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
     footer = mapped.metadata["layout"]["footer_text"]
     for text in ("受影响 2", "未影响 1", "20 m", "EPSG:32648", "EPSG:32647"):
         assert text in footer
-    assert "versions" not in str(reviewer.requests[0].messages)
+    review_payload = json.loads(reviewer.requests[0].messages[0].text.split(
+        "任务及渲染证据：\n", 1,
+    )[1])["evidence"]
+    assert "versions" not in review_payload
+    assert review_payload["previous_visual_reviews"] == []
+    assert review_payload["remaining_render_versions"] == 0
     receipt = mapped.metadata["map_receipt"]
     assert receipt["quality_status"] == "passed"
     assert receipt["analysis_correctness"] == "unverified"

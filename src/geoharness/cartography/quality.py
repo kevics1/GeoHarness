@@ -269,6 +269,35 @@ def _filter_qgis_layer_patches(
                                if geometry is not None else
                                "Geometry is unverified; confirm it before choosing placement."),
                 })
+            if geometry == "point":
+                mode = labels.placement
+                if mode == "auto":
+                    mode = "around_point"
+                elif mode is None:
+                    recorded = layer.get("label_style")
+                    recorded = recorded.get("placement") if isinstance(recorded, dict) else None
+                    mode = {
+                        "AroundPoint": "around_point",
+                        "OrderedPositionsAroundPoint": "around_point",
+                        "OverPoint": "over_point",
+                        "around_point": "around_point", "over_point": "over_point",
+                    }.get(recorded) if isinstance(recorded, str) else None
+                unused = ("distance_mm",) if mode == "over_point" else (
+                    ("offset_x_mm", "offset_y_mm") if mode in (None, "around_point") else ()
+                )
+                removed = {}
+                for name in unused:
+                    value = getattr(labels, name)
+                    if value is not None:
+                        removed[name] = value
+                        setattr(labels, name, None)
+                if removed:
+                    fields.append({
+                        "layer_index": index, "label_style": removed,
+                        "reason": (f"Point placement {mode} ignores these fields."
+                                   if mode else "Point placement is unverified; explicit "
+                                   "over_point is required before suggesting X/Y offsets."),
+                    })
             if not labels.model_dump(exclude_none=True):
                 suggestion.label_style = None
         if suggestion.style is not None or suggestion.label_style is not None:
