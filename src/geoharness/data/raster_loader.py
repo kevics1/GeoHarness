@@ -15,6 +15,7 @@ from typing import Any
 
 from geoharness._proj_fix import ensure_proj_data
 from geoharness.data.catalog import DataSource
+from geoharness.data.profiles import file_signature, profile_key
 
 logger = logging.getLogger(__name__)
 
@@ -172,25 +173,39 @@ class RasterLoader:
         if path is None:
             return {}
 
-        key = str(path).lower()
+        key = profile_key(path)
+        signature = file_signature(path)
         with self._detail_lock:
             cached = self._detail_cache.get(key)
         if cached is not None:
             cached_at = cached.get("_cached_at", 0.0)
-            if (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS:
+            if (
+                signature is not None
+                and cached.get("_file_stat") == signature
+                and (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS
+            ):
                 detail = dict(cached)
                 detail.pop("_cached_at", None)
+                detail.pop("_file_stat", None)
+                detail["_measured_file_stat"] = cached["_file_stat"]
                 return detail
 
         try:
             detail = self._describe(path)
         except Exception as exc:  # noqa: BLE001 — unopenable file == no detail
             logger.warning("Cannot describe raster %s: %s", path, exc)
+            with self._detail_lock:
+                self._detail_cache.pop(key, None)
             return {}
 
+        if file_signature(path) != signature:
+            # The header may describe an old version; do not label it current.
+            return {}
+        detail["_measured_file_stat"] = signature
         with self._detail_lock:
             stored = dict(detail)
             stored["_cached_at"] = time.monotonic()
+            stored["_file_stat"] = signature
             self._detail_cache[key] = stored
         return detail
 

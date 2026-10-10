@@ -14,6 +14,7 @@ from typing import Any
 
 from geoharness._proj_fix import ensure_proj_data
 from geoharness.data.catalog import DataSource
+from geoharness.data.profiles import file_signature, profile_key
 
 # Repair a stale system PROJ_LIB before geopandas initialises PROJ (first
 # to_crs with a poisoned database permanently breaks CRS handling).
@@ -262,22 +263,36 @@ class FileLoader:
         if path is None:
             return {}
 
-        key = str(path).lower()
+        key = profile_key(path)
+        signature = file_signature(path)
         with self._detail_lock:
             cached = self._detail_cache.get(key)
         if cached is not None:
             cached_at = cached.get("_cached_at", 0.0)
-            if (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS:
+            if (
+                signature is not None
+                and cached.get("_file_stat") == signature
+                and (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS
+            ):
                 info = dict(cached)
                 info.pop("_cached_at", None)
+                info.pop("_file_stat", None)
+                info["_measured_file_stat"] = cached["_file_stat"]
                 return info
 
         info = self._read_file_info(path)
+        if file_signature(path) != signature:
+            return {}
+        info["_measured_file_stat"] = signature
         if not info.get("error"):
             with self._detail_lock:
                 stored = dict(info)
                 stored["_cached_at"] = time.monotonic()
+                stored["_file_stat"] = signature
                 self._detail_cache[key] = stored
+        else:
+            with self._detail_lock:
+                self._detail_cache.pop(key, None)
         return info
 
     def resolve_path(self, name: str) -> Path | None:

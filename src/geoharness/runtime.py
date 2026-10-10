@@ -145,6 +145,14 @@ async def build_geo_runtime(
         },
     )
 
+    # Refresh between model turns, including continue_pending; do not duplicate
+    # data profiles in the persisted conversation or expose configuration secrets.
+    from geoharness.data.task_context import model_data_context
+
+    api_client.data_context_provider = lambda: model_data_context(
+        engine.tool_metadata, cwd=cwd, config=config,
+    )
+
     # 8b. Warm up in the background: geopandas/rasterio imports plus the first
     # directory scans take a second or two (longer on cold AV caches). Doing
     # it here — once — means the model's first batch of parallel inspects hits

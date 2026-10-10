@@ -82,6 +82,8 @@ async def execute_python(
     max_output_chars: int,
     read_dirs: tuple[Path, ...] = (),
     read_files: tuple[Path, ...] = (),
+    data_profiles: dict[str, Any] | None = None,
+    previous_outputs: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     """Save and execute a script, returning and persisting its reproducibility record."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
@@ -118,7 +120,8 @@ async def execute_python(
     spec.write_text(
         json.dumps(
             {"run_dir": str(run_dir), "read_roots": read_roots, "source_cwd": str(cwd),
-             "read_files": exact_files},
+             "read_files": exact_files, "data_profiles": data_profiles or {},
+             "previous_outputs": [str(path) for path in previous_outputs]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -548,6 +551,36 @@ def _install_guards(spec: dict[str, Any]) -> None:
     sys.addaudithook(audit)
 
 
+def mask_raster(raster_path: Any, geometries: Any, **options: Any) -> Any:
+    """Clip using CRS-bearing geometries, transforming them to the real raster CRS.
+
+    This intentionally refuses bare Shapely lists, whose coordinate reference cannot
+    be inferred. The source GeoSeries/DataFrame and raster remain unchanged.
+    """
+    import geopandas as gpd
+    import numpy as np
+    import rasterio
+    from rasterio.mask import mask
+    from shapely.geometry import box
+
+    if not isinstance(geometries, (gpd.GeoSeries, gpd.GeoDataFrame)) or geometries.crs is None:
+        raise ValueError("mask_raster requires a GeoSeries/GeoDataFrame with verified source CRS; "
+                         "bare Shapely geometries have no CRS")
+    with rasterio.open(raster_path) as dataset:
+        if dataset.crs is None:
+            raise ValueError("mask_raster: raster CRS is unknown; inspect the source first")
+        shapes = geometries.geometry.to_crs(dataset.crs)
+        shapes = shapes[~shapes.isna() & ~shapes.is_empty]
+        if shapes.empty or not shapes.is_valid.all() or not np.isfinite(shapes.total_bounds).all():
+            raise ValueError("mask_raster requires nonempty valid finite geometries")
+        if not shapes.intersects(box(*dataset.bounds)).any():
+            raise ValueError(f"mask_raster: geometries do not overlap the raster after CRS "
+                             f"transformation to {dataset.crs}; geometry_bounds="
+                             f"{shapes.total_bounds.tolist()}, "
+                             f"raster_bounds={list(dataset.bounds)}")
+        return mask(dataset, shapes, **options)
+
+
 def _child_main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", newline="\n")
@@ -584,6 +617,9 @@ def _child_main() -> None:
         "RUN_DIR": run_dir,
         "SOURCE_CWD": source_cwd,
         "DATA_DIRS": data_dirs,
+        "GEO_DATA": spec.get("data_profiles", {}),
+        "PREVIOUS_OUTPUTS": [Path(value) for value in spec.get("previous_outputs", [])],
+        "mask_raster": mask_raster,
     }
     exec(code, namespace)
 

@@ -171,6 +171,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
     ) -> None:
         super().__init__(api_key, base_url=base_url, timeout=timeout)
         self.settings = settings or AgentConfig()
+        self.data_context_provider: Callable[[], str] | None = None
         self._request_state: ContextVar[_RequestState | None] = ContextVar(
             "geoharness_api_request", default=None,
         )
@@ -299,6 +300,11 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 self._request_state.reset(token)
 
     async def stream_message(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
+        if request.tools and self.data_context_provider is not None:
+            transient_context = self.data_context_provider()
+            if transient_context:
+                request = replace(request, system_prompt=(request.system_prompt or "")
+                                  + transient_context)
         self._empty_diagnostic.set(None)
         self._response_diagnostic.set(None)
         self._tool_argument_diagnostics.set(None)

@@ -15,6 +15,15 @@ from typing import Any, Literal
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
+from geoharness.data.profiles import (
+    CRS_OPERATION_HINT,
+    MAX_SCHEMA_FIELDS,
+    file_signature,
+    local_source_listing,
+    make_profile,
+    record_profiles,
+)
+
 logger = logging.getLogger(__name__)
 
 # Local file work is I/O-bound but never network-bound; a generous cap still
@@ -100,9 +109,12 @@ class GeoVectorDataTool(BaseTool):
             return ToolResult(output=f"Unknown action: {args.action}", is_error=True)
 
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 asyncio.to_thread(work), timeout=_VECTOR_TIMEOUT_SECONDS
             )
+            if not result.is_error:
+                record_profiles(context.metadata, result.metadata.get("data_profiles", []))
+            return result
         except asyncio.TimeoutError:
             return ToolResult(
                 output=(
@@ -119,16 +131,8 @@ class GeoVectorDataTool(BaseTool):
             )
 
     def _list(self, loader: Any) -> ToolResult:
-        sources = loader.list_sources()
-        if not sources:
-            return ToolResult(output="No local vector files found.")
-        lines = []
-        for src in sources:
-            meta = getattr(src, "metadata", {}) or {}
-            lines.append(f"  - {src.name} ({meta.get('format', 'file')})")
-        return ToolResult(
-            output=f"Found {len(sources)} vector file(s):\n" + "\n".join(lines)
-        )
+        output, metadata = local_source_listing(loader, kind="vector")
+        return ToolResult(output=output, metadata=metadata)
 
     def _inspect(self, loader: Any, name: str) -> ToolResult:
         if not name:
@@ -140,6 +144,13 @@ class GeoVectorDataTool(BaseTool):
         if not detail:
             return ToolResult(
                 output=f"Vector file '{name}' not found.", is_error=True
+            )
+        if detail.get("error"):
+            return ToolResult(output=f"Error: inspect failed — {detail['error']}", is_error=True)
+        profile = make_profile(detail, kind="vector")
+        if "_measured_file_stat" in detail and profile is None:
+            return ToolResult(
+                output="Error: vector file changed during inspection; inspect again.", is_error=True
             )
         lines = [f"File: {detail.get('name', name)}"]
         lines.append(f"  Path: {detail.get('path', '')}")
@@ -157,9 +168,22 @@ class GeoVectorDataTool(BaseTool):
         schema = detail.get("schema") or {}
         if schema:
             lines.append(f"  Columns ({len(schema)}):")
-            for col, typ in schema.items():
+            for col, typ in list(schema.items())[:MAX_SCHEMA_FIELDS]:
                 lines.append(f"    - {col}: {typ}")
-        return ToolResult(output="\n".join(lines), metadata={"source_detail": detail})
+            if len(schema) > MAX_SCHEMA_FIELDS:
+                omitted = len(schema) - MAX_SCHEMA_FIELDS
+                lines.append(f"    ... {omitted} additional columns omitted")
+        elif detail.get("columns"):
+            columns = detail["columns"]
+            lines.append(
+                f"  Columns ({len(columns)}): "
+                + ", ".join(str(col) for col in columns[:MAX_SCHEMA_FIELDS])
+            )
+        lines.append(CRS_OPERATION_HINT)
+        return ToolResult(
+            output="\n".join(lines),
+            metadata={"source_detail": detail, "data_profiles": [profile] if profile else []},
+        )
 
     def _load(self, loader: Any, name: str) -> ToolResult:
         if not name:
@@ -167,18 +191,45 @@ class GeoVectorDataTool(BaseTool):
                 output="Error: 'name' or 'file_path' is required for load.",
                 is_error=True,
             )
+        resolver = getattr(loader, "resolve_path", None)
+        try:
+            path = resolver(name) if callable(resolver) else None
+        except Exception:  # noqa: BLE001 — optional adapter method must not invalidate a load
+            path = None
+        if path is None:
+            try:
+                path = loader.get_source_detail(name).get("path")
+            except Exception:  # noqa: BLE001 — profile availability does not invalidate a load
+                path = None
+        signature = file_signature(path) if path is not None else None
         gdf = loader.load_geodataframe(name)
         cols = ", ".join(str(c) for c in gdf.columns[:20])
         b = gdf.total_bounds
+        # Measure the loaded frame itself; no GeoDataFrame survives in shared metadata.
+        detail = {
+            "name": name,
+            "path": path,
+            "crs": str(gdf.crs) if gdf.crs is not None else None,
+            "bbox": b,
+            "feature_count": len(gdf),
+            "schema": {str(col): str(dtype) for col, dtype in gdf.dtypes.items()},
+            "geometry_type": ", ".join(str(t) for t in gdf.geom_type.dropna().unique()[:8]),
+            "_measured_file_stat": signature,
+        }
+        profile = make_profile(detail, kind="vector")
         return ToolResult(
             output=(
                 f"Loaded vector file '{name}':\n"
                 f"  Features: {len(gdf)}\n"
                 f"  Columns ({len(gdf.columns)}): {cols}\n"
                 f"  CRS: {gdf.crs}\n"
-                f"  Extent: [{b[0]:.4f}, {b[1]:.4f}, {b[2]:.4f}, {b[3]:.4f}]"
+                f"  Extent: [{b[0]:.4f}, {b[1]:.4f}, {b[2]:.4f}, {b[3]:.4f}]\n"
+                f"{CRS_OPERATION_HINT}"
             ),
-            metadata={"feature_count": len(gdf), "crs": str(gdf.crs)},
+            metadata={
+                "feature_count": len(gdf), "crs": str(gdf.crs),
+                "data_profiles": [profile] if profile else [],
+            },
         )
 
     def is_read_only(self, arguments: BaseModel) -> bool:

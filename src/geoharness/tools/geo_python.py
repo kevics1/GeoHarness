@@ -42,6 +42,26 @@ def qgis_diagnostic_files(root: Path) -> tuple[Path, ...]:
                 path = job / name
                 if path.is_file() and path.resolve() == path:
                     files.append(path)
+            result_file = job / "result.json"
+            if result_file in files and result_file.stat().st_size <= 1024 * 1024:
+                result = json.loads(result_file.read_text(encoding="utf-8"))
+                payload = result.get("result", {}) if isinstance(result, dict) else {}
+                if isinstance(result, dict) and result.get("status") == "succeeded" \
+                        and isinstance(payload, dict):
+                    # Only exact files returned by a successful job, inside that job.
+                    # Never grant its data directory, project archive, or profile.
+                    for key in ("preview_path", "output_path", "project_manifest"):
+                        value = payload.get(key)
+                        if not isinstance(value, str) or not value:
+                            continue
+                        path = Path(value)
+                        path = path if path.is_absolute() else job / path
+                        path = path.absolute()
+                        allowed = (path.name == "project.json" if key == "project_manifest"
+                                   else path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
+                        if allowed and path.is_relative_to(job) and path.is_file() \
+                                and path.resolve() == path and path not in files:
+                            files.append(path)
         except (OSError, ValueError, TypeError):
             continue
     return tuple(files)
@@ -61,9 +81,22 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
         hints.append("Write to RUN_DIR / filename or a relative filename. "
                      "Use geo_deliver for workspace delivery; do not copy to workspace/fonts.")
     if "Read path is outside allowed" in stderr:
-        hints.append("Read only returned QGIS diagnostic files, not the QGIS directory/profile. "
+        hints.append("Read only returned QGIS diagnostic files, previews and project.json, "
+                     "not the QGIS directory/profile. "
+                     "Use geo_qgis_project inspect to list layouts. "
                      "For QGIS fonts prefer font_family; explicit font_file must be in authorized "
                      "data/workspace. Do not inspect system directories or tool source code.")
+    if "Input shapes do not overlap raster" in stderr or "WindowError" in stderr:
+        hints.append("Inspect actual raster CRS/bounds in GEO_DATA. Use "
+                     "mask_raster(path, crs_bearing_geodataframe, crop=True), which transforms "
+                     "geometry to the raster CRS. Never pass raw analysis-CRS Shapely shapes "
+                     "to rasterio.mask on a different-CRS raster.")
+    if "RUN_DIR" in code and any(text in stderr for text in (
+        "No such file", "does not exist", "not found", "系统找不到",
+    )):
+        hints.append("RUN_DIR is a NEW output directory on every call. Use a returned actual "
+                     "path or PREVIOUS_OUTPUTS for earlier artifacts; do not invent timestamps "
+                     "or read earlier files from the current RUN_DIR.")
     return hints
 
 
@@ -114,11 +147,16 @@ class GeoPythonTool(BaseTool):
         "allowed output folder and is also the working directory. "
         "Injected: SOURCE_CWD: Path, RUN_DIR: Path, DATA_DIRS: list[Path] (iterate directly). "
         "Only os.environ['DATA_DIRS'] is an os.pathsep-separated string. "
+        "GEO_DATA: dict[path, verified metadata]; PREVIOUS_OUTPUTS: list[Path] contains "
+        "existing artifacts, newest jobs first. Each call creates a NEW RUN_DIR; earlier "
+        "files must use their returned actual paths, never a guessed dated directory. "
+        "mask_raster(path, GeoSeries/GeoDataFrame, crop=True) checks and transforms geometry "
+        "to the actual raster CRS before masking; bare Shapely lists are rejected. "
         "Configured analysis, map and previous Python run outputs "
-        "are read-only. Existing QGIS request/result/manifest/stdout/stderr files are readable; "
+        "are read-only. Returned QGIS diagnostics, previews and project.json are readable; "
         "QGIS directory listing/profile access is not allowed. Shapely geometries have no CRS; "
         "transform them via gpd.GeoSeries([geometry], crs=verified_source_crs).to_crs(target_crs). "
-        "Prefer geo_analysis for buffer/clip/intersection/distance/count/impact; "
+        "Prefer geo_analysis for buffer/clip/intersection/distance/count/impact/area; "
         "for other installed GIS operations use geo_qgis search then help then run. "
         "Use relative output filenames or RUN_DIR / filename. Network and subprocesses "
         "are unavailable. Returns script, manifest, stdout/stderr and generated file paths. "
@@ -208,6 +246,11 @@ class GeoPythonTool(BaseTool):
             qgis_root = qgis_root if qgis_root.is_absolute() else context.cwd / qgis_root
             diagnostic_files = qgis_diagnostic_files(qgis_root)
         try:
+            from geoharness.data.profiles import current_profiles
+            from geoharness.data.task_context import recent_outputs
+
+            profiles = current_profiles(context.metadata)
+            outputs = recent_outputs(context.cwd, config)
             result = await execute_python(
                 code=arguments.code,
                 name=arguments.name,
@@ -218,6 +261,8 @@ class GeoPythonTool(BaseTool):
                 max_output_chars=execution.max_output_chars,
                 read_dirs=read_dirs,
                 read_files=diagnostic_files,
+                data_profiles=profiles,
+                previous_outputs=tuple(Path(item["path"]) for item in outputs),
             )
         except (OSError, ValueError) as exc:
             if reserved:
@@ -237,7 +282,9 @@ class GeoPythonTool(BaseTool):
             "SOURCE_CWD": "Path", "RUN_DIR": "Path", "DATA_DIRS": "list[Path]",
             "DATA_DIRS_environment": "str separated by os.pathsep",
             "output_directory": result.get("run_dir"),
-            "qgis_diagnostics": "Exact request/result/manifest/stdout/stderr files of recent jobs",
+            "qgis_diagnostics": "Exact returned diagnostics, preview images and project.json",
+            "GEO_DATA": "dict[path, verified metadata]", "PREVIOUS_OUTPUTS": "list[Path]",
+            "mask_raster": "CRS-aware masking of GeoSeries/GeoDataFrame; source data unchanged",
         }
         if status != "succeeded":
             if reserved:

@@ -59,6 +59,25 @@ def mock_client(monkeypatch, responses, **settings):
 
 
 @pytest.mark.asyncio
+async def test_verified_data_context_refreshes_without_changing_saved_messages(monkeypatch):
+    client, calls = mock_client(monkeypatch, [
+        streamed(chunk(text="one", finish="stop")),
+        streamed(chunk(text="two", finish="stop")),
+    ])
+    snapshots = iter(["\nRaster CRS EPSG:32647", "\nActual output /runs/prior/result.geojson"])
+    client.data_context_provider = lambda: next(snapshots)
+    original = replace(request(), system_prompt="Base contract")
+    _ = [event async for event in client.stream_message(original)]
+    events = [event async for event in client.stream_message(original)]
+    assert events[-1].message.text == "two"
+    assert "32647" in calls[0]["messages"][0]["content"]
+    assert "prior/result" in calls[1]["messages"][0]["content"]
+    assert "32647" not in calls[1]["messages"][0]["content"]
+    assert original.system_prompt == "Base contract"
+    assert len(original.messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_reasoning_only_length_is_diagnosed_without_implicit_model_switch(monkeypatch):
     client, calls = mock_client(monkeypatch, [streamed(
         chunk(reasoning="hidden reasoning", finish="length", usage=(37, 16384)),
