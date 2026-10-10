@@ -390,11 +390,12 @@ def _style_vector(layer: Any, spec: dict[str, Any], context: Any) -> None:
         raise ValueError("Unsupported vector renderer")
     layer.setOpacity(float(style.get("opacity", 1.0)))
     field = spec.get("label_field")
-    if field:
-        if layer.fields().indexFromName(field) < 0:
+    if field or style.get("obstacle") is True:
+        if field and layer.fields().indexFromName(field) < 0:
             raise ValueError(f"Label field does not exist: {field}")
         settings = QgsPalLayerSettings()
-        settings.fieldName = field
+        settings.fieldName = field or ""
+        settings.drawLabels = bool(field)
         label_spec = spec.get("label_style") or {}
         font, font_info = _font(label_spec, context)
         text_format = _text_format(
@@ -407,12 +408,38 @@ def _style_vector(layer: Any, spec: dict[str, Any], context: Any) -> None:
         buffer.setColor(_color(label_spec.get("buffer_color", "#ffffff")))
         text_format.setBuffer(buffer)
         settings.setFormat(text_format)
+        positions = {
+            "around_point": Qgis.LabelPlacement.OrderedPositionsAroundPoint,
+            "over_point": Qgis.LabelPlacement.OverPoint,
+            "parallel": Qgis.LabelPlacement.Line,
+            "horizontal": Qgis.LabelPlacement.Horizontal,
+        }
+        position = label_spec.get("placement", "auto")
+        if position == "auto":
+            position = {Qgis.GeometryType.Point: "around_point",
+                        Qgis.GeometryType.Line: "parallel"}.get(
+                            layer.geometryType(), "horizontal")
+        if position in {"around_point", "over_point"} \
+                and layer.geometryType() != Qgis.GeometryType.Point:
+            raise ValueError("Point label placement requires point geometry")
+        if position == "parallel" and layer.geometryType() != Qgis.GeometryType.Line:
+            raise ValueError("parallel label placement requires line geometry")
+        settings.placement = positions[position]
+        settings.dist = label_spec.get("distance_mm", 1.5)
+        settings.distUnits = Qgis.RenderUnit.Millimeters
+        settings.xOffset = label_spec.get("offset_x_mm", 0)
+        settings.yOffset = label_spec.get("offset_y_mm", 0)
+        settings.offsetUnits = Qgis.RenderUnit.Millimeters
+        settings.priority = int(label_spec.get("priority", 5))
         placement = settings.placementSettings()
         placement.setOverlapHandling(Qgis.LabelOverlapHandling.PreventOverlap)
         placement.setAllowDegradedPlacement(False)
         settings.setPlacementSettings(placement)
         settings.displayAll = False
-        settings.obstacle = True
+        obstacle = settings.obstacleSettings()
+        obstacle.setIsObstacle(style.get("obstacle") is not False)
+        obstacle.setFactor(style.get("obstacle_factor", 1))
+        settings.setObstacleSettings(obstacle)
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
         layer.setCustomProperty("geoharness/label_font", json.dumps(font_info))
@@ -773,6 +800,7 @@ def _layer_metadata(layer: Any) -> dict[str, Any]:
         renderer = layer.renderer()
         metadata.update(
             kind="vector",
+            geometry_type=layer.geometryType().name,
             feature_count=layer.featureCount(),
             fields=[field.name() for field in layer.fields()],
             renderer=renderer.type() if renderer is not None else None,
@@ -801,6 +829,9 @@ def _layer_metadata(layer: Any) -> dict[str, Any]:
             metadata["symbol"] = _symbol_metadata(renderer.symbol())
         if layer.labelsEnabled() and layer.labeling() is not None:
             settings = layer.labeling().settings()
+            metadata["labels_enabled"] = settings.drawLabels
+            metadata["obstacle_enabled"] = settings.obstacleSettings().isObstacle()
+            metadata["obstacle_factor"] = settings.obstacleSettings().factor()
             text_format = settings.format()
             metadata["label_style"] = {
                 "field": settings.fieldName,
@@ -809,6 +840,11 @@ def _layer_metadata(layer: Any) -> dict[str, Any]:
                 "buffer_enabled": text_format.buffer().enabled(),
                 "buffer_size_mm": text_format.buffer().size(),
                 "overlap_handling": settings.placementSettings().overlapHandling().name,
+                "placement": settings.placement.name,
+                "distance_mm": settings.dist,
+                "offset_x_mm": settings.xOffset, "offset_y_mm": settings.yOffset,
+                "priority": settings.priority,
+                "offset_unit": settings.offsetUnits.name, "distance_unit": settings.distUnits.name,
             }
     else:
         metadata["kind"] = "raster"

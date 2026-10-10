@@ -16,6 +16,24 @@ from geoharness.cartography.facts import load_analysis_facts
 from geoharness.tools.geo_analysis import GeoAnalysisInput, SpatialSource
 
 
+def test_unmapped_manifest_diagnostic_names_actual_outputs_and_bad_binding(tmp_path):
+    from geoharness.cartography.facts import AnalysisBindingError
+
+    manifest = _analysis(tmp_path)
+    unrelated = tmp_path / "unrelated.geojson"
+    gpd.GeoDataFrame(geometry=[Point(0, 0)], crs=4326).to_file(unrelated)
+    with pytest.raises(AnalysisBindingError) as error:
+        _facts(tmp_path, manifest, source=str(unrelated))
+    diagnostics = error.value.diagnostics
+    assert diagnostics["manifest_path"] == manifest["manifest_path"]
+    assert diagnostics["action"] == "impact"
+    assert diagnostics["code"] == "analysis_output_not_mapped"
+    assert manifest["paths"]["result"]["geojson"] in {
+        item["file_path"] for item in diagnostics["native_outputs"]}
+    assert diagnostics["mapped_layers"][0]["file_path"] == str(unrelated)
+    assert "layer.derivation" in diagnostics["recovery"]
+
+
 def _source(geometry, properties=None):
     frame = gpd.GeoDataFrame(properties or {}, geometry=geometry, crs="EPSG:32650")
     return SpatialSource(geojson=frame.to_json(), crs="EPSG:32650")

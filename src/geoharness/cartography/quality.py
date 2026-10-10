@@ -22,18 +22,98 @@ from geoharness.config.settings import GeoConfig, MapLayout
 
 
 class LayoutPatch(BaseModel):
-    """Only allow presentation changes, never data or analysis changes."""
+    """Matplotlib presentation changes; dimensions are inches and symbols use points."""
 
     model_config = ConfigDict(extra="forbid")
-    width: float | None = Field(default=None, ge=4, le=24)
-    height: float | None = Field(default=None, ge=4, le=24)
+    width: float | None = Field(default=None, ge=4, le=24, description="Figure width in inches.")
+    height: float | None = Field(default=None, ge=4, le=24, description="Figure height in inches.")
     dpi: int | None = Field(default=None, ge=72, le=300)
     legend_outside: bool | None = None
     title_font_size: float | None = Field(default=None, ge=8, le=32)
     legend_font_size: float | None = Field(default=None, ge=6, le=20)
-    point_size: float | None = Field(default=None, ge=2, le=150)
-    line_width: float | None = Field(default=None, ge=0.2, le=8)
+    point_size: float | None = Field(
+        default=None, ge=2, le=150, description="Matplotlib marker area in square points."
+    )
+    line_width: float | None = Field(
+        default=None, ge=0.2, le=8, description="Matplotlib line width in points."
+    )
     polygon_alpha: float | None = Field(default=None, ge=0.1, le=1)
+
+
+class QgisLayoutPatch(BaseModel):
+    """Suggestions matching native QGIS layout parameters, never analysis inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+    width_mm: float | None = Field(default=None, ge=60, le=2000)
+    height_mm: float | None = Field(default=None, ge=60, le=2000)
+    margin_mm: float | None = Field(default=None, ge=0, le=100)
+    sidebar_width_mm: float | None = Field(default=None, ge=20, le=500)
+    gap_mm: float | None = Field(default=None, ge=1, le=30)
+    title_height_mm: float | None = Field(default=None, ge=8, le=60)
+    footer_height_mm: float | None = Field(default=None, ge=10, le=100)
+    title_font_size_pt: float | None = Field(default=None, ge=8, le=40)
+    body_font_size_pt: float | None = Field(default=None, ge=5, le=20)
+    legend_font_size_pt: float | None = Field(default=None, ge=5, le=20)
+    detail_height_ratio: float | None = Field(default=None, ge=0.1, le=0.8)
+
+
+class QgisSymbolPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    size_mm: float | None = Field(default=None, gt=0, le=50)
+    width_mm: float | None = Field(default=None, ge=0, le=20)
+    opacity: float | None = Field(
+        default=None, gt=0, le=1, description="Keep the layer visible; never hide required content."
+    )
+
+
+class QgisLabelPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    size_pt: float | None = Field(default=None, ge=5, le=40)
+    buffer_size_mm: float | None = Field(default=None, ge=0, le=5)
+    placement: Literal["auto", "around_point", "over_point", "parallel", "horizontal"] | None = (
+        Field(default=None, description=(
+            "around_point lets PAL select a nearby position using distance_mm; "
+            "over_point uses explicit offset_x_mm/offset_y_mm. Do not combine around_point "
+            "with x/y offsets, which QGIS ignores. Keep auto only when its verified mode is known."
+        ))
+    )
+    distance_mm: float | None = Field(default=None, ge=0, le=20, description=(
+        "Feature-to-label distance in millimeters. Use to separate around_point labels "
+        "from point symbols; over_point does not use this distance to place the label."
+    ))
+    offset_x_mm: float | None = Field(default=None, ge=-20, le=20, description=(
+        "Horizontal offset in millimeters for over_point. Ignored by around_point "
+        "and ordered positions around a point; do not suggest as a repair in those modes."
+    ))
+    offset_y_mm: float | None = Field(default=None, ge=-20, le=20, description=(
+        "Vertical offset in millimeters for over_point. Ignored by around_point "
+        "and ordered positions around a point; do not suggest as a repair in those modes."
+    ))
+    priority: int | None = Field(default=None, ge=0, le=10, description="0 lowest; 10 highest.")
+
+
+class QgisLayerPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    layer_index: int = Field(
+        ge=0, description="Zero-based index in the verified rendering layer list; never infer."
+    )
+    style: QgisSymbolPatch | None = None
+    label_style: QgisLabelPatch | None = None
+
+
+class QgisPresentationPatch(BaseModel):
+    """Executable suggestions for the next create call; this review does not apply them."""
+
+    model_config = ConfigDict(extra="forbid")
+    layout: QgisLayoutPatch | None = None
+    dpi: int | None = Field(default=None, ge=36, le=600)
+    layers: list[QgisLayerPatch] = Field(default_factory=list, max_length=64)
+
+
+class ReviewStrategy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    strategy: Literal["adjust_presentation", "detail_map", "split_maps"]
+    reason: str = Field(min_length=1, max_length=240)
 
 
 class MapIssue(BaseModel):
@@ -41,6 +121,10 @@ class MapIssue(BaseModel):
     severity: Literal["error", "warning", "info"]
     description: str
     location: str = ""
+    issue_code: Literal[
+        "label_overlap", "symbol_overlap", "label_missing", "layer_occlusion",
+        "extent_whitespace", "footer_density", "legend_mismatch", "other",
+    ] = "other"
 
 
 class MapReview(BaseModel):
@@ -49,6 +133,8 @@ class MapReview(BaseModel):
     summary: str
     issues: list[MapIssue] = Field(default_factory=list)
     layout_patch: LayoutPatch = Field(default_factory=LayoutPatch)
+    qgis_patch: QgisPresentationPatch | None = None
+    next_strategy: ReviewStrategy | None = None
     diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -90,6 +176,110 @@ def apply_layout_patch(layout: MapLayout, patch: LayoutPatch) -> MapLayout:
     return MapLayout.model_validate({**layout.model_dump(), **patch.model_dump(exclude_none=True)})
 
 
+def _review_backend(evidence: dict[str, Any]) -> str:
+    # Native rendering callers provide their backend directly. The public review
+    # tool replaces user claims with image-bound file evidence before this seam.
+    backend = evidence.get("backend", "matplotlib")
+    return backend if isinstance(backend, str) and backend in {"matplotlib", "qgis"} else "unknown"
+
+
+def _review_schema(backend: str) -> dict[str, Any]:
+    schema = MapReview.model_json_schema()
+    properties = schema["properties"]
+    properties.pop("diagnostics", None)
+    if backend != "matplotlib":
+        properties.pop("layout_patch", None)
+    if backend != "qgis":
+        properties.pop("qgis_patch", None)
+    # Remove unreachable definitions too: showing inch/point-area parameters in
+    # a QGIS request still encourages suggestions using the wrong units.
+    definitions = schema.get("$defs", {})
+    used: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            reference = value.get("$ref", "")
+            if reference.startswith("#/$defs/"):
+                name = reference.removeprefix("#/$defs/")
+                if name not in used:
+                    used.add(name)
+                    visit(definitions[name])
+            for key, item in value.items():
+                if key != "$defs":
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(schema)
+    schema["$defs"] = {name: value for name, value in definitions.items() if name in used}
+    return schema
+
+
+def _verified_geometry_type(layer: dict[str, Any]) -> str | None:
+    """Recognize recorded QGIS categories and concrete geometry names without guessing."""
+    recorded = layer.get("geometry_type", layer.get("geometry_types"))
+    values = recorded if isinstance(recorded, list) else [recorded]
+    names = {
+        "point": "point", "multipoint": "point",
+        "line": "line", "linestring": "line", "multilinestring": "line",
+        "polygon": "polygon", "multipolygon": "polygon",
+    }
+    categories = {names.get(value.casefold()) if isinstance(value, str) else None
+                  for value in values}
+    return next(iter(categories)) if len(categories) == 1 else None
+
+
+def _filter_qgis_layer_patches(
+    patch: QgisPresentationPatch, layers: Any, diagnostics: dict[str, Any],
+) -> None:
+    """Discard only suggestions that cannot apply to their verified native layer."""
+    layers = layers if isinstance(layers, list) else []
+    kept = []
+    ignored = []
+    fields = []
+    for suggestion in patch.layers:
+        index = suggestion.layer_index
+        if index >= len(layers) or not isinstance(layers[index], dict):
+            ignored.append({**suggestion.model_dump(exclude_none=True),
+                            "reason": "Layer index has no verified rendering metadata."})
+            continue
+        layer = layers[index]
+        if layer.get("kind") == "raster":
+            ignored.append({**suggestion.model_dump(exclude_none=True),
+                            "reason": "Vector symbol and label parameters do not apply to raster."})
+            continue
+        labels = suggestion.label_style
+        if labels is not None:
+            required = {"around_point": "point", "over_point": "point", "parallel": "line"}.get(
+                labels.placement
+            )
+            geometry = _verified_geometry_type(layer)
+            if required is not None and geometry != required:
+                removed = {"placement": labels.placement}
+                labels.placement = None
+                for name in ("offset_x_mm", "offset_y_mm"):
+                    value = getattr(labels, name)
+                    if value is not None:
+                        removed[name] = value
+                        setattr(labels, name, None)
+                fields.append({
+                    "layer_index": index, "label_style": removed,
+                    "reason": (f"Placement requires {required} geometry; verified {geometry}."
+                               if geometry is not None else
+                               "Geometry is unverified; confirm it before choosing placement."),
+                })
+            if not labels.model_dump(exclude_none=True):
+                suggestion.label_style = None
+        if suggestion.style is not None or suggestion.label_style is not None:
+            kept.append(suggestion)
+    patch.layers = kept
+    if ignored:
+        diagnostics["ignored_qgis_layer_patches"] = ignored
+    if fields:
+        diagnostics["ignored_qgis_layer_fields"] = fields
+
+
 def _image_block(path: Path, max_side: int) -> ImageBlock:
     from PIL import Image
 
@@ -111,9 +301,20 @@ async def review_map(
 ) -> MapReview:
     """Inspect pixels, with source/render evidence; failures stay unverified."""
     settings = config.map_review
+    backend = _review_backend(evidence)
+    evidence = dict(evidence)
+    render_metadata = evidence.get("render_metadata")
+    render_layers = render_metadata.get("layers") if isinstance(render_metadata, dict) else None
+    if isinstance(render_layers, list):
+        evidence["render_metadata"] = {
+            **render_metadata,
+            "layers": [{**layer, "layer_index": index} if isinstance(layer, dict) else layer
+                       for index, layer in enumerate(render_layers)],
+        }
     secrets = _review_secrets(config)
     diagnostics: dict[str, Any] = {
         "requested_model": settings.model or config.model,
+        "backend": backend,
         "stage": "configuration", "request_sent": False,
     }
     if not settings.enabled:
@@ -135,12 +336,31 @@ async def review_map(
         "只有源数据/参数证据足够时才能判断数据错误；不能从图片证明统计数值或真实位置。"
         "不要把制图风格偏好当作错误。不能判断的部分说明未知。"
         "需要修正时只建议可确认的呈现参数；禁止换数据、改统计方法/字段/阈值。"
+        "集中解决标签/符号与线路、主体面压盖、过大空白和底栏密集；不要只放大所有符号。"
+        "密集区已有可见遮挡时可立即建议下一版加详图或分图，不必耗尽版本预算。"
+        "使用issue_code标识具体问题；若previous_visual_reviews有同类问题仍未解决且"
+        "remaining_render_versions>0，next_strategy应明确提出当前请求内下一版的策略。"
+        "详图/分图必须保留必要图层、分类与分析口径，范围须由实际坐标证据确定；"
+        "不要从图片编造坐标或静默删层。"
         "无法靠呈现参数修复的问题保留在issues。"
         "passed仅在没有error或warning且可完成视觉检查时使用；否则issues或unverified。"
         "summary不超过80个汉字，issues最多5条，每条description不超过60个汉字。"
         "不要复述任务/图层列表，语言混用等风格偏好不能独立判为warning。"
         "通过record_map_review提交结构化结论。该工具只记录检查结果，不执行任何动作。"
-        "如返回文本，必须是符合该工具schema的JSON对象，不含Markdown。\n"
+        + (
+            "当前后端为QGIS。仅用qgis_patch建议原生参数，长度用mm、字号用pt；"
+            "图层修改必须使用证据中明确的0-based layer_index。placement/offset/priority"
+            "必须匹配：around_point（含点图层auto的环绕候选模式）用distance_mm控制间距，"
+            "QGIS在环绕模式忽略offset_x_mm/offset_y_mm，不能把它们当作有效修正。"
+            "只有需要精确x/y偏移时才明确建议over_point及offset_x_mm/offset_y_mm；"
+            "over_point不靠distance_mm移动标签。不要自动切换已用的placement。"
+            "仅影响呈现，不能保证标签成功落位；必须重绘并再检查实际图片。"
+            if backend == "qgis" else
+            "当前后端为Matplotlib。layout_patch的width/height用英寸，point_size用平方pt，"
+            "line_width用pt。" if backend == "matplotlib" else
+            "渲染后端尚未核实。只报告issues及next_strategy，不建议后端专属参数。"
+        )
+        + "如返回文本，必须是符合该工具schema的JSON对象，不含Markdown。\n"
         "任务及渲染证据：\n"
         + json.dumps({"task": task, "evidence": evidence}, ensure_ascii=False, default=str)
     )
@@ -167,9 +387,7 @@ async def review_map(
         async def collect() -> str:
             diagnostics["stage"] = "image"
             block = await asyncio.to_thread(_image_block, path, settings.max_image_side)
-            schema = MapReview.model_json_schema()
-            # Provider observations come from our transport, never from model claims.
-            schema["properties"].pop("diagnostics", None)
+            schema = _review_schema(backend)
             tool = {
                 "name": "record_map_review", "description": "Record the completed visual review.",
                 "input_schema": schema,
@@ -280,14 +498,28 @@ async def review_map(
         result.diagnostics = diagnostics
         diagnostics["raw_review_status"] = result.status
         actionable = any(issue.severity in {"error", "warning"} for issue in result.issues)
-        if not actionable and result.layout_patch.model_dump(exclude_none=True):
+        if (backend != "matplotlib" or not actionable) and (
+            result.layout_patch.model_dump(exclude_none=True)
+        ):
             # Unsupported style suggestions must not trigger another render or
             # overturn an explicit pass. Keep the original suggestion for audit.
             diagnostics["ignored_layout_patch"] = result.layout_patch.model_dump(exclude_none=True)
             diagnostics["ignored_patch_reason"] = (
+                "Matplotlib parameters do not apply to the verified backend."
+                if backend != "matplotlib" else
                 "No concrete error or warning supports this patch."
             )
             result.layout_patch = LayoutPatch()
+        if result.qgis_patch is not None:
+            if backend != "qgis" or not actionable:
+                diagnostics["ignored_qgis_patch"] = result.qgis_patch.model_dump(exclude_none=True)
+                result.qgis_patch = None
+            else:
+                _filter_qgis_layer_patches(result.qgis_patch, render_layers, diagnostics)
+                diagnostics["qgis_patch_applied"] = False
+        if not actionable and result.next_strategy is not None:
+            diagnostics["ignored_next_strategy"] = result.next_strategy.model_dump()
+            result.next_strategy = None
         if result.status == "passed" and any(
             issue.severity in {"error", "warning"} for issue in result.issues
         ):
@@ -367,6 +599,8 @@ async def review_map(
             for issue in result.issues:
                 issue.description = _redact_review(issue.description, secrets)
                 issue.location = _redact_review(issue.location, secrets)
+            if result.next_strategy is not None:
+                result.next_strategy.reason = _redact_review(result.next_strategy.reason, secrets)
             result.diagnostics = _redact_review(diagnostics, secrets)
 
 

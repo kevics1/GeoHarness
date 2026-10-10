@@ -38,6 +38,25 @@ _METHODS = {
     "impact": "距离阈值影响分析",
     "area": "面积统计",
 }
+
+
+class AnalysisBindingError(ValueError):
+    """A native result was supplied but none of its actual outputs is mapped."""
+
+    def __init__(self, outputs: dict, mapped_sources: list[dict]) -> None:
+        self.diagnostics = {
+            "code": "analysis_output_not_mapped",
+            "native_outputs": [{"name": label, "file_path": str(output["path"])}
+                               for label, output in outputs.items()],
+            "mapped_layers": [{"layer_index": source.get("layer_index", index),
+                               "file_path": str(source.get("file_path", ""))}
+                              for index, source in enumerate(mapped_sources)],
+            "recovery": "Use a listed native output as a layer, optionally with "
+                        "layer.derivation for verified subsets/new annotations. Do not bind "
+                        "a manifest to unrelated or manually transformed Python outputs.",
+        }
+        super().__init__("No native analysis output is an actual mapped layer. "
+                         + json.dumps(self.diagnostics, ensure_ascii=False))
 _GEOMETRY_SEMANTICS = {
     "buffer": "Planar buffers around source geometries in the metric CRS.",
     "clip": "Source geometries intersected with the union of reference geometries.",
@@ -411,7 +430,7 @@ def _mapped_outputs(
             if content == output["content"]
         )
     if not matches:
-        raise ValueError("No native analysis output is an actual mapped layer.")
+        raise AnalysisBindingError(outputs, mapped_sources)
     return matches
 
 
@@ -546,7 +565,13 @@ def load_analysis_facts(
             raise ValueError("Native analysis distance_m is inconsistent with action.")
         outputs, fingerprints, verification = _read_outputs(manifest, reader, export_crs)
         statistics, unverified = _statistics(manifest, outputs, distance, metric_crs)
-        matches = _mapped_outputs(outputs, mapped_sources, reader)
+        try:
+            matches = _mapped_outputs(outputs, mapped_sources, reader)
+        except AnalysisBindingError as exc:
+            exc.diagnostics.update(manifest_path=str(path), action=action)
+            exc.args = ("No native analysis output is an actual mapped layer. "
+                        + json.dumps(exc.diagnostics, ensure_ascii=False),)
+            raise
         analyses.append(
             {
                 "manifest_path": str(path),

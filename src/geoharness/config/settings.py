@@ -116,8 +116,8 @@ class MapReviewConfig(BaseModel):
         default_factory=dict,
         description="Optional provider request extensions; empty inherits provider defaults.",
     )
-    max_repairs: int = Field(default=2, ge=0, le=2)
-    max_reviews_per_request: int = Field(default=4, ge=0, le=20)
+    max_repairs: int = Field(default=4, ge=0, le=4)
+    max_reviews_per_request: int = Field(default=5, ge=0, le=20)
     total_timeout_seconds: float = Field(default=120, gt=0, le=900)
     timeout_seconds: float = Field(default=90, gt=0, le=300)
     max_tokens: int = Field(default=8192, ge=256, le=65536)

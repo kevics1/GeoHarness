@@ -22,7 +22,7 @@ from geoharness.config.settings import GeoConfig
 _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 # Bump only when the response contract/compatibility changes. Legacy failed
 # cache entries can then recover without repeatedly resending unchanged images.
-REVIEW_CONTRACT_VERSION = 2
+REVIEW_CONTRACT_VERSION = 4
 _BUDGET_LOCK = threading.RLock()
 
 
@@ -218,6 +218,16 @@ async def review_with_budget(
         identity, _ = _budget_entry(map_id or image_map_identity(path), metadata, config)
         state = _state(metadata)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    from geoharness.cartography.review_context import build_review_iteration_context
+
+    # A request shares one budget even when reviewing another persisted map.
+    # History belongs to the actual artifact, not to that shared budget UUID.
+    iteration = build_review_iteration_context(
+        metadata, map_id or image_map_identity(path), config, image_sha256=digest,
+    )
+    budget = build_review_iteration_context(metadata, identity, config, receipt={})
+    evidence = {**evidence, **iteration,
+                "remaining_render_versions": budget["remaining_render_versions"]}
     lock_key = (id(state), digest)
     lock = _REVIEW_LOCKS.get(lock_key)
     if lock is None:
@@ -254,6 +264,7 @@ async def _review_once(
         json.dumps(
             {
                 "contract_version": REVIEW_CONTRACT_VERSION,
+                "backend": evidence.get("backend", "matplotlib"),
                 "enabled": settings.enabled,
                 "model": settings.model or config.model,
                 "base_url": settings.base_url or config.base_url,

@@ -12,6 +12,7 @@ from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
 from geoharness.cartography.quality import MapIssue, MapReview, save_review
+from geoharness.cartography.review_context import build_review_iteration_context
 from geoharness.cartography.workflow import review_with_budget
 
 
@@ -29,12 +30,80 @@ class GeoMapReviewInput(BaseModel):
     )
 
 
+def _verified_render_evidence(
+    path: Path, digest: str, receipt: dict[str, Any], roots: list[Path],
+) -> dict[str, Any]:
+    """Bind backend identity to the actual image, never a caller's backend claim."""
+    candidates: dict[Path, str | None] = {}
+    versions = receipt.get("versions", []) if isinstance(receipt, dict) else []
+    for version in versions if isinstance(versions, list) else []:
+        if not isinstance(version, dict):
+            continue
+        if version.get("image_sha256") != digest:
+            continue
+        stages = version.get("stages", {})
+        packaged = stages.get("packaged", {}) if isinstance(stages, dict) else {}
+        if not isinstance(packaged, dict):
+            continue
+        manifest = packaged.get("manifest_path")
+        if isinstance(manifest, str):
+            try:
+                manifest_path = Path(manifest).resolve()
+            except (OSError, ValueError):
+                continue
+            files = packaged.get("files", [])
+            recorded_hash = next((file.get("sha256") for file in (
+                                      files if isinstance(files, list) else []
+                                  )
+                                  if isinstance(file, dict)
+                                  and file.get("path") == str(manifest_path)), None)
+            candidates[manifest_path] = recorded_hash
+    candidates.setdefault((path.parent / "project.json").resolve(), None)
+    for manifest_path, recorded_hash in candidates.items():
+        manifest_path = manifest_path.resolve()
+        if not any(manifest_path.is_relative_to(root) for root in roots):
+            continue
+        try:
+            if manifest_path.stat().st_size > 1024 * 1024:
+                continue
+            raw = manifest_path.read_bytes()
+            if recorded_hash and hashlib.sha256(raw).hexdigest() != recorded_hash:
+                continue
+            manifest = json.loads(raw)
+            if not isinstance(manifest, dict) or manifest.get("preview_sha256") != digest:
+                continue
+            preview = manifest.get("preview")
+            if not isinstance(preview, str) or not preview:
+                continue
+            bound_image = (manifest_path.parent / preview).resolve()
+            if not bound_image.is_relative_to(manifest_path.parent):
+                continue
+            if hashlib.sha256(bound_image.read_bytes()).hexdigest() != digest:
+                continue
+            backend = manifest.get("backend")
+            if backend not in {"matplotlib", "qgis"}:
+                continue
+            return {
+                "backend": backend,
+                "backend_proof": {"manifest_path": str(manifest_path), "image_sha256": digest},
+                "render_metadata": {key: manifest[key] for key in (
+                    "layers", "layout", "crs", "extent", "analysis",
+                ) if key in manifest},
+            }
+        except (OSError, ValueError, TypeError):
+            continue
+    return {"backend": "unknown"}
+
+
 class GeoMapReviewTool(BaseTool):
     name = "geo_map_review"
     description = (
         "Read actual map pixels and review layer visibility, legends, text and layout. "
-        "Use after geo_python produces a PNG map. Returns issues and presentation fixes; "
-        "apply those fixes to the script and re-render, then review again within max_repairs. "
+        "Use after a Python or QGIS workflow produces a PNG map. Returns issues and "
+        "suggestions using the verified backend's units; QGIS suggestions use qgis_patch "
+        "and explicit zero-based layer_index. Apply suggestions to the next render call "
+        "or script and re-render, then review actual pixels again within max_repairs. "
+        "The review does not apply patches or prove successful label placement. "
         "A failed API call means unverified, never passed."
     )
     input_model = GeoMapReviewInput
@@ -49,7 +118,9 @@ class GeoMapReviewTool(BaseTool):
             path = context.cwd / path
         path = path.resolve()
         roots = [context.cwd.resolve()]
-        for configured in (config.cartography.outputs_dir, config.execution.outputs_dir):
+        for configured in (
+            config.cartography.outputs_dir, config.execution.outputs_dir, config.qgis.outputs_dir,
+        ):
             if configured:
                 root = Path(configured).expanduser()
                 roots.append((root if root.is_absolute() else context.cwd / root).resolve())
@@ -94,6 +165,18 @@ class GeoMapReviewTool(BaseTool):
         except (OSError, ValueError) as exc:
             return ToolResult(output=f"Error: map receipt unavailable: {exc}", is_error=True)
         evidence = dict(arguments.evidence)
+        verified = _verified_render_evidence(path, digest, existing, roots)
+        evidence["backend"] = verified["backend"]
+        evidence.update(build_review_iteration_context(
+            context.metadata, identity, config, receipt=existing, image_sha256=digest,
+        ))
+        # A user supplied layer list must not select the targets of native fixes.
+        if "render_metadata" in verified:
+            evidence["render_metadata"] = verified["render_metadata"]
+            evidence["backend_proof"] = verified["backend_proof"]
+        else:
+            evidence.pop("render_metadata", None)
+            evidence.pop("backend_proof", None)
         layout_status = "unverified"
         measured_layout = None
         layout_issues = []
@@ -172,6 +255,7 @@ class GeoMapReviewTool(BaseTool):
                 **result.model_dump(),
                 **budget,
                 "layout_status": layout_status,
+                "backend": verified["backend"],
             },
         )
         from geoharness.cartography.jobs import record_map_review
@@ -218,6 +302,7 @@ class GeoMapReviewTool(BaseTool):
             ),
             metadata={
                 "review_status": result.status,
+                "backend": verified["backend"],
                 "review_path": str(report),
                 "image_path": str(path),
                 "layout_status": layout_status,

@@ -676,7 +676,9 @@ class GeoCartographyTool(BaseTool):
             logger.exception("%s failed", what)
             return ToolResult(output=f"Error: {what} failed — {exc}", is_error=True,
                               metadata={"deterministic_error": what == "map preflight"
-                                        and isinstance(exc, ValueError)})
+                                        and isinstance(exc, ValueError),
+                                        **({"diagnostics": exc.diagnostics}
+                                           if hasattr(exc, "diagnostics") else {})})
 
     async def _render(
         self,

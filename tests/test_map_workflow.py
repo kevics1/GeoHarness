@@ -42,6 +42,38 @@ class Reviewer:
         )
 
 
+async def test_shared_budget_keeps_history_of_actual_historical_map(tmp_path, monkeypatch):
+    from geoharness.cartography import workflow
+    from geoharness.cartography.quality import MapReview
+
+    actual = "31139f2c-13ae-4dff-9f3a-ecf2d99746f6"
+    image = tmp_path / "current.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    config = GeoConfig()
+    job = tmp_path / config.cartography.jobs_dir / actual
+    job.mkdir(parents=True)
+    (job / "receipt.json").write_text(json.dumps({"job_id": actual, "versions": [{
+        "version": 1, "image_sha256": "old", "stages": {"visual_checked": {"report": {
+            "status": "issues", "issues": [{"severity": "warning", "description": "Crowded",
+                                             "issue_code": "label_overlap"}],
+        }}},
+    }]}), encoding="utf-8")
+    metadata = {"map_job_state": {"cwd": str(tmp_path)},
+                "map_workflow_state": {"maps": {"budget-map": {"renders": 2, "reviews": 0}}}}
+    monkeypatch.setattr(workflow, "canonical_budget_map", lambda *args: "budget-map")
+    captured = []
+
+    async def review(*args, **kwargs):
+        captured.append(kwargs["evidence"])
+        return MapReview(status="issues", summary="Crowded")
+
+    monkeypatch.setattr(workflow, "review_map", review)
+    await review_with_budget(image, config=config, task="Check", evidence={}, metadata=metadata,
+                             map_id=actual)
+    assert captured[0]["remaining_render_versions"] == 3
+    assert captured[0]["previous_visual_reviews"][0]["issues"][0]["issue_code"] == "label_overlap"
+
+
 @pytest.mark.asyncio
 async def test_unchanged_map_is_not_sent_to_model_repeatedly(tmp_path):
     image = tmp_path / "map.png"

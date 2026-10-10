@@ -58,6 +58,11 @@ class QgisVectorStyle(BaseModel):
     size_mm: float = Field(default=3, gt=0, le=50)
     width_mm: float = Field(default=0.3, ge=0, le=20)
     outline_color: str = "#ffffff"
+    obstacle: bool | None = Field(default=None, description=(
+        "Optional PAL labeling obstacle, including unlabeled lines/polygons. None keeps "
+        "the normal behavior; True protects this geometry from other layers' labels."
+    ))
+    obstacle_factor: float = Field(default=1, ge=0, le=10)
 
     @model_validator(mode="after")
     def validate_categories(self) -> QgisVectorStyle:
@@ -74,6 +79,9 @@ class QgisVectorStyle(BaseModel):
         values = [json.dumps(category.value, sort_keys=True) for category in self.categories]
         if len(values) != len(set(values)):
             raise ValueError("category values must be unique")
+        # A reversed legend order is a harmless permutation, not an invalid interval.
+        # Keep each interval's label and color together; actual overlap still fails.
+        self.ranges = sorted(self.ranges, key=lambda item: (item.lower, item.upper))
         for previous, current in zip(self.ranges, self.ranges[1:]):
             if current.lower < previous.upper or current.upper <= previous.upper:
                 raise ValueError("graduated ranges must be ordered and non-overlapping")
@@ -92,6 +100,19 @@ class QgisLabelStyle(BaseModel):
     color: str = "#222222"
     buffer_size_mm: float = Field(default=0.8, ge=0, le=5)
     buffer_color: str = "#ffffff"
+    placement: Literal["auto", "around_point", "over_point", "parallel", "horizontal"] = "auto"
+    distance_mm: float = Field(default=1.5, ge=0, le=20, description=(
+        "Distance from the point for around_point placement; over_point ignores this value."
+    ))
+    offset_x_mm: float = Field(default=0, ge=-20, le=20, description=(
+        "Fixed horizontal offset for over_point placement. around_point ignores X/Y offsets; "
+        "use distance_mm for around_point, or explicitly choose over_point for fixed offsets."
+    ))
+    offset_y_mm: float = Field(default=0, ge=-20, le=20, description=(
+        "Fixed vertical offset for over_point placement; around_point uses distance_mm instead."
+    ))
+    priority: int = Field(default=5, ge=0, le=10,
+                          description="PAL label priority: 0 lowest, 10 highest.")
 
 
 class QgisRasterStyle(BaseModel):
@@ -327,7 +348,9 @@ class GeoQgisProjectTool(BaseTool):
             except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
                 return ToolResult(output=f"Error: QGIS map preflight failed: {exc}", is_error=True,
                                   metadata={"preflight_status": "failed", "render_executed": False,
-                                            "deterministic_error": isinstance(exc, ValueError)})
+                                            "deterministic_error": isinstance(exc, ValueError),
+                                            **({"diagnostics": exc.diagnostics}
+                                               if hasattr(exc, "diagnostics") else {})})
         from geoharness.qgis.runner import execute_qgis
 
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
@@ -532,7 +555,9 @@ class GeoQgisProjectTool(BaseTool):
                         "temporal_fields", []
                     )
                 frames.append({**common, "gdf": gdf, "label_field": layer.label_field,
-                               "style": layer.style.model_dump() if layer.style else {}})
+                               "style": layer.style.model_dump() if layer.style else {},
+                               "label_style": (layer.label_style.model_dump()
+                                               if layer.label_style else {})})
                 original_path = snapshot.original_sources[index]["file_path"] if snapshot else (
                     str(path)
                 )
@@ -551,6 +576,11 @@ class GeoQgisProjectTool(BaseTool):
             coerce_numeric=False, minimum_span_geographic=settings.minimum_span_geographic,
             minimum_span_projected=settings.minimum_span_projected,
             extent_padding=settings.extent_padding,
+        )
+        from geoharness.cartography.composition import composition_risks
+
+        report["composition"] = composition_risks(
+            frames, report=report, layout=arguments.layout.model_dump() if arguments.layout else {},
         )
         from geoharness.cartography.facts import infer_analysis_manifests, load_analysis_facts
 

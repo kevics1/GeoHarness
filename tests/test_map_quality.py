@@ -419,7 +419,7 @@ def test_new_config_validates_limits_and_expands_vision_fields(tmp_path, monkeyp
     with pytest.raises(ValidationError):
         load_geo_config(path)
     with pytest.raises(ValidationError):
-        MapReviewConfig(max_repairs=3)
+        MapReviewConfig(max_repairs=5)
 
 
 @pytest.mark.asyncio
