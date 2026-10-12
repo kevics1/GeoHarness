@@ -7,6 +7,7 @@ Projects and styles are written by QGIS itself, never synthesized as XML here.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -23,6 +24,390 @@ _ASSET_SUFFIXES = {".svg", ".png", ".jpg", ".jpeg", ".webp"}
 _ASSET_KEYS = {"picturepath", "svgfile", "imagefile", "name", "file", "path"}
 _FONT_SUFFIXES = {".ttf", ".ttc", ".otf"}
 _FONT_PROPERTIES = {"geoharness/font", "geoharness/label_font"}
+
+
+def _json_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+        separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _layout_input_digest(payload: dict[str, Any]) -> str:
+    """Bind layout inputs without importing QGIS or binding random snapshot paths."""
+    bound = {key: value for key, value in payload.items() if key not in {
+        "action", "map_id", "output_path", "output_format", "project_format",
+        "strict_layout", "_frozen_frames", "_consume_plan",
+    }}
+    bound["layout"] = {key: value for key, value in (payload.get("layout") or {}).items()
+                       if key != "layout_plan"}
+    bindings = payload.get("_layout_sources")
+    if bindings:
+        if len(bindings) != len(payload.get("layers", [])):
+            raise ValueError("Layout source bindings must match the original layer array")
+        bound["layers"] = [{key: value for key, value in layer.items()
+                            if key not in {"file_path", "layer_name"}}
+                           for layer in payload.get("layers", [])]
+    return _json_digest(bound)
+
+
+def _runtime_identity() -> dict[str, str]:
+    from qgis.core import Qgis
+    from qgis.PyQt.QtCore import PYQT_VERSION_STR, QT_VERSION_STR, qVersion
+
+    return {"qgis": Qgis.QGIS_VERSION, "qgis_version_int": str(Qgis.QGIS_VERSION_INT),
+            "qt": qVersion(), "qt_build": QT_VERSION_STR, "pyqt": PYQT_VERSION_STR}
+
+
+def _native_source_identities(payload: dict[str, Any], context: Any) -> list[dict[str, Any]]:
+    """Bind direct native inputs and their local dependencies, without snapshot locators."""
+    if payload.get("_layout_sources"):
+        # The public frontend already binds guarded, self-contained frozen data.
+        return []
+    from osgeo import gdal
+
+    identities = []
+    for index, spec in enumerate(payload.get("layers", [])):
+        path, _ = _local_source(spec["file_path"], context)
+        raster = spec.get("kind", "vector") == "raster"
+        dataset = gdal.OpenEx(str(path), gdal.OF_READONLY |
+                             (gdal.OF_RASTER if raster else gdal.OF_VECTOR))
+        if dataset is None:
+            raise ValueError(f"Could not inspect native source dependencies: {path.name}")
+        dependencies = {path}
+        try:
+            for value in dataset.GetFileList() or []:
+                dependency = Path(value)
+                if not dependency.is_absolute():
+                    dependency = path.parent / dependency
+                dependencies.add(context.read_path(str(dependency)))
+        finally:
+            dataset = None
+        if path.suffix.lower() == ".shp":
+            # Attribute/CRS/encoding sidecars are not all reported by every GDAL driver.
+            sidecars = {".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx",
+                        ".ain", ".aih", ".atx", ".ixs", ".mxs"}
+            for companion in path.parent.glob(f"{path.stem}.*"):
+                if companion.suffix.lower() in sidecars or (
+                    companion.name.casefold() == path.name.casefold() + ".xml"
+                ):
+                    dependencies.add(context.read_path(str(companion)))
+        if raster:
+            suffix = path.suffix.lower().lstrip(".")
+            world_suffix = suffix[0] + suffix[-1] + "w"
+            names = {path.name.casefold() + ending for ending in (".aux.xml", ".msk", ".ovr")}
+            names.update((path.stem + ending).casefold() for ending in (
+                ".aux", ".prj", ".wld", "." + world_suffix, "." + suffix + "w",
+                "." + world_suffix + "x"))
+            for companion in path.parent.iterdir():
+                if companion.name.casefold() in names and companion.is_file():
+                    dependencies.add(context.read_path(str(companion)))
+        files = []
+        for dependency in sorted(dependencies, key=lambda item: str(item).casefold()):
+            checked = context.read_path(str(dependency))
+            digest = hashlib.sha256()
+            with checked.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+            files.append({"path": str(checked), "sha256": digest.hexdigest()})
+        identities.append({"source_index": index, "files": files})
+    return identities
+
+
+def _native_input_specs(payload: dict[str, Any], context: Any) -> list[dict[str, Any]]:
+    """Keep QGIS's automatic raster PAM caches beside private copies, not original inputs."""
+    if payload.get("_layout_sources"):
+        return payload.get("layers", [])
+    from osgeo import gdal
+
+    prepared = []
+    for index, spec in enumerate(payload.get("layers", [])):
+        if spec.get("kind", "vector") != "raster":
+            prepared.append(spec)
+            continue
+        source, options = _local_source(spec["file_path"], context)
+        if options or source.suffix.lower() not in _RASTER_SUFFIXES:
+            raise ValueError("Raster sources require one local raster file")
+        target = context.output_path(None, f".native-inputs/layer_{index}.tif")
+        dataset = gdal.Translate(target, str(source), format="GTiff")
+        if dataset is None:
+            raise ValueError(f"Could not isolate native raster input: {source.name}")
+        dataset.FlushCache()
+        dataset = None
+        prepared.append({**spec, "file_path": target, "name": spec.get("name") or source.stem})
+    return prepared
+
+
+def _font_identity(font: Any, info: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Fingerprint the actual native face as well as its selected resource bytes."""
+    from qgis.PyQt.QtGui import QRawFont
+
+    raw = QRawFont.fromFont(font)
+    if not raw.isValid():
+        raise ValueError("Layout font identity requires a valid native font")
+    tables = hashlib.sha256()
+    for name in ("head", "name", "cmap", "OS/2", "glyf", "CFF "):
+        tables.update(name.encode("ascii"))
+        tables.update(bytes(raw.fontTable(name)))
+    identity = {"family": raw.familyName(), "style": raw.styleName(),
+                "face_sha256": tables.hexdigest(), "loaded": bool(info.get("loaded"))}
+    if info.get("file"):
+        path = Path(info["file"])
+        if info.get("packaged"):
+            path = context.read_path(str(context.run_dir / path))
+        identity["resource_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        identity["resource_name"] = path.suffix.lower()
+    return identity
+
+
+def _font_identities(layout: Any, layers: list[Any], context: Any) -> dict[str, dict]:
+    from qgis.core import QgsVectorLayer
+    from qgis.PyQt.QtGui import QFont
+
+    info = json.loads(layout.customProperty("geoharness/font", "{}"))
+    result = {"layout": _font_identity(QFont(info["family"]), info, context)}
+    for index, layer in enumerate(layers):
+        if isinstance(layer, QgsVectorLayer) and layer.labelsEnabled() and layer.labeling():
+            info = json.loads(layer.customProperty("geoharness/label_font", "{}"))
+            result[f"layer_{index}"] = _font_identity(
+                layer.labeling().settings().format().font(), info, context)
+    return result
+
+
+def _frame_selection(name: str, spec: dict[str, Any], count: int) -> tuple[list[int], list[int]]:
+    frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
+    render = sorted(frame.get("render_layers") or range(count))
+    focus = sorted(frame.get("focus_layers") or render)
+    if any(index < 0 or index >= count for index in [*render, *focus]):
+        raise ValueError("Map frame layer index is outside the original layer array")
+    if not set(focus) <= set(render):
+        raise ValueError("Map frame focus layers must be rendered in that frame")
+    return render, focus
+
+
+def _focus_bbox(project: Any, layers: list[Any], indices: list[int]) -> Any:
+    from qgis.core import QgsCoordinateTransform, QgsRectangle, QgsVectorLayer
+
+    combined = None
+    for index in indices:
+        layer = layers[index]
+        if isinstance(layer, QgsVectorLayer) and layer.featureCount() == 0:
+            continue
+        rect = QgsCoordinateTransform(layer.crs(), project.crs(), project).transformBoundingBox(
+            layer.extent())
+        if not rect.isFinite():
+            raise ValueError(f"Map focus layer has a nonfinite extent: {layer.name()}")
+        if combined is None:
+            combined = QgsRectangle(rect)
+        else:
+            combined.combineExtentWith(rect)
+    if combined is None:
+        raise ValueError("Map frame focus layers have no usable bounds")
+    return combined
+
+
+def _frame_extent(project: Any, layers: list[Any], name: str, payload: dict, extent: Any) -> Any:
+    from qgis.core import QgsRectangle
+
+    spec = payload.get("layout") or {}
+    frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
+    if name == "detail_map" and spec.get("detail_extent") is not None:
+        return QgsRectangle(*(spec["detail_extent"][key]
+                              for key in ("xmin", "ymin", "xmax", "ymax")))
+    if name == "main_map" and not frame.get("focus_layers") and not frame.get("render_layers"):
+        return extent
+    if name == "main_map" and payload.get("_explicit_map_extent"):
+        return extent
+    _, focus = _frame_selection(name, spec, len(layers))
+    bbox = _focus_bbox(project, layers, focus)
+    policy = payload.get("_extent_policy") or {}
+    minimum = policy.get("minimum_span_geographic" if project.crs().isGeographic()
+                         else "minimum_span_projected", 0)
+    width, height = max(bbox.width(), minimum), max(bbox.height(), minimum)
+    if width <= 0 or height <= 0:
+        raise ValueError("Degenerate frame bounds require a configured positive minimum span")
+    padding = frame.get("padding_ratio")
+    if padding is None:
+        padding = policy.get("extent_padding", 0)
+    center = bbox.center()
+    rect = QgsRectangle(center.x() - width / 2, center.y() - height / 2,
+                        center.x() + width / 2, center.y() + height / 2)
+    rect.scale(1 + 2 * padding)
+    return rect
+
+
+def _rect_values(rect: Any) -> list[float]:
+    return [rect.xMinimum(), rect.yMinimum(), rect.xMaximum(), rect.yMaximum()]
+
+
+def _plan_frames(layout: Any, project: Any, layers: list[Any], payload: dict) -> dict[str, dict]:
+    from qgis.core import QgsLayoutItemMap
+
+    spec = payload.get("layout") or {}
+    result = {}
+    for name in ("main_map", "detail_map"):
+        item = layout.itemById(name)
+        if not isinstance(item, QgsLayoutItemMap):
+            continue
+        render, focus = _frame_selection(name, spec, len(layers))
+        expected_layers = [layers[index].id() for index in reversed(render)]
+        if [layer.id() for layer in item.layers()] != expected_layers:
+            raise ValueError(f"layout_plan frame {name} did not preserve its rendered layer order")
+        bbox = _focus_bbox(project, layers, focus)
+        extent = item.extent()
+        center = bbox.center()
+        scene = item.mapRectToScene(item.rect())
+        overlap = bbox.intersect(extent)
+        coverage = (overlap.area() / bbox.area() if bbox.area() > 0 else
+                    float(extent.contains(bbox)))
+        result[name] = {"rect_mm": [scene.x(), scene.y(), scene.width(), scene.height()],
+            "extent": _rect_values(extent), "crs": item.crs().authid() or item.crs().toWkt(),
+            "render_layers": render, "focus_layers": focus, "focus_bbox": _rect_values(bbox),
+            "normalized_center": [(center.x() - extent.xMinimum()) / extent.width(),
+                                  (center.y() - extent.yMinimum()) / extent.height()],
+            "coverage": coverage, "bbox_fraction": [bbox.width() / extent.width(),
+                                                       bbox.height() / extent.height()],
+            "page_index": item.page()}
+    return result
+
+
+def _frame_evidence(
+    project: Any, layers: list[Any], payload: dict, frames: dict,
+) -> tuple[dict, dict]:
+    """Count required features over the frame union and measure only drawn point labels."""
+    from qgis.core import (
+        NULL,
+        QgsCoordinateTransform,
+        QgsFeatureRequest,
+        QgsGeometry,
+        QgsRectangle,
+        QgsVectorLayer,
+        QgsWkbTypes,
+    )
+
+    # The cartography package initializer loads the agent's renderer/config stack.
+    # Load this shared NumPy-only module without exposing that stack to QGIS's ABI.
+    module_spec = importlib.util.spec_from_file_location("geoharness.qgis._composition",
+        Path(__file__).resolve().parents[1] / "cartography" / "composition.py")
+    if module_spec is None or module_spec.loader is None:
+        raise ImportError("Could not load the shared composition anchor measurement")
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    composition_from_anchors = module.composition_from_anchors
+
+    visible = [set() for _ in layers]
+    counts = [{} for _ in layers]
+    composition = {}
+    for name, frame in frames.items():
+        extent = QgsRectangle(*frame["extent"])
+        anchors, labeled_count = [], 0
+        for index in frame["render_layers"]:
+            layer = layers[index]
+            transform = QgsCoordinateTransform(layer.crs(), project.crs(), project)
+            if not isinstance(layer, QgsVectorLayer):
+                counts[index][name] = int(extent.intersects(
+                    transform.transformBoundingBox(layer.extent())))
+                if counts[index][name]:
+                    visible[index].add(0)
+                continue
+            inverse = QgsCoordinateTransform(project.crs(), layer.crs(), project)
+            request = QgsFeatureRequest().setFilterRect(inverse.transformBoundingBox(extent))
+            labeling = (layer.labeling().settings()
+                        if layer.labelsEnabled() and layer.labeling() else None)
+            field = (labeling.fieldName
+                     if labeling and labeling.drawLabels and not labeling.isExpression else None)
+            layer_count = 0
+            for feature in layer.getFeatures(request):
+                geometry = QgsGeometry(feature.geometry())
+                if geometry.isEmpty():
+                    continue
+                geometry.transform(transform)
+                if not geometry.intersects(extent):
+                    continue
+                visible[index].add(feature.id())
+                layer_count += 1
+                if field and geometry.type() == QgsWkbTypes.PointGeometry \
+                        and not geometry.isMultipart() and feature[field] != NULL:
+                    labeled_count += 1
+                    if len(anchors) < 512:
+                        point = geometry.asPoint()
+                        style = payload.get("layers", [])[index].get("style") or {}
+                        sizes = [style.get("size_mm", 3)]
+                        sizes.extend(entry.get("size_mm", sizes[0]) for entry in
+                                     [*style.get("categories", []), *style.get("ranges", [])])
+                        anchors.append({"x": point.x(), "y": point.y(), "layer_index": index,
+                            "radius_mm": max(*sizes, labeling.format().size() * 25.4 / 72)})
+            counts[index][name] = layer_count
+        composition[name] = composition_from_anchors(anchors,
+            labeled_point_count=labeled_count, bounds=frame["extent"],
+            frame_mm=frame["rect_mm"][2:])
+    checks = []
+    for index, (layer, source) in enumerate(zip(layers, payload.get("layers", []))):
+        required = source.get("required", True)
+        minimum = source.get("minimum_visible_features", 1 if required else 0)
+        valid = len(visible[index]) >= minimum and (bool(counts[index]) or not required)
+        checks.append({"source_index": index, "required": required,
+            "visible_feature_count": len(visible[index]), "minimum_visible_features": minimum,
+            "frames": counts[index], "valid": valid})
+    frame_checks = {"scope": "union_of_rendered_map_frames", "layers": checks,
+                    "valid": all(check["valid"] for check in checks if check["required"]),
+                    "warnings": [{"code": ("optional_layer_not_visible"
+                        if check["visible_feature_count"] == 0 else
+                        "optional_layer_below_minimum_visibility"),
+                        "source_index": check["source_index"],
+                        "visible_feature_count": check["visible_feature_count"],
+                        "minimum_visible_features": check["minimum_visible_features"]}
+                        for check in checks if not check["required"] and
+                        (not check["valid"] or check["visible_feature_count"] == 0)]}
+    if not frame_checks["valid"]:
+        error = ValueError("Required layer visibility failed across the rendered frame union")
+        error.diagnostics = {"frame_checks": frame_checks}
+        raise error
+    return {**composition.get("main_map", {}), "map_frames": composition}, frame_checks
+
+
+def _freeze_layout_plan(layout: Any, project: Any, layers: list[Any], payload: dict,
+                        context: Any) -> dict:
+    metadata = _layout_metadata(layout)
+    plan = {"schema_version": 1, "input_digest": _layout_input_digest(payload),
+        "runtime_identity": _runtime_identity(),
+        "source_identities": _native_source_identities(payload, context),
+        "font_identities": _font_identities(layout, layers, context),
+        "parameters": metadata["creation_parameters"], "regions": metadata["regions"],
+        "frames": _plan_frames(layout, project, layers, payload),
+        "content_metrics": metadata["bounds_check"]["content_metrics"],
+        "adaptations": metadata["adaptations"]}
+    plan["plan_digest"] = _json_digest(plan)
+    return plan
+
+
+def _same_plan_geometry(actual: Any, expected: Any, *, abs_tol: float = 1e-6) -> bool:
+    """QGIS project serialization rounds native floating coordinates slightly."""
+    if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+        return math.isclose(actual, expected, rel_tol=1e-9, abs_tol=abs_tol)
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _same_plan_geometry(a, e, abs_tol=abs_tol) for a, e in zip(actual, expected))
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _same_plan_geometry(actual[key], expected[key],
+                abs_tol=0.001 if key in {"rect_mm", "available_mm"} else abs_tol)
+            for key in actual)
+    return actual == expected
+
+
+def _validate_plan_layout(layout: Any, project: Any, layers: list[Any], payload: dict,
+                          plan: dict, context: Any) -> None:
+    metadata = _layout_metadata(layout)
+    if _font_identities(layout, layers, context) != plan["font_identities"]:
+        raise ValueError("layout_plan is stale: font resource or native face changed; "
+                         "run preflight again")
+    for key, actual in (("parameters", metadata["creation_parameters"]),
+                        ("regions", metadata["regions"]),
+                        ("frames", _plan_frames(layout, project, layers, payload)),
+                        ("content_metrics", metadata["bounds_check"]["content_metrics"])):
+        if not _same_plan_geometry(actual, plan[key]):
+            error = ValueError(f"layout_plan is stale: native {key} changed; run preflight again")
+            error.diagnostics = {"field": key, "planned": plan[key], "measured": actual}
+            raise error
 
 
 def _local_source(source: str, context: Any, *, base: Path | None = None) -> tuple[Path, str]:
@@ -471,6 +856,9 @@ def _new_layer(spec: dict[str, Any], context: Any) -> Any:
         raise ValueError(f"Layer has no valid declared CRS: {name}")
     if kind == "vector":
         _style_vector(layer, spec, context)
+        expected = spec.get("expected_feature_count")
+        if expected is not None and layer.featureCount() != expected:
+            raise ValueError(f"Expected feature count does not match native layer: {name}")
     else:
         style = spec.get("raster_style") or {}
         if style.get("renderer", "default") == "hillshade":
@@ -564,7 +952,8 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
     top = margin + title_height + (gap if title else 0)
     footer_y = height - margin - footer_height
     map_height = footer_y - gap - top
-    sidebar = spec.get("legend", True) or spec.get("detail_extent") is not None
+    has_detail = spec.get("detail_extent") is not None or spec.get("detail_frame") is not None
+    sidebar = spec.get("legend", True) or has_detail
     sidebar_width = spec.get("sidebar_width_mm", 60) if sidebar else 0
     map_width = inner_width - sidebar_width - (gap if sidebar else 0)
     if map_width < 40 or map_height < 40:
@@ -576,7 +965,7 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
     if title:
         regions["title"] = [margin, margin, inner_width, title_height]
     sidebar_x = width - margin - sidebar_width
-    if spec.get("detail_extent") is not None:
+    if has_detail:
         detail_height = (map_height * spec.get("detail_height_ratio", 0.4)
                          if spec.get("legend", True) else map_height)
         regions["detail_map"] = [sidebar_x, top, sidebar_width, detail_height]
@@ -616,7 +1005,8 @@ def _create_layout(
     )
     from qgis.PyQt.QtCore import Qt
 
-    spec = payload.get("layout") or {}
+    spec = {key: value for key, value in (payload.get("layout") or {}).items()
+            if key != "layout_plan"}
     width, height = spec.get("width_mm", 297), spec.get("height_mm", 210)
     title = payload.get("title", "")
     regions = _layout_regions(spec, title)
@@ -636,22 +1026,21 @@ def _create_layout(
 
     def add_map(name: str, rect: Any) -> Any:
         item = QgsLayoutItemMap(layout)
-        _place_item(layout, item, name, regions[name])
+        frozen = (payload.get("_frozen_frames") or {}).get(name)
+        _place_item(layout, item, name, frozen["rect_mm"] if frozen else regions[name])
         item.setCrs(project.crs())
-        item.setLayers(list(reversed(layers)))
+        render, _ = _frame_selection(name, spec, len(layers))
+        item.setLayers([layers[index] for index in reversed(render)])
         item.setKeepLayerSet(True)
-        item.zoomToExtent(rect)
+        item.zoomToExtent(QgsRectangle(*frozen["extent"]) if frozen else
+                          _frame_extent(project, layers, name, payload, rect))
         item.setFrameEnabled(True)
         return item
 
     map_item = add_map("main_map", extent)
     layout.setReferenceMap(map_item)
-    if spec.get("detail_extent") is not None:
-        detail = spec["detail_extent"]
-        add_map(
-            "detail_map",
-            QgsRectangle(*(detail[key] for key in ("xmin", "ymin", "xmax", "ymax"))),
-        )
+    if "detail_map" in regions:
+        add_map("detail_map", extent)
     if title:
         label = QgsLayoutItemLabel(layout)
         label.setText(title)
@@ -716,6 +1105,8 @@ def _create_layout(
         required_height = max(required_height, label.sizeForText().height() + 0.5)
         _place_item(layout, label, "footer_text", [text_x, footer[1], text_width, footer[3]])
     if required_height > footer[3]:
+        if payload.get("_consume_plan"):
+            raise ValueError("layout_plan is stale: measured footer changed; run preflight again")
         if _fit_attempt >= 3 or required_height > 100:
             raise ValueError("footer_text exceeds its reserved rectangle; "
                              "shorten notes or increase page size")
@@ -738,6 +1129,8 @@ def _create_layout(
             detail_height = height - spec.get("gap_mm", 5) - minimum.height() - 0.5
             if detail_height >= max(20, height * 0.1):
                 resized["detail_height_ratio"] = detail_height / height
+        if resized != spec and payload.get("_consume_plan"):
+            raise ValueError("layout_plan is stale: measured legend changed; run preflight again")
         if resized != spec and _fit_attempt < 3:
             try:
                 _layout_regions(resized, title)
@@ -796,6 +1189,9 @@ def _layer_metadata(layer: Any) -> dict[str, Any]:
         "crs": layer.crs().authid() or layer.crs().toWkt(),
         "valid": layer.isValid(),
     }
+    source_index = layer.customProperty("geoharness/source_index", None)
+    if source_index is not None:
+        metadata["source_index"] = int(source_index)
     if isinstance(layer, QgsVectorLayer):
         renderer = layer.renderer()
         metadata.update(
@@ -934,6 +1330,8 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
                 problems.append(f"{name}: legend content exceeds its reserved rectangle")
         elif isinstance(item, QgsLayoutItemLabel):
             minimum = item.sizeForText()  # QSizeF in millimetres, unlike pageSize/sizeWithUnits.
+            content_metrics[name] = {"required_mm": [minimum.width(), minimum.height()],
+                                     "available_mm": [w, h]}
             if minimum.width() > w + 0.05 or (
                 minimum.height() > h + 0.05
             ):
@@ -1031,6 +1429,7 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
         "bounds_check": _layout_bounds(layout),
         "footer_text": (layout.itemById("footer_text").text()
                         if isinstance(layout.itemById("footer_text"), QgsLayoutItemLabel) else ""),
+        "layout_plan": json.loads(layout.customProperty("geoharness/layout_plan", "null")),
     }
 
 
@@ -1115,6 +1514,13 @@ def _save_package(
     layer_info = [
         _snapshot_layer(layer, index, project, context) for index, layer in enumerate(layers)
     ]
+    layout_plan = json.loads(layout.customProperty("geoharness/layout_plan", "null"))
+    composition = json.loads(layout.customProperty("geoharness/composition", "null"))
+    frame_checks = json.loads(layout.customProperty("geoharness/frame_checks", "null"))
+    if payload.get("_consume_plan") and layout_plan is not None and \
+            _native_source_identities(payload, context) != layout_plan["source_identities"]:
+        raise ValueError("layout_plan is stale: data source changed while snapshotting; "
+                         "run preflight again")
     facts = payload.get("analysis_facts")
     if facts is None:
         # Preserve the original provenance on user-edited exports as historical evidence.
@@ -1158,6 +1564,23 @@ def _save_package(
         )
         if saved_layout is None:
             raise ValueError("Packaged project did not preserve the selected print layout")
+        if payload.get("_consume_plan") and layout_plan is not None:
+            saved_layers = sorted(reopened.mapLayers().values(), key=lambda item:
+                int(item.customProperty("geoharness/source_index", -1)))
+            expected = [(index, layer.id()) for index, layer in enumerate(layers)]
+            actual = [(int(layer.customProperty("geoharness/source_index", -1)), layer.id())
+                      for layer in saved_layers]
+            if actual != expected:
+                raise ValueError("Saved project did not preserve source_index to layer ID bindings")
+            for original, saved in zip(layers, saved_layers):
+                if _layer_metadata(original).get("feature_count") != \
+                        _layer_metadata(saved).get("feature_count"):
+                    raise ValueError("Saved project did not preserve native feature counts")
+            recorded = json.loads(saved_layout.customProperty("geoharness/layout_plan", "null"))
+            if recorded != layout_plan:
+                raise ValueError("Saved project did not preserve its frozen layout_plan")
+            _validate_plan_layout(saved_layout, reopened, saved_layers, payload,
+                                  layout_plan, context)
         # Native save/read normalizes floating coordinates and scale-bar metrics.
         # Export the saved layout so preview pixels correspond to the delivered QGS.
         preview, output = _export_layout(saved_layout, payload, context)
@@ -1202,6 +1625,9 @@ def _save_package(
         "layout": layout_info,
         "map_id": payload.get("map_id", ""),
         "analysis": facts,
+        "layout_plan": layout_plan,
+        "composition": composition,
+        "frame_checks": frame_checks,
         "files": sorted({path.relative_to(context.run_dir).as_posix() for path in files}),
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1220,6 +1646,10 @@ def _save_package(
         "layers": layer_info,
         "layout": manifest["layout"],
         "analysis": facts,
+        "layout_plan": layout_plan,
+        "composition": composition,
+        "frame_checks": frame_checks,
+        "render_executed": True,
     }
 
 
@@ -1305,7 +1735,24 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
     preprocessor_id = None
     try:
         if action in {"project_create", "project_preflight"}:
-            layers = [_new_layer(spec, context) for spec in payload.get("layers", [])]
+            supplied_plan = (payload.get("layout") or {}).get("layout_plan")
+            if supplied_plan is not None:
+                if supplied_plan.get("schema_version") != 1 or supplied_plan.get("plan_digest") != \
+                        _json_digest({key: value for key, value in supplied_plan.items()
+                                      if key != "plan_digest"}):
+                    raise ValueError("layout_plan digest is invalid; run preflight again")
+                if supplied_plan.get("input_digest") != _layout_input_digest(payload):
+                    raise ValueError("layout_plan is stale: layout inputs changed; "
+                                     "run preflight again")
+                if supplied_plan.get("runtime_identity") != _runtime_identity():
+                    raise ValueError("layout_plan is stale: QGIS/Qt runtime changed; "
+                                     "run preflight again")
+            source_identities = _native_source_identities(payload, context)
+            if supplied_plan is not None:
+                if supplied_plan.get("source_identities") != source_identities:
+                    raise ValueError("layout_plan is stale: data source changed; "
+                                     "run preflight again")
+            layers = [_new_layer(spec, context) for spec in _native_input_specs(payload, context)]
             if not layers:
                 raise ValueError("create requires at least one local vector/raster layer")
             crs = (
@@ -1317,15 +1764,44 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
                 raise ValueError("Invalid project CRS")
             project.setCrs(crs)
             project.setTitle(payload.get("title", ""))
-            for layer in layers:
+            for index, layer in enumerate(layers):
+                layer.setCustomProperty("geoharness/source_index", index)
                 project.addMapLayer(layer)
             project.layerTreeRoot().setHasCustomLayerOrder(True)
             project.layerTreeRoot().setCustomLayerOrder(list(reversed(layers)))
             extent = _extent(project, layers, payload.get("map_extent"))
             project.viewSettings().setDefaultViewExtent(QgsReferencedRectangle(extent, crs))
             layout = _create_layout(project, layers, extent, payload, context)
+            layout_plan = _freeze_layout_plan(layout, project, layers, payload, context)
+            if layout_plan["source_identities"] != source_identities:
+                raise ValueError("layout_plan is stale: data source changed while measuring; "
+                                 "run preflight again")
+            from qgis.core import QgsRectangle
+
+            project.viewSettings().setDefaultViewExtent(QgsReferencedRectangle(
+                QgsRectangle(*layout_plan["frames"]["main_map"]["extent"]), crs))
+            if supplied_plan is not None:
+                _validate_plan_layout(layout, project, layers, payload, supplied_plan, context)
+                if layout_plan["adaptations"] != supplied_plan["adaptations"]:
+                    raise ValueError("layout_plan is stale: native adaptations changed; "
+                                     "run preflight again")
+                layout_plan = supplied_plan
+            composition, frame_checks = _frame_evidence(
+                project, layers, payload, layout_plan["frames"])
+            if action == "project_create":
+                project.layoutManager().removeLayout(layout)
+                payload = {**payload, "layout": layout_plan["parameters"],
+                           "_frozen_frames": layout_plan["frames"], "_consume_plan": True}
+                layout = _create_layout(project, layers, extent, payload, context,
+                                        _adaptations=layout_plan["adaptations"])
+                _validate_plan_layout(layout, project, layers, payload, layout_plan, context)
+            for key, value in (("layout_plan", layout_plan), ("composition", composition),
+                               ("frame_checks", frame_checks)):
+                layout.setCustomProperty("geoharness/" + key, json.dumps(value, ensure_ascii=False))
             if action == "project_preflight":
-                return {"layout": _layout_metadata(layout), "render_executed": False}
+                return {"layout": _layout_metadata(layout), "layout_plan": layout_plan,
+                        "composition": composition, "frame_checks": frame_checks,
+                        "render_executed": False}
             return _save_package(project, layout, layers, payload, context)
         if action not in {"project_inspect", "project_export"}:
             raise ValueError(f"Unsupported QGIS project action: {action}")

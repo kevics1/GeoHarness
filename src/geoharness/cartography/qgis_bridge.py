@@ -64,8 +64,6 @@ def prepare_layers(args: Any, rule: dict, context: Any, directory: Path) -> list
                 geojson_text=spec.get("geojson", ""),
                 catalog=context.metadata.get("data_catalog"),
             )
-        if gdf.empty and not spec.get("required", True):
-            continue
         if gdf.crs is None:
             raise ValueError(f"Layer {index + 1} has no CRS; explicitly declare it before mapping")
         options = (
@@ -330,7 +328,7 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
             "review_path": str(report),
             "quality_status": "draft",
             "repair_count": 0,
-            "preflight": context.metadata.get("map_preflight"),
+            "preflight": result.metadata.get("preflight") or context.metadata.get("map_preflight"),
             **budget,
         },
     )
@@ -341,6 +339,6 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
         response,
         context,
         args.map_id,
-        preflight=context.metadata.get("map_preflight"),
+        preflight=response.metadata.get("preflight"),
         analysis=(result.metadata.get("preflight") or {}).get("analysis"),
     )

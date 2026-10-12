@@ -355,6 +355,19 @@ geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付�
 
 提供 `qgis_layout`/`layout` 的预检会在独立 QGIS 进程中测量真实字体、比例尺、图例与面板，不导出地图或工程、不占成图次数。仅检查数据且未提供布局时，预检保持无 QGIS 依赖。新建底栏根据实际可用宽度换行，按文字和比例尺高度扩展；页面放不下时，明确要求缩短备注或扩大页面。已保存工程的导出保留用户布局，不自动改写文字。
 
+需要让主图关注事件、详图关注密集区域时，可在 `layout` 中指定各自的关注图层与显示图层。索引对应提交的原始 `layers` 数组，从0开始；显示顺序仍为数组中的从下到上顺序。背景可以显示而不参与范围计算。例如：
+
+```json
+{
+  "main_frame": {"focus_layers": [1], "render_layers": [0, 1], "padding_ratio": 0.1},
+  "detail_frame": {"focus_layers": [2], "render_layers": [0, 2]}
+}
+```
+
+必需图层必须至少出现在一个地图框中，并通过最终地图框的联合可见性检查。显式主图范围与 `main_frame.focus_layers` 互斥，显式详图范围与 `detail_frame.focus_layers` 互斥。`geo_cartography` 自动添加的底图栅格位于原生图层数组的第0项，因此该入口的索引需包括底图。
+
+原生预检返回 `preflight.layout_plan`，其中包含实际字体测量后适配的面板、逐框范围、关注区域占比和字体/数据/样式/运行时摘要。下一次 `create` 将该对象原样放到 `layout.layout_plan`，即可消费同一计划；不要手算适配前的地图框比例。数据、样式、布局、字体或QGIS运行时变化会使计划失效，要求重新预检，不占成功成图版本。未提供计划的创建仍自动完成测量、冻结和消费。工程保存并重开后核对同一计划，再导出图片。
+
 新建布局默认启用 `legend_auto_fit`：根据 QGIS 实测图例尺寸加宽侧栏或缩短详图，详图至少保留20mm；不缩字号、不删类别、不自动改变纸张。仍放不下时返回 `content_metrics` 的必需/可用尺寸与实际字体证据。`effective_parameters`、`adaptations` 记录最终参数及调整原因。`legend_font_size_pt` 单独控制图例，`body_font_size_pt` 控制底栏；同时传常规 `layout.legend_font_size` 时，只有明确的 `qgis_layout.legend_font_size_pt` 优先于它。
 
 工程编辑后的有效参数读取实际元素；纸张尺寸统一为mm，文字保留实际值与单位，仅Points字号另提供pt字段。`creation_parameters` 保存创建模板参数。硬布局检查支持毫米场景；用户将整个布局场景单位改成其他单位时，导出保留布局，检查状态为未核验并返回原因，不误报通过。

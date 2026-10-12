@@ -19,6 +19,51 @@ def test_default_static_renderer_is_qgis():
     assert GeoConfig().cartography.static_renderer == "qgis"
 
 
+def test_bridge_preserves_optional_empty_source_indices(tmp_path):
+    from geoharness.cartography.qgis_bridge import prepare_layers
+
+    source = tmp_path / "empty.geojson"
+    gpd.GeoDataFrame(geometry=[], crs=3857).to_file(source)
+    subject = tmp_path / "subject.geojson"
+    gpd.GeoDataFrame(geometry=[box(10, 10, 20, 20)], crs=3857).to_file(subject)
+    args = GeoCartographyInput(layers=json.dumps([
+        {"file_path": str(source), "required": False, "color": "#0000ff"},
+        {"file_path": str(subject), "color": "#ff0000"}]),
+        layout=GeoConfig().map_review.layout)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    result = prepare_layers(args, {}, context, tmp_path)
+    assert len(result) == 2
+    assert result[0]["expected_feature_count"] == 0
+    assert result[1]["_source_binding"]["file_path"] == str(subject)
+
+
+async def test_bridge_retains_focused_extent_policy_and_complete_native_plan(tmp_path):
+    config = GeoConfig(map_review=MapReviewConfig(enabled=False))
+    try:
+        discover_qgis(config.qgis, cwd=tmp_path)
+    except (ValueError, OSError):
+        pytest.skip("QGIS runtime unavailable")
+    paths = [tmp_path / name for name in ("background.geojson", "subject.geojson")]
+    for path, shape in zip(paths, [box(-1000, -1000, 1000, 1000), box(10, 10, 20, 20)]):
+        gpd.GeoDataFrame(geometry=[shape], crs=3857).to_file(path)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
+    common = {"map_crs": "EPSG:3857", "output_path": "exports/focus.png",
+              "layers": json.dumps([{"file_path": str(paths[0]), "required": False},
+                                    {"file_path": str(paths[1]), "color": "#ff0000"}]),
+              "qgis_layout": {"main_frame": {"focus_layers": [1]}}}
+    checked = await GeoCartographyTool().execute(
+        GeoCartographyInput(action="preflight", **common), context)
+    assert not checked.is_error, checked.output
+    plan = checked.metadata["preflight"]["layout_plan"]
+    assert plan["frames"]["main_map"]["focus_bbox"] == [10, 10, 20, 20]
+    assert checked.metadata["preflight"]["frame_checks"]["valid"] is True
+    created = await GeoCartographyTool().execute(GeoCartographyInput(**common), context)
+    assert not created.is_error, created.output
+    actual = created.metadata["preflight"]["layout_plan"]
+    assert actual["frames"]["main_map"]["focus_layers"] == [1]
+    assert created.metadata["preflight"]["map_extent"] == actual["frames"]["main_map"]["extent"]
+
+
 async def test_disabled_native_renderer_returns_actionable_error(tmp_path):
     config = GeoConfig(qgis=QgisConfig(enabled=False))
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})

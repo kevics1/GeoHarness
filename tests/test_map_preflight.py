@@ -175,6 +175,17 @@ def test_required_layer_can_be_visible_in_detail_only() -> None:
     layer = report["layers"][0]
     assert layer["visible_main_feature_count"] == 0
     assert layer["visible_detail_feature_count"] == 1
+
+
+def test_required_minimum_counts_unique_features_across_main_and_detail():
+    frame = {"gdf": gpd.GeoDataFrame(geometry=[geometry.Point(1, 1), geometry.Point(11, 11)],
+                                    crs=3857), "minimum_visible_features": 2}
+    report = validate_frames([frame], map_crs="EPSG:3857", map_extent=[0, 0, 2, 2],
+                             detail_extent={"xmin": 10, "ymin": 10, "xmax": 12, "ymax": 12})
+    assert report["layers"][0]["visible_feature_count"] == 2
+    with pytest.raises(ValueError, match="Required layer"):
+        validate_frames([frame], map_crs="EPSG:3857", map_extent=[0, 0, 2, 2],
+                        detail_extent={"xmin": 0, "ymin": 0, "xmax": 2, "ymax": 2})
     assert not report["warnings"]
 
 

@@ -33,6 +33,18 @@ def _vector(path, *, changed=False, count=1):
     ).to_file(path, driver="GeoJSON")
 
 
+async def test_missing_source_crs_returns_structured_error_before_render(tmp_path):
+    source = tmp_path / "no-crs.gpkg"
+    gpd.GeoDataFrame({"name": ["site"]}, geometry=[Point(10, 20)]).to_file(source)
+    context = _context(tmp_path)
+    result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
+        action="create", layers=[{"file_path": str(source)}]), context)
+    assert result.is_error
+    assert "no declared CRS" in result.output
+    assert result.metadata["render_executed"] is False
+    assert "map_workflow_state" not in context.metadata
+
+
 async def test_datetime_categories_reach_frozen_worker_as_matching_strings(tmp_path, monkeypatch):
     source = tmp_path / "time.geojson"
     source.write_text(json.dumps({"type": "FeatureCollection", "features": [

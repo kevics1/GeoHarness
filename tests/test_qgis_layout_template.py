@@ -100,7 +100,7 @@ async def test_real_footer_wrap_uses_font_metrics_before_export(tmp_path):
             "最近者西昌学院南校区，距当前火场5.96km。计量CRS EPSG:32648。" * 3)
     result = await execute_qgis("project_preflight", {
         "layers": [{"file_path": str(source)}], "title": "底栏自动排版",
-        "crs": "EPSG:32647", "map_extent": [800000, 3060000, 840000, 3100000],
+        "crs": "EPSG:32647", "map_extent": [675000, 3070000, 725000, 3120000],
         "layout": QgisProjectLayout(width_mm=420, height_mm=297, margin_mm=10,
             footer_text=text, footer_height_mm=10, body_font_size_pt=9).model_dump(),
     }, cwd=tmp_path, settings=settings, read_roots=[tmp_path])

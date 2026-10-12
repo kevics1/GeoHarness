@@ -796,15 +796,16 @@ class GeoCartographyTool(BaseTool):
         )
         if preflight.is_error:
             return preflight
+        renderer = args.renderer or config.cartography.static_renderer
+        native = renderer == "qgis" and desired.suffix.lower() in {".png", ".pdf"}
         args = args.model_copy(
             update={
                 "map_crs": preflight.metadata["preflight"]["display_crs"],
-                "map_extent": preflight.metadata["preflight"]["map_extent"],
+                "map_extent": args.map_extent if native
+                else preflight.metadata["preflight"]["map_extent"],
             }
         )
         context.metadata["map_preflight"] = preflight.metadata["preflight"]
-        renderer = args.renderer or config.cartography.static_renderer
-        native = renderer == "qgis" and desired.suffix.lower() in {".png", ".pdf"}
         if args.action == "preflight":
             if native and args.qgis_layout is not None:
                 from geoharness.cartography.qgis_bridge import render_qgis_map
@@ -812,10 +813,11 @@ class GeoCartographyTool(BaseTool):
                 checked = await render_qgis_map(self, args, rule, context)
                 if checked.is_error:
                     return checked
-                preflight.metadata["preflight"]["layout"] = (
-                    checked.metadata["preflight"].get("layout")
+                context.metadata["map_preflight"] = checked.metadata["preflight"]
+                preflight = ToolResult(
+                    output=json.dumps(checked.metadata["preflight"], ensure_ascii=False),
+                    metadata={**preflight.metadata, "preflight": checked.metadata["preflight"]},
                 )
-                preflight.output = json.dumps(preflight.metadata["preflight"], ensure_ascii=False)
             preflight.metadata["render_executed"] = False
             return preflight
         if not native and args.basemap_raster and desired.suffix.lower() != ".html":
@@ -963,13 +965,16 @@ class GeoCartographyTool(BaseTool):
         if args.basemap_raster:
             frames.append({"raster_path": args.basemap_raster, "label": "Basemap"})
         settings = context.metadata["geoharness_config"].cartography
+        planned = bool(args.qgis_layout and (
+            args.qgis_layout.main_frame is not None or args.qgis_layout.detail_frame is not None
+        ))
         report = validate_frames(
             frames,
             map_crs=args.map_crs,
-            map_extent=args.map_extent,
+            map_extent=None if planned else args.map_extent,
             detail_extent=(
                 args.qgis_layout.detail_extent.model_dump()
-                if args.qgis_layout and args.qgis_layout.detail_extent
+                if not planned and args.qgis_layout and args.qgis_layout.detail_extent
                 else None
             ),
             minimum_span_geographic=settings.minimum_span_geographic,

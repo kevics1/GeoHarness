@@ -425,11 +425,15 @@ def validate_frames(
     for layer in layers:
         if layer["kind"] == "vector":
             geometry = layer["_aligned"].geometry
-            main_count = int(geometry.intersects(main_window).sum())
-            detail_count = int(geometry.intersects(detail_window).sum()) if detail_window else 0
-            visible = max(main_count, detail_count) >= layer["minimum_visible_features"]
+            in_main = geometry.intersects(main_window)
+            in_detail = geometry.intersects(detail_window) if detail_window else False
+            main_count = int(in_main.sum())
+            detail_count = int(in_detail.sum()) if detail_window else 0
+            union_count = int((in_main | in_detail).sum())
+            visible = union_count >= layer["minimum_visible_features"]
             layer.update(visible_main_feature_count=main_count,
-                         visible_detail_feature_count=detail_count)
+                         visible_detail_feature_count=detail_count,
+                         visible_feature_count=union_count)
             if layer["feature_count"] == 0:
                 warnings.append(f"Optional layer {layer['label']!r} is empty (feature_count=0).")
         else:

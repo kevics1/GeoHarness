@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from geoharness.cartography.values import TEMPORAL_FIELDS, normalize_frame
+from geoharness.cartography.values import TEMPORAL_FIELDS, frame_content, normalize_frame
 
 
 def _digest(path: Path) -> str:
@@ -24,6 +25,7 @@ class FrozenQgisInputs:
     layers: list[dict[str, str]]
     original_sources: list[dict[str, Any]]
     source_digests: dict[Path, str]
+    layout_sources: list[dict[str, Any]] = field(default_factory=list)
 
     def remember_source(self, path: Path) -> None:
         digest = _digest(path)
@@ -83,6 +85,18 @@ def freeze_qgis_inputs(
                     snapshot.remember_source(checked)
                 with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True):
                     copy_raster(source, target, driver="GTiff")
+                identity = {
+                    "crs": source.crs.to_wkt() if source.crs else "",
+                    "transform": list(source.transform), "shape": list(source.shape),
+                    "count": source.count, "dtypes": list(source.dtypes),
+                    "dependencies": sorted(
+                        (Path(value).name, snapshot.source_digests[guard.read_path(value)])
+                        for value in source.files
+                    ),
+                }
+            data = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
+            snapshot.layout_sources.append({"source": str(path), "kind": "raster",
+                "data_sha256": hashlib.sha256(data.encode()).hexdigest()})
             snapshot.layers.append({"file_path": str(target), "name": name})
         else:
             if path.suffix.lower() not in _VECTOR_SUFFIXES:
@@ -93,11 +107,22 @@ def freeze_qgis_inputs(
                 selected = int(value) if selector == "layerid" else value
             frame = gpd.read_file(path, **({"layer": selected} if selected != "" else {}))
             frame = normalize_frame(frame)
+            if frame.crs is None:
+                raise ValueError(f"Vector source has no declared CRS: {path.name}")
             snapshot.original_sources[-1]["temporal_fields"] = frame.attrs[TEMPORAL_FIELDS]
             if spec.get("derivation") is not None:
                 from geoharness.cartography.derivation import derive_frame
 
                 frame = derive_frame(frame, spec["derivation"])
+            # Container metadata, generated FIDs and temporary paths are deliberately absent.
+            data = json.dumps({"crs": frame.crs.to_wkt(),
+                "columns": [str(column) for column in frame.columns
+                            if column != frame.geometry.name],
+                "features": frame_content(frame)}, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False)
+            snapshot.layout_sources.append({"source": str(path), "kind": "vector",
+                "source_layer": selected, "derivation": spec.get("derivation"),
+                "data_sha256": hashlib.sha256(data.encode()).hexdigest()})
             target = snapshot.directory / f"layer_{index}.gpkg"
             layer_name = f"layer_{index}"
             # GPKG's default fid/geom names must not consume existing business fields.

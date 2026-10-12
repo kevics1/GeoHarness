@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -172,6 +172,56 @@ class QgisExtent(BaseModel):
         return self
 
 
+class QgisMapFrameSpec(BaseModel):
+    """Choose an extent's subject separately from the layers drawn in that frame."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    focus_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
+        default=None, min_length=1, max_length=64,
+        description="0-based layer indices whose bounds define the subject; excludes backgrounds.",
+    )
+    render_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
+        default=None, min_length=1, max_length=64,
+        description="0-based selected layers; original bottom-to-top drawing order is preserved.",
+    )
+    padding_ratio: float | None = Field(
+        default=None, ge=0, le=1,
+        description="Symmetric padding per side for focus bounds; defaults to cartography config.",
+    )
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> QgisMapFrameSpec:
+        for name in ("focus_layers", "render_layers"):
+            indices = getattr(self, name)
+            if indices is not None:
+                if len(indices) != len(set(indices)):
+                    raise ValueError(f"{name} must not contain duplicate layer indices")
+                setattr(self, name, sorted(indices))
+        if self.focus_layers and self.render_layers is not None and not (
+            set(self.focus_layers) <= set(self.render_layers)
+        ):
+            raise ValueError("focus_layers must be included in render_layers")
+        return self
+
+
+class QgisLayoutPlan(BaseModel):
+    """An unchanged plan returned by native preflight, not a caller-authored layout."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    schema_version: Literal[1]
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_identity: dict[str, str]
+    font_identities: dict[str, dict[str, Any]]
+    source_identities: list[dict[str, Any]] = Field(default_factory=list)
+    parameters: dict[str, Any]
+    regions: dict[str, list[int | float]]
+    frames: dict[str, dict[str, Any]]
+    content_metrics: dict[str, Any]
+    adaptations: list[dict[str, Any]]
+
+
 class QgisProjectLayout(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -184,6 +234,11 @@ class QgisProjectLayout(BaseModel):
     detail_extent: QgisExtent | None = Field(
         default=None, description="Optional detail-map rectangle in the project CRS."
     )
+    main_frame: QgisMapFrameSpec | None = None
+    detail_frame: QgisMapFrameSpec | None = None
+    layout_plan: QgisLayoutPlan | None = Field(default=None, description=(
+        "Unchanged preflight.layout_plan to consume; changed sources/styles/fonts are rejected."
+    ))
     footer_text: str = Field(default="", description=(
         "Source/context notes only. Bind native analysis_manifests for verified statistics; "
         "use geo_analysis area for grouped time areas, sums and deduplicated coverage."
@@ -211,12 +266,17 @@ class QgisProjectLayout(BaseModel):
         if min(self.width_mm, self.height_mm) - 2 * self.margin_mm < 40:
             raise ValueError("page dimensions must leave at least 40mm inside margins")
         sidebar = self.sidebar_width_mm + self.gap_mm if (
-            self.legend or self.detail_extent is not None
+            self.legend or self.detail_extent is not None or self.detail_frame is not None
         ) else 0
         if self.width_mm - 2 * self.margin_mm - sidebar < 40:
             raise ValueError("page must leave at least 40mm for the main map beside the sidebar")
         if self.height_mm - 2 * self.margin_mm - self.footer_height_mm - self.gap_mm < 40:
             raise ValueError("page must leave at least 40mm for the main map above the footer")
+        if self.detail_frame is not None:
+            if self.detail_frame.focus_layers and self.detail_extent is not None:
+                raise ValueError("detail_extent conflicts with detail_frame.focus_layers")
+            if self.detail_extent is None and not self.detail_frame.focus_layers:
+                raise ValueError("detail_frame requires focus_layers or detail_extent")
         return self
 
 
@@ -276,6 +336,23 @@ class GeoQgisProjectInput(BaseModel):
                 raise ValueError("explicit map_extent requires crs")
         if self.layout and self.layout.detail_extent and not self.crs:
             raise ValueError("explicit detail_extent requires crs")
+        if self.layout:
+            if self.map_extent is not None and self.layout.main_frame \
+                    and self.layout.main_frame.focus_layers:
+                raise ValueError("map_extent conflicts with main_frame.focus_layers")
+            rendered = set()
+            for name in ("main_frame", "detail_frame"):
+                frame = getattr(self.layout, name)
+                if name == "detail_frame" and frame is None and self.layout.detail_extent is None:
+                    continue
+                for indices in ((frame.focus_layers, frame.render_layers) if frame else ()):
+                    if indices is not None and any(index >= len(self.layers) for index in indices):
+                        raise ValueError(f"{name} contains an out-of-range layer index")
+                rendered.update(frame.render_layers if frame and frame.render_layers is not None
+                                else range(len(self.layers)))
+            if any(layer.required and index not in rendered
+                   for index, layer in enumerate(self.layers)):
+                raise ValueError("Required layer is omitted from every map frame")
         return self
 
 
@@ -356,6 +433,12 @@ class GeoQgisProjectTool(BaseTool):
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
         if preflight:
             payload.update(crs=preflight["display_crs"], map_extent=preflight["map_extent"])
+            payload["_explicit_map_extent"] = preflight["map_extent_source"] == "explicit"
+            payload["_layout_sources"] = preflight.get("layout_sources", [])
+            payload["_extent_policy"] = {
+                key: getattr(config.cartography, key) for key in (
+                    "minimum_span_geographic", "minimum_span_projected", "extent_padding")
+            }
             facts = preflight.get("analysis")
             if facts and facts.get("status") == "verified":
                 from geoharness.cartography.provenance import apply_analysis_footer
@@ -365,6 +448,22 @@ class GeoQgisProjectTool(BaseTool):
                 except ValueError as exc:
                     return ToolResult(output=f"Error: analysis footer layout invalid: {exc}",
                                       is_error=True, metadata={"deterministic_error": True})
+        # NULL is a real category key, and must participate in the stable style binding.
+        for source, packed in zip(arguments.layers, payload.get("layers", [])):
+            if not source.required and "minimum_visible_features" not in source.model_fields_set:
+                packed["minimum_visible_features"] = 0
+            if source.style is not None:
+                for category, encoded in zip(source.style.categories,
+                                             packed.get("style", {}).get("categories", [])):
+                    encoded["value"] = category.value
+        plan = (payload.get("layout") or {}).get("layout_plan")
+        if plan is not None:
+            from geoharness.qgis.project_worker import _layout_input_digest
+
+            if plan["input_digest"] != _layout_input_digest(payload):
+                return ToolResult(output="Error: layout_plan is stale: sources/styles/parameters "
+                    "changed; run preflight again", is_error=True,
+                    metadata={"deterministic_error": True, "render_executed": False})
         if arguments.action == "preflight":
             if arguments.layout is not None and config.qgis.enabled:
                 try:
@@ -386,7 +485,7 @@ class GeoQgisProjectTool(BaseTool):
                                       "diagnostics": result.get("diagnostics"),
                                       "deterministic_error": (result.get("error_summary") or "")
                                       .startswith("ValueError:")})
-                preflight["layout"] = result["result"]["layout"]
+                _apply_native_frame_evidence(preflight, result["result"])
             elif arguments.layout is not None:
                 preflight["layout"] = {"bounds_check": {"checked": False, "valid": None},
                                        "reason": "QGIS is disabled"}
@@ -420,12 +519,6 @@ class GeoQgisProjectTool(BaseTool):
             if stop is not None:
                 return ToolResult(output=stop, metadata={"render_budget_exhausted": True})
         payload["map_id"] = identity
-        # NULL is a real category key, rather than an absent optional setting.
-        for source, packed in zip(arguments.layers, payload.get("layers", [])):
-            if source.style is not None:
-                for category, encoded in zip(source.style.categories,
-                                             packed.get("style", {}).get("categories", [])):
-                    encoded["value"] = category.value
         try:
             execution = execute_qgis(
                 f"project_{arguments.action}",
@@ -458,9 +551,12 @@ class GeoQgisProjectTool(BaseTool):
         if result.get("status") != "succeeded" and reserved:
             refund_map_render(identity, context.metadata)
         details: dict[str, Any] = result.get("result") or {}
+        if preflight and details.get("layout_plan"):
+            _apply_native_frame_evidence(preflight, details)
         metadata = {**details, **result, "map_id": identity, "preflight": preflight,
                     "deterministic_error": (result.get("error_summary") or "")
-                    .startswith("ValueError:")}
+                    .startswith("ValueError:"),
+                    "render_executed": result.get("status") == "succeeded" and reserved}
         if metadata.get("project_file"):
             metadata["qgis_project"] = metadata["project_file"]
         response = ToolResult(
@@ -492,6 +588,9 @@ class GeoQgisProjectTool(BaseTool):
                 raise ValueError("Map bridge source bindings must match actual layers")
             for original, binding in zip(snapshot.original_sources, source_bindings):
                 original.update(binding)
+            for source, binding in zip(snapshot.layout_sources, source_bindings):
+                source.update(source=binding.get("file_path", source["source"]),
+                              derivation=binding.get("derivation"))
         frozen = arguments.model_copy(update={
             "layers": [layer.model_copy(update=updates)
                        for layer, updates in zip(arguments.layers, snapshot.layers)],
@@ -508,6 +607,7 @@ class GeoQgisProjectTool(BaseTool):
                     normalize_style(frame, layer.style.model_dump())
                 )
         report = self._preflight(frozen, context, snapshot=snapshot)
+        report["layout_sources"] = snapshot.layout_sources
         # Analysis evidence was checked at original locators, against frozen GDFs.
         # Sources may change after this point: the worker only uses the snapshots.
         snapshot.verify_sources()
@@ -569,14 +669,29 @@ class GeoQgisProjectTool(BaseTool):
                                        "layer_index": index,
                                        "derivation": derivation})
         settings = config.cartography
+        planned_frames = bool(arguments.layout and (
+            arguments.layout.main_frame is not None or arguments.layout.detail_frame is not None
+        ))
         report = validate_frames(
-            frames, map_crs=arguments.crs, map_extent=arguments.map_extent,
+            frames, map_crs=arguments.crs,
+            map_extent=None if planned_frames else arguments.map_extent,
             detail_extent=(arguments.layout.detail_extent.model_dump()
-                           if arguments.layout and arguments.layout.detail_extent else None),
+                           if not planned_frames and arguments.layout
+                           and arguments.layout.detail_extent else None),
             coerce_numeric=False, minimum_span_geographic=settings.minimum_span_geographic,
             minimum_span_projected=settings.minimum_span_projected,
             extent_padding=settings.extent_padding,
         )
+        if planned_frames:
+            # Field/geometry/CRS checks use the whole frozen input. Actual visibility
+            # belongs to the final native frame union, after font/content measurement.
+            from geoharness.cartography.preflight import named_bounds, to_imshow_extent
+
+            report["visibility_scope"] = "deferred_to_final_native_frame_union"
+            if arguments.map_extent is not None:
+                report.update(map_extent=arguments.map_extent, map_extent_source="explicit",
+                              named_bounds=named_bounds(arguments.map_extent),
+                              imshow_extent=to_imshow_extent(arguments.map_extent))
         from geoharness.cartography.composition import composition_risks
 
         report["composition"] = composition_risks(
@@ -598,6 +713,36 @@ class GeoQgisProjectTool(BaseTool):
                 display_crs=report["display_crs"],
             )
         return report
+
+
+def _apply_native_frame_evidence(preflight: dict, details: dict) -> None:
+    """Expose final native windows rather than the preliminary data envelope."""
+    from geoharness.cartography.preflight import named_bounds, to_imshow_extent
+
+    plan = details["layout_plan"]
+    preflight.update(layout_plan=plan, composition=details["composition"],
+                     frame_checks=details["frame_checks"])
+    if details.get("layout"):
+        preflight["layout"] = details["layout"]
+    extent = plan["frames"]["main_map"]["extent"]
+    preflight["preliminary_extent"] = preflight["map_extent"]
+    preflight.update(map_extent=extent, named_bounds=named_bounds(extent),
+                     imshow_extent=to_imshow_extent(extent),
+                     visibility_scope="union_of_rendered_map_frames")
+    for layer, checked in zip(preflight.get("layers", []), details["frame_checks"]["layers"]):
+        counts = checked["frames"]
+        layer.update(visible_feature_count=checked["visible_feature_count"],
+                     frame_visibility=counts, visibility_valid=checked["valid"],
+                     visible_main=bool(counts.get("main_map", 0)),
+                     visible_detail=bool(counts.get("detail_map", 0)),
+                     visible_main_feature_count=counts.get("main_map", 0),
+                     visible_detail_feature_count=counts.get("detail_map", 0))
+    detail = plan["frames"].get("detail_map")
+    preflight.update(detail_extent=detail["extent"] if detail else None,
+                     detail_named_bounds=named_bounds(detail["extent"]) if detail else None)
+    preflight["warnings"] = [item for item in preflight.get("warnings", [])
+                              if not item.endswith("is outside map/detail extent.")]
+    preflight["warnings"].extend(details["frame_checks"].get("warnings", []))
 
 
 async def _drain_task(task: asyncio.Task) -> None:
