@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncIterator, Iterator
+from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from time import monotonic, time
 from typing import Any, Callable
+from uuid import uuid4
 
+import httpx
+from openai import APIConnectionError, APIError, APIResponseValidationError
 from openharness.api.client import (
     ApiMessageCompleteEvent,
     ApiMessageRequest,
@@ -26,6 +31,20 @@ from geoharness.config.settings import AgentConfig
 
 
 @dataclass
+class QueryRecoveryState:
+    """Query mode plus transient billing/resources; only mode fields may be checkpointed."""
+
+    fallback_active: bool = False
+    model: str | None = None
+    max_tokens: int | None = None
+    source_model: str | None = None
+    config_fingerprint: str | None = None
+    client_id: int | None = None
+    unsettled_usage: UsageSnapshot = field(default_factory=UsageSnapshot)
+    active_streams: list[Any] = field(default_factory=list, repr=False, compare=False)
+
+
+@dataclass
 class _RequestState:
     extra_body: dict[str, Any] = field(default_factory=dict)
     reasoning_chars: int = 0
@@ -36,10 +55,21 @@ class _RequestState:
     include_stream_usage: bool = True
     record_usage: Callable[[UsageSnapshot], None] | None = None
     active_streams: list[Any] = field(default_factory=list)
+    owned_streams: list[Any] = field(default_factory=list)
     raw_tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
     finish_reason: str | None = None
     reasoning_text: list[str] = field(default_factory=list)
     allow_transport_retries: bool = True
+    attempt_reasoning_chars: int = 0
+    attempt_raw_content_chars: int = 0
+    request_id: str = field(default_factory=lambda: str(uuid4()))
+    started_at: float = field(default_factory=time)
+    started_monotonic: float = field(default_factory=monotonic)
+    raw_chunk_count: int = 0
+    attempt_raw_chunk_count: int = 0
+    raw_chunk_source: str | None = None
+    last_packet_at: float | None = None
+    provider_attempts: int = 0
 
 
 def _add_usage(left: UsageSnapshot, right: UsageSnapshot) -> UsageSnapshot:
@@ -49,7 +79,11 @@ def _add_usage(left: UsageSnapshot, right: UsageSnapshot) -> UsageSnapshot:
     )
 
 
-async def _close_provider_stream(stream: Any, state: _RequestState | None) -> None:
+async def _close_provider_stream(
+    stream: Any, state: _RequestState | QueryRecoveryState | None,
+) -> None:
+    if isinstance(state, _RequestState) and stream in state.owned_streams:
+        state.owned_streams.remove(stream)
     if state is not None:
         if stream not in state.active_streams:
             return
@@ -57,6 +91,29 @@ async def _close_provider_stream(stream: Any, state: _RequestState | None) -> No
     close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
     if close is not None:
         await close()
+
+
+def _record_packet(state: _RequestState, source: str) -> None:
+    state.raw_chunk_count += 1
+    state.attempt_raw_chunk_count += 1
+    state.raw_chunk_source = source
+    state.last_packet_at = time()
+
+
+class _SSEDecoderProxy:
+    """Count SSE records before the SDK rejects an error or invalid JSON record."""
+
+    def __init__(self, decoder: Any, state: _RequestState) -> None:
+        self._decoder = decoder
+        self._state = state
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._decoder, name)
+
+    async def aiter_bytes(self, iterator: AsyncIterator[bytes]) -> AsyncIterator[Any]:
+        async for packet in self._decoder.aiter_bytes(iterator):
+            _record_packet(self._state, "sse")
+            yield packet
 
 
 class _CompletionProxy:
@@ -80,19 +137,35 @@ class _CompletionProxy:
                 }
             else:
                 params.pop("stream_options", None)
-        stream = await self._completions.create(**params)
         if state is not None:
-            state.active_streams.append(stream)
             # Upstream transport retries start a new completion. Never join a
             # failed attempt's partial arguments to the next attempt's JSON.
+            state.provider_attempts += 1
+            state.attempt_raw_chunk_count = 0
             state.raw_tool_calls.clear()
             state.finish_reason = None
             state.reasoning_text.clear()
+            state.attempt_reasoning_chars = 0
+            state.attempt_raw_content_chars = 0
+        stream = await self._completions.create(**params)
+        observes_sse = False
+        if state is not None:
+            state.active_streams.append(stream)
+            state.owned_streams.append(stream)
+            decoder = getattr(stream, "_decoder", None)
+            if decoder is not None and callable(getattr(decoder, "aiter_bytes", None)):
+                # The SDK's AsyncStream constructs this decoder before iteration.
+                # Delegate decoding unchanged and retain only counts and time.
+                stream._decoder = _SSEDecoderProxy(decoder, state)
+                observes_sse = True
+                state.raw_chunk_source = "sse"
 
         async def observed_stream() -> AsyncIterator[Any]:
             previous_usage = UsageSnapshot()
             try:
                 async for chunk in stream:
+                    if state is not None and not observes_sse:
+                        _record_packet(state, "sdk_chunk")
                     if state is not None and chunk.usage:
                         # Providers may repeat cumulative usage in multiple chunks.
                         usage = UsageSnapshot(
@@ -118,9 +191,11 @@ class _CompletionProxy:
                         state.finish_reason = choice.finish_reason or state.finish_reason
                         reasoning = getattr(delta, "reasoning_content", None) or ""
                         state.reasoning_chars += len(reasoning)
+                        state.attempt_reasoning_chars += len(reasoning)
                         if reasoning:
                             state.reasoning_text.append(reasoning)
                         state.raw_content_chars += len(delta.content or "")
+                        state.attempt_raw_content_chars += len(delta.content or "")
                         for tool in delta.tool_calls or ():
                             entry = state.raw_tool_calls.setdefault(tool.index, {
                                 "id": "", "name": "", "arguments": "",
@@ -159,10 +234,10 @@ class _ClientProxy:
 class GeoOpenAICompatibleClient(OpenAICompatibleClient):
     """Retry only an empty response with a configured alternative request.
 
-    Recovery stays inside this API call: tools have not executed, and the original
-    messages and tool schemas are replayed unchanged. Completed failed requests
-    are included in the one terminal event's usage. The engine uses the diagnostic
-    property to replace its generic empty-message error without hiding the failure.
+    An empty-response retry replays messages and tools before execution. Once a
+    reasoning-only budget failure recovers fully, the engine's query scope can
+    retain that configured request mode through subsequent tool turns. Completed
+    failed requests are included in the one terminal event's usage.
     """
 
     def __init__(
@@ -175,11 +250,20 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         self._request_state: ContextVar[_RequestState | None] = ContextVar(
             "geoharness_api_request", default=None,
         )
+        self._query_recovery_state: ContextVar[QueryRecoveryState | None] = ContextVar(
+            "geoharness_api_query_recovery", default=None,
+        )
         self._empty_diagnostic: ContextVar[str | None] = ContextVar(
             "geoharness_empty_response_diagnostic", default=None,
         )
         self._response_diagnostic: ContextVar[str | None] = ContextVar(
             "geoharness_response_diagnostic", default=None,
+        )
+        self._failure_diagnostic: ContextVar[str | None] = ContextVar(
+            "geoharness_failure_diagnostic", default=None,
+        )
+        self._failure_metadata: ContextVar[dict[str, Any] | None] = ContextVar(
+            "geoharness_failure_metadata", default=None,
         )
         self._unsettled_usage: ContextVar[UsageSnapshot | None] = ContextVar(
             "geoharness_unsettled_usage", default=None,
@@ -191,6 +275,43 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         self._sdk_client = self._client.with_options(max_retries=0)
         self._client = _ClientProxy(self._sdk_client, self._request_state)
 
+    @contextmanager
+    def query_recovery_scope(self, state: QueryRecoveryState) -> Iterator[None]:
+        """Bind only around iterator advancement or close; callers must reset before yield."""
+        token = self._query_recovery_state.set(state)
+        try:
+            yield
+        finally:
+            self._query_recovery_state.reset(token)
+
+    async def close_query_streams(self, state: QueryRecoveryState) -> None:
+        """Release this query's providers immediately, including suspended nested iterators."""
+        for stream in list(state.active_streams):
+            await _close_provider_stream(stream, state)
+
+    def _recovery_fingerprint(self) -> str | None:
+        try:
+            serialized = self.settings.model_dump_json()
+        except (TypeError, ValueError):
+            return None  # An unserializable extension cannot establish a reusable request mode.
+        return hashlib.sha256(serialized.encode()).hexdigest()
+
+    def _has_active_recovery(
+        self, state: QueryRecoveryState | None, request: ApiMessageRequest, fingerprint: str | None,
+    ) -> bool:
+        if state is None or not state.fallback_active:
+            return False
+        if (
+            state.client_id == id(self) and state.source_model == request.model
+            and fingerprint is not None and state.config_fingerprint == fingerprint
+            and state.model and state.max_tokens is not None and state.max_tokens > 0
+        ):
+            return True
+        state.fallback_active = False
+        state.model = state.max_tokens = state.source_model = None
+        state.config_fingerprint = state.client_id = None
+        return False
+
     @property
     def last_empty_response_diagnostic(self) -> str | None:
         return self._empty_diagnostic.get()
@@ -200,36 +321,157 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         return self._response_diagnostic.get()
 
     @property
+    def last_failure_diagnostic(self) -> str | None:
+        return self._failure_diagnostic.get()
+
+    @property
+    def last_failure_metadata(self) -> dict[str, Any] | None:
+        """Safe counts, timing, status and exception types; no body, message or request data."""
+        return deepcopy(self._failure_metadata.get())
+
+    @property
     def last_tool_argument_diagnostics(self) -> list[dict[str, Any]]:
         """Bounded metadata only; raw scripts and reasoning are never retained here."""
         return [dict(item) for item in self._tool_argument_diagnostics.get() or ()]
 
     def _record_usage(self, usage: UsageSnapshot) -> None:
+        query_state = self._query_recovery_state.get()
+        if query_state is not None:
+            query_state.unsettled_usage = _add_usage(query_state.unsettled_usage, usage)
+            return
         self._unsettled_usage.set(_add_usage(self._unsettled_usage.get() or UsageSnapshot(), usage))
 
     def ack_usage(self, usage: UsageSnapshot) -> None:
         """Acknowledge usage already charged by the engine, including compaction events."""
-        pending = self._unsettled_usage.get() or UsageSnapshot()
-        self._unsettled_usage.set(UsageSnapshot(
+        query_state = self._query_recovery_state.get()
+        pending = (query_state.unsettled_usage if query_state is not None
+                   else self._unsettled_usage.get() or UsageSnapshot())
+        remaining = UsageSnapshot(
             input_tokens=max(pending.input_tokens - usage.input_tokens, 0),
             output_tokens=max(pending.output_tokens - usage.output_tokens, 0),
-        ))
+        )
+        if query_state is not None:
+            query_state.unsettled_usage = remaining
+        else:
+            self._unsettled_usage.set(remaining)
 
     def consume_unsettled_usage(self) -> UsageSnapshot:
         """Take confirmed provider usage once after cancellation or an exception."""
-        pending = self._unsettled_usage.get() or UsageSnapshot()
-        self._unsettled_usage.set(UsageSnapshot())
+        query_state = self._query_recovery_state.get()
+        if query_state is not None:
+            pending = query_state.unsettled_usage
+            query_state.unsettled_usage = UsageSnapshot()
+        else:
+            pending = self._unsettled_usage.get() or UsageSnapshot()
+            self._unsettled_usage.set(UsageSnapshot())
         return pending
 
     def _set_empty_diagnostic(self, diagnostic: str) -> None:
         self._empty_diagnostic.set(diagnostic)
         self._response_diagnostic.set(diagnostic)
 
+    def _record_failure(
+        self, exc: Exception, request: ApiMessageRequest, state: _RequestState | None,
+    ) -> None:
+        chain: list[BaseException] = []
+        current: BaseException | None = exc
+        while current is not None and len(chain) < 8 and all(current is not item for item in chain):
+            chain.append(current)
+            current = current.__cause__ or (
+                current.__context__ if not current.__suppress_context__ else None
+            )
+        status = next((value for item in chain
+                       if isinstance(value := getattr(item, "status_code", None), int)
+                       and not isinstance(value, bool)), None)
+        if status is not None:
+            category = "http"
+        elif any(isinstance(item, (APIConnectionError, httpx.TransportError,
+                                  ConnectionError, TimeoutError, OSError)) for item in chain):
+            category = "transport"
+        elif any(isinstance(item, (APIResponseValidationError, ValidationError,
+                                  json.JSONDecodeError)) for item in chain):
+            category = "parser"
+        elif any(isinstance(item, APIError) for item in chain):
+            category = "provider_sse"
+        else:
+            category = "parser"
+        metadata = {
+            "request_id": state.request_id if state else str(uuid4()),
+            "started_at": state.started_at if state else time(), "end_at": time(),
+            "category": category, "model": request.model, "status_code": status,
+            "exception_type": type(exc).__name__,
+            "exception_chain": [type(item).__name__ for item in chain],
+            "raw_chunk_count": state.raw_chunk_count if state else 0,
+            "attempt_raw_chunk_count": state.attempt_raw_chunk_count if state else 0,
+            "raw_chunk_source": state.raw_chunk_source if state else None,
+            "last_packet_at": state.last_packet_at if state else None,
+            "elapsed_seconds": max(monotonic() - state.started_monotonic, 0) if state else 0,
+            "provider_attempts": state.provider_attempts if state else 0,
+            "visible_chars": state.visible_chars if state else 0,
+        }
+        self._failure_metadata.set(metadata)
+        detail = (
+            f"模型 {request.model} 请求失败：{category}"
+            f"（request_id={metadata['request_id']}, "
+            f"exception_chain={' -> '.join(metadata['exception_chain'])}, "
+            f"raw_chunk_count={metadata['raw_chunk_count']}, "
+            f"raw_chunk_source={metadata['raw_chunk_source'] or 'none'}, "
+            f"last_packet_at={metadata['last_packet_at']}, "
+            f"elapsed_seconds={metadata['elapsed_seconds']:.3f}, "
+            f"provider_attempts={metadata['provider_attempts']}"
+            + (f", status_code={status}" if status is not None else "") + "）"
+        )
+        self._failure_diagnostic.set(detail)
+
+    def _sanitize_failure_message(self, exc: Exception) -> None:
+        """Keep retry matching and explicit SDK body inspection while protecting normal logs."""
+        from openharness.engine.query import (
+            _extract_completion_token_limit,
+            _is_completion_token_limit_error,
+            _is_prompt_too_long_error,
+        )
+
+        diagnostic = self.last_failure_diagnostic
+        if diagnostic is not None:
+            # Upstream reactive compaction and cap recovery classify str(exc).
+            # Preserve only their existing classifications and parsed number,
+            # before replacing the provider's message; never retain its text.
+            prompt_too_long = _is_prompt_too_long_error(exc)
+            completion_limit_error = _is_completion_token_limit_error(exc)
+            completion_limit = _extract_completion_token_limit(exc)
+            markers = []
+            if prompt_too_long:
+                markers.append("context_length_exceeded")
+            if completion_limit_error:
+                markers.append(
+                    f"max_tokens supports at most {completion_limit} completion tokens"
+                    if completion_limit is not None else "max_tokens too large"
+                )
+            elif completion_limit is not None:
+                # A limit can be parsed without being classified as a cap error.
+                # Retain that distinction instead of broadening upstream recovery.
+                markers.append(f"supports at most {completion_limit} completion tokens")
+            if markers:
+                diagnostic += "; " + "; ".join(markers)
+            metadata = self._failure_metadata.get()
+            if metadata is not None:
+                self._failure_metadata.set({
+                    **metadata, "prompt_too_long": prompt_too_long,
+                    "completion_token_limit_error": completion_limit_error,
+                    "completion_token_limit": completion_limit,
+                })
+            self._failure_diagnostic.set(diagnostic)
+            exc.args = (diagnostic,)
+            if isinstance(getattr(exc, "message", None), str):
+                exc.message = diagnostic
+
     def _is_retryable(self, exc: Exception) -> bool:
         state = self._request_state.get()
         # Once text is visible, replaying would duplicate the user's streamed answer.
         if state is not None and (state.visible_chars or not state.allow_transport_retries):
             return False
+        if isinstance(exc, (APIConnectionError, httpx.TransportError)):
+            return True
         return super()._is_retryable(exc)
 
     async def _stream_once(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
@@ -239,9 +481,11 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
             async for event in super()._stream_once(request):
                 yield event
         except ValidationError as exc:
+            self._record_failure(exc, request, state)
             # ToolUseBlock requires a dict. A provider's JSON array/scalar otherwise
             # aborts parsing and discards complete sibling calls and their usage.
             if state is None or exc.title != "ToolUseBlock":
+                self._sanitize_failure_message(exc)
                 raise
             content: list[TextBlock | ToolUseBlock] = []
             if state.visible_text:
@@ -265,6 +509,10 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 message=message,
                 usage=state.reported_usage, stop_reason=state.finish_reason,
             )
+        except Exception as exc:
+            self._record_failure(exc, request, state)
+            self._sanitize_failure_message(exc)
+            raise
 
     async def _stream_request(
         self, request: ApiMessageRequest, state: _RequestState,
@@ -285,6 +533,9 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                     return
                 finally:
                     self._request_state.reset(token)
+                if isinstance(event, ApiRetryEvent):
+                    if diagnostic := self.last_failure_diagnostic:
+                        event = replace(event, message=diagnostic)
                 yield event
         finally:
             token = self._request_state.set(state)
@@ -294,12 +545,16 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 finally:
                     # The upstream outer iterator does not explicitly close its
                     # nested parser; release HTTP resources before returning.
-                    for provider_stream in list(state.active_streams):
+                    for provider_stream in list(state.owned_streams):
                         await _close_provider_stream(provider_stream, state)
             finally:
                 self._request_state.reset(token)
 
     async def stream_message(self, request: ApiMessageRequest) -> AsyncIterator[ApiStreamEvent]:
+        # Retain the object, never the ContextVar token: later advancements may run
+        # in another task, while separate queries bind separate state objects.
+        query_state = self._query_recovery_state.get()
+        fingerprint = self._recovery_fingerprint() if query_state is not None else None
         if request.tools and self.data_context_provider is not None:
             transient_context = self.data_context_provider()
             if transient_context:
@@ -307,20 +562,28 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                                   + transient_context)
         self._empty_diagnostic.set(None)
         self._response_diagnostic.set(None)
+        self._failure_diagnostic.set(None)
+        self._failure_metadata.set(None)
         self._tool_argument_diagnostics.set(None)
         usage = UsageSnapshot()
         current = request
         extras = dict(self.settings.request_extra_body)
         fallback_extras = {**extras, **self.settings.empty_response_fallback_extra_body}
         fallback_model = self.settings.empty_response_fallback_model.strip() or request.model
-        alternative = fallback_model != request.model or fallback_extras != extras
+        if self._has_active_recovery(query_state, request, fingerprint):
+            current = replace(request, model=query_state.model,
+                              max_tokens=min(request.max_tokens, query_state.max_tokens))
+            extras = fallback_extras
+        alternative = fallback_model != current.model or fallback_extras != extras
         attempts = 1 + (self.settings.empty_response_retries if alternative else 0)
         last_empty: ApiMessageCompleteEvent | None = None
         last_diagnostic = ""
+        reasoning_budget_exhausted = False
         for attempt in range(attempts):
             state = _RequestState(
                 extra_body=extras, include_stream_usage=self.settings.include_stream_usage,
                 record_usage=self._record_usage,
+                active_streams=query_state.active_streams if query_state is not None else [],
             )
             final: ApiMessageCompleteEvent | None = None
             try:
@@ -334,10 +597,12 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                                 state.visible_text.append(event.text)
                             yield event
             except Exception as exc:
+                self._record_failure(exc, current, state)
+                self._sanitize_failure_message(exc)
                 usage = _add_usage(usage, state.reported_usage)
                 if state.visible_chars:
                     self._response_diagnostic.set(
-                        f"模型 {current.model} 的回答传输中断（{type(exc).__name__}）；"
+                        f"{self.last_failure_diagnostic}；"
                         "已保留收到的部分正文，回答尚未完成，未完成的工具调用不会执行"
                     )
                     yield ApiMessageCompleteEvent(
@@ -357,7 +622,9 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 yield replace(last_empty, usage=usage)
                 return
             if final is None:
-                raise RuntimeError("Model stream finished without a final message")
+                exc = RuntimeError("Model stream finished without a final message")
+                self._record_failure(exc, current, state)
+                raise exc
             # Normally the proxy observes these tokens before the parser's final event.
             # Retain compatibility if an upstream stream adapter reports usage only here.
             unobserved = UsageSnapshot(
@@ -375,22 +642,24 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
             if repair_request is not None:
                 recovery, aliases = repair_request
                 recovery = replace(recovery, model=fallback_model, max_tokens=min(
-                    request.max_tokens, self.settings.empty_response_max_tokens
-                    or request.max_tokens))
+                    current.max_tokens, self.settings.empty_response_max_tokens
+                    or current.max_tokens))
                 yield ApiRetryEvent(message=(
                     f"工具参数因输出截断未完成；仅恢复 {len(aliases)} 个残缺调用，"
                     f"临时使用 {fallback_model}。完整调用和既有结果保留，不重复执行。"
                 ), attempt=1, max_attempts=2, delay_seconds=0)
                 repair_state = _RequestState(extra_body=fallback_extras,
                     include_stream_usage=self.settings.include_stream_usage,
-                    record_usage=self._record_usage, allow_transport_retries=False)
+                    record_usage=self._record_usage, allow_transport_retries=False,
+                    active_streams=query_state.active_streams if query_state is not None else [])
                 repaired = None
                 try:
                     async with aclosing(self._stream_request(recovery, repair_state)) as stream:
                         async for event in stream:
                             if isinstance(event, ApiMessageCompleteEvent):
                                 repaired = event
-                except Exception:
+                except Exception as exc:
+                    self._record_failure(exc, recovery, repair_state)
                     pass  # Preserve the original usable response; no second repair request.
                 unobserved = UsageSnapshot()
                 if repaired is not None:
@@ -404,8 +673,25 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 final = self._merge_argument_recovery(final, repaired, aliases)
             empty = final.message.is_effectively_empty()
             if not empty:
+                if (
+                    query_state is not None and fingerprint is not None
+                    and reasoning_budget_exhausted and attempt > 0
+                    and repair_request is None and not self.last_tool_argument_diagnostics
+                    and final.stop_reason in {"stop", "tool_calls"}
+                ):
+                    query_state.fallback_active = True
+                    query_state.model = current.model
+                    query_state.max_tokens = current.max_tokens
+                    query_state.source_model = request.model
+                    query_state.config_fingerprint = fingerprint
+                    query_state.client_id = id(self)
                 yield replace(final, usage=usage)
                 return
+            reasoning_budget_exhausted = reasoning_budget_exhausted or (
+                final.stop_reason in {"length", "max_tokens"}
+                and state.attempt_reasoning_chars > 0 and not state.attempt_raw_content_chars
+                and not state.raw_tool_calls and not state.visible_chars
+            )
             diagnostic = self._diagnostic(current, final, state, attempt + 1)
             last_empty = final
             last_diagnostic = diagnostic

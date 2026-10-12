@@ -206,3 +206,19 @@
 - 最终完整回归1051 passed（542.37秒）、ruff/diff通过；已安装全局wheel，73源码模块与6技能逐字节一致。仅同步本机max_repairs=4/max_reviews_per_request=5，主模型max及其他配置/凭证引用保持。
 - 安装版test02的version/dry-run与QGIS3.44.7/440算法通过，无.openharness；去除PYTHONPATH后实际裁剪及preview/project.json读取再次成功，原文件摘要不变。证据geoharness-test02-prevention-s2h5vq2a/verification.json和geoharness-test02-final-wheel-78c4273d2cd147278ce1dfa05a55a59d/install-verification.json。
 - 模型列表端点也返回502，本轮未进行主模型端到端或业务整图验收；不机械重试或改主模型，不把旧第三版改标通过。报告diagnostics/2026-10-10-test02-prevention-validation.md已写明边界。
+
+### test04 新结果审查（2026-10-11）
+- 用户报告40回合暂停、继续后max推理耗尽恢复、两版布局反复问题及stream stall timeout。已定位两份真实test04会话和四次QGIS create产物；后两次create晚于粘贴片段，完整记录需要一起核验。
+- 本轮仅诊断与修复方案；保留原始数据、旧工程/审图回执、模型及配置。先区分业务工具失败和模型/流程故障，不沿用前轮测试通过作为真实地图质量通过。
+- 后续完整会话已保存，76次调用/11失败；原生分析2/2成功，geo_python35/4失败、todo_write8/5权限误拒、geo_qgis_project11/2参数/来源拒绝，审图7次正常返回但6issues/1unverified。
+- 零网络SDK/引擎复现确认fallback每工具回合回到max、普通继续清预算/覆盖goal/pending丢失、持续原始推理不触发read timeout；服务端SSE error可以精确生成原Network error，真实网关来源仍未查明。
+- 原生QGIS7工程14框extent/中心一致、35原证据摘要不变；已核对审图误报、2.8mm过粗描边、容量编码被主要身份覆盖和最终说明EPSG名称错误。四阶段修复与验收计划已保存，未修改产品、配置或业务交付。
+- 统计脚本ruff通过；最新快照76/11、31/4运行、7版、首两图第32/38回合断言及会话摘要不变检查通过；新增诊断文件空白/换行检查通过。当前沙箱git diff --check返回must be run in a work tree，未将其记为通过；没有产品代码变更，不扩展到Git环境修复或全量测试。TODO已同步待实施四阶段和验收条件。
+
+### test04 四阶段实施（2026-10-11）
+- 用户授权按诊断四步骤实施，先修请求/续跑，再原生布局、审图、工具/交付；最终安装与案例核验。重新核对源码、现有回归和配置约束，保留先前诊断产物。
+- 阶段1 API独立子任务只负责api_client及其回归；主Agent负责engine/恢复状态与会话衔接。query恢复采用每次anext临时绑定的ContextVar，避免重新引入异步generator跨Context token错误。
+- 普通续跑与40回合暂停回归先复现2项失败，修改后引擎组11项通过；补后端检查点整合后，引擎/运行时/终端生命周期40项通过（53.70秒），相关ruff通过。测试包含跨Task关闭流、保留原goal/预算/工具结果、新指令正常重置；离线验证不使用模型服务。
+- API子任务的真实SDK工具循环已确认成功fallback沿用至后续调用并结算用量；会话子任务覆盖共享budget别名、使用量、档案签名和恢复边界。正在完成HTTP/SSE/传输/解析安全诊断与持久失败记录，阶段1尚未提交。
+- 阶段1独立审查发现并修复context/cap安全标记兼容性、部分正文/空回复恢复失败日志、跨Task用量和连接释放，以及Hook legacy用量未转入新scope的问题。最终API组58项通过（61.15秒），TUI/SDK/检查点组56项通过（28.08秒），引擎12项通过（7.88秒），最后两项日志/安全分类回归通过（4.26秒）；ruff与提权只读Git diff检查通过，评审无未解决P1/P2。
+- 会话重启实际SDK离线回放通过：原工具一次、pending/goal保持、新客户端直接沿用同指纹恢复模式。CLI dry-run组装15工具成功。本机models端点返回200，不等于视觉审查通过；旧数据和7版工程未改动。

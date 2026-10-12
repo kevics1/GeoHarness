@@ -35,13 +35,14 @@ from geoharness.hooks.cascade import (
 )
 from geoharness.hooks.executor import GeoHookExecutor
 from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
+from geoharness.session_state import GeoSessionBackend
 from geoharness.workspace_isolation import install_workspace_isolation
 
 logger = logging.getLogger(__name__)
 
 # Agent turn limit. The upstream default (8) aborts multi-layer cartography
-# ("Stopped after 8 turns") well before the workflow finishes; 40 comfortably
-# covers a 9-layer fire-incident map (inspect + load + render per layer).
+# ("Stopped after 8 turns") well before the workflow finishes. Forty bounds one
+# batch; pending tool results can be resumed without starting a new map budget.
 _DEFAULT_MAX_TURNS = 40
 
 
@@ -193,6 +194,7 @@ async def build_geo_runtime(
         },
         extra_skill_dirs=all_skill_dirs,
         extra_plugin_roots=(),
+        session_backend=GeoSessionBackend(),
     )
 
     # 12. Verify MCP isolation
@@ -243,8 +245,9 @@ def _resolve_max_turns(config: GeoConfig) -> int:
 
     The upstream ``QueryEngine`` default is 8, which aborts multi-layer
     cartography workflows long before the model can inspect, load, symbolize
-    and export every layer. GeoHarness defaults to 40; set ``GEOH_MAX_TURNS``
-    to override (0 or a negative value disables the limit upstream).
+    and export every layer. GeoHarness defaults to 40 per batch; set
+    ``GEOH_MAX_TURNS`` to a positive integer to override. Pending tool results
+    survive the batch limit and can be resumed.
 
     Returns:
         The turn limit to pass to ``QueryEngine``.

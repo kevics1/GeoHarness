@@ -49,6 +49,9 @@ class TestBuildGeoRuntime:
 
             bundle = await build_geo_runtime(cwd=tmp_path)
             assert isinstance(bundle, RuntimeBundle)
+            from geoharness.session_state import GeoSessionBackend
+
+            assert isinstance(bundle.session_backend, GeoSessionBackend)
 
     @pytest.mark.asyncio
     async def test_runtime_uses_domain_api_client(

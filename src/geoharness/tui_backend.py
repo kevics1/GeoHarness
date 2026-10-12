@@ -123,6 +123,14 @@ async def geo_backend_runtime_factory(**kwargs: Any) -> Any:
         focus = restored_metadata.get("task_focus_state")
         if isinstance(focus, dict):
             bundle.engine.tool_metadata["task_focus_state"] = focus
+        from geoharness.config.settings import GeoConfig
+        from geoharness.session_state import restore_geo_session_state
+
+        live_config = bundle.engine.tool_metadata.get("geoharness_config")
+        if isinstance(live_config, GeoConfig):
+            restore_geo_session_state(
+                bundle.engine.tool_metadata, restored_metadata, cwd=cwd, config=live_config,
+            )
 
     max_turns = kwargs.get("max_turns")
     if max_turns is not None:
