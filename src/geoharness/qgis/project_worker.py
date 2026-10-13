@@ -719,7 +719,7 @@ def _symbol(layer: Any, style: dict[str, Any], entry: dict[str, Any]) -> Any:
 
 
 def _symbol_metadata(symbol: Any) -> dict[str, Any]:
-    from qgis.core import Qgis, QgsFillSymbol, QgsLineSymbol, QgsMarkerSymbol
+    from qgis.core import Qgis, QgsFillSymbol, QgsLineSymbol, QgsLineSymbolLayer, QgsMarkerSymbol
 
     color = symbol.color()
     result = {"color": color.name(), "color_alpha": color.alphaF(),
@@ -733,8 +733,16 @@ def _symbol_metadata(symbol: Any) -> dict[str, Any]:
         if symbol.sizeUnit() == Qgis.RenderUnit.Millimeters and not result["data_defined"]:
             result["size_mm"] = symbol.size()
     if isinstance(symbol, QgsLineSymbol):
-        result.update(width=symbol.width(), width_unit=symbol.widthUnit().name)
-        if symbol.widthUnit() == Qgis.RenderUnit.Millimeters and not result["data_defined"]:
+        # Line width units live on symbol layers. outputUnit() also includes
+        # unrelated units, such as the line offset, so cannot describe width.
+        width_units = [
+            layer.widthUnit() if isinstance(layer, QgsLineSymbolLayer) else Qgis.RenderUnit.Unknown
+            for layer in symbol.symbolLayers()
+        ]
+        width_unit = (width_units[0] if width_units and len(set(width_units)) == 1
+                      else Qgis.RenderUnit.Unknown)
+        result.update(width=symbol.width(), width_unit=width_unit.name)
+        if width_unit == Qgis.RenderUnit.Millimeters and not result["data_defined"]:
             result["width_mm"] = symbol.width()
     elif not isinstance(symbol, QgsLineSymbol):
         first = symbol.symbolLayer(0)

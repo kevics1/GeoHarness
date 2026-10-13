@@ -319,3 +319,61 @@ print('exact read-only QGIS files only')
     result = await GeoPythonTool().execute(GeoPythonInput(code=code),
         ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()}))
     assert not result.is_error, result.output
+
+
+async def test_registered_qgis_review_report_is_exact_read_only_and_hash_bound(tmp_path):
+    import hashlib
+
+    from PIL import Image
+
+    from geoharness.cartography.jobs import (
+        ensure_map_job,
+        record_map_review,
+        record_map_version,
+    )
+    from geoharness.tools.geo_python import registered_review_files
+
+    config = GeoConfig()
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
+    job = tmp_path / config.qgis.outputs_dir / "map-job"
+    job.mkdir(parents=True)
+    image = job / "preview.png"
+    Image.new("RGB", (2, 2), "red").save(image)
+    report = job / "preview.review-actual/report.json"
+    report.parent.mkdir()
+    report.write_text('{"status":"issues"}', encoding="utf-8")
+    adjacent = report.parent / "private.json"
+    adjacent.write_text('{"not_returned":true}', encoding="utf-8")
+    identity = ensure_map_job(context.metadata, cwd=tmp_path, config=config,
+                              map_id="review-map", artifact_path=image)
+    record_map_version(identity, context.metadata, cwd=tmp_path, config=config, image_path=image,
+                       preflight=None, layout=None, project_dir=None)
+    assert registered_review_files(job.parent, context, config) == ()
+    record_map_review(identity, context.metadata, cwd=tmp_path, config=config, image_path=image,
+        review={"status": "issues", "review_path": str(report),
+                "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest()})
+    assert registered_review_files(job.parent, context, config) == (report,)
+    code = f"""
+import json
+from pathlib import Path
+assert json.loads(Path({str(report)!r}).read_text())['status'] == 'issues'
+for target in [{str(adjacent)!r}, {str(report.parent)!r}]:
+    try: Path(target).read_bytes() if Path(target).suffix else list(Path(target).iterdir())
+    except PermissionError: pass
+    else: raise AssertionError('adjacent path was granted')
+try: Path({str(report)!r}).write_text('changed')
+except PermissionError: pass
+else: raise AssertionError('review report write was granted')
+print('actual review read; adjacent paths and writes denied')
+"""
+    result = await GeoPythonTool().execute(GeoPythonInput(code=code), context)
+    assert not result.is_error, result.output
+    report.write_text('{"status":"passed"}', encoding="utf-8")
+    assert registered_review_files(job.parent, context, config) == ()
+    outside = tmp_path / "other/report.json"
+    outside.parent.mkdir()
+    outside.write_text('{}', encoding="utf-8")
+    record_map_review(identity, context.metadata, cwd=tmp_path, config=config, image_path=image,
+        review={"status": "issues", "review_path": str(outside),
+                "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest()})
+    assert registered_review_files(job.parent, context, config) == ()

@@ -321,6 +321,10 @@ map_review 可单独配置 model、base_url、api_key；留空时复用主配置
 
 交付同时生成 `summary.md` 和 `summary.json`：从复制后通过摘要核验的最终选中工程读取实际 CRS 官方名称、分类/分级数量、图例节点、分析事实和检查状态；文件未通过核验时这些事实保持未验证。底栏最多保留三条逻辑说明，实际字体换行仍由 QGIS 测量；完整统计、参数、输出指纹及自由备注保存在工程事实报告和摘要里，手写统计不混入已验证底栏。
 
+`geo_cartography` 的图层样式采用桥接参数（如 `column`、`render_method`、`categories`、`colors`）；需要 QGIS 的 `renderer`、`outline_color`、`width_mm`、`size_mm` 等精确符号参数时，使用 `geo_qgis_project` 的类型化图层参数。地图标题放在顶层 `title`，而不是 `qgis_layout.title`。参数不兼容时保留所需图层，按照工具给出的对应接口修正。
+
+`DATA_REFS` 是“稳定 ID → 记录”的字典；名称位于记录的 `name`，不在 ID 字符串中。Python 可以直接用 `read_vector("唯一的已登记名称")`。当前地图任务在 QGIS 目录内登记且摘要未变的 `report.json` 也可按返回的准确路径只读访问；相邻文件、报告目录列表与写入权限仍不开放。
+
 默认 QGIS 制图的 PNG 与可编辑工程来自同一打印布局。Python/Matplotlib 自定义地图可用 geo_cartography 的 project 动作，以已存在的原成图和实际图层创建工程，不重新绘图；生成的 QGIS 布局不保证重现所有自定义注记。分类层明确 column（兼容 field_name）、categories 和 colors，原生绘图与 QGIS 使用对应的分类颜色；map_extent 锁定主图范围。不能为创建工程而另画简化图或丢弃分类字段。工程包含：
 
 - `map.qgs` 或 `map.qgz`：QGIS 工程，真实图层、符号样式和可编辑打印布局；以返回的 project_file/qgis_project 为准。

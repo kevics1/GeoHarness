@@ -746,7 +746,13 @@ def _layer_style_options(layer: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(style, dict):
         raise ValueError("Layer style must be an object.")
     if unknown := set(style) - keys - {"type"}:
-        raise ValueError(f"Unsupported layer style options: {', '.join(sorted(unknown))}.")
+        raise ValueError(
+            f"Unsupported layer style options: {', '.join(sorted(unknown))}. "
+            f"geo_cartography style accepts {', '.join(sorted(keys | {'type'}))}. "
+            "For QGIS renderer/outline_color/width_mm/size_mm/opacity settings, use "
+            "geo_qgis_project with its typed layers/style schema; do not remove map layers "
+            "or classifications to bypass this parameter mismatch."
+        )
     options.update({key: value for key, value in style.items() if key in keys})
     if "type" in style:
         if not isinstance(style["type"], str):

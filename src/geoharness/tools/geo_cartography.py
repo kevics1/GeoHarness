@@ -142,7 +142,9 @@ class GeoCartographyInput(BaseModel):
             "(or field_name alias), render_method (categorized/graduated/flow), color_scheme, "
             "n_classes; categorized styles accept categories (ordered values or "
             "{value,label,color} objects) and colors (matching list or value-to-color object). "
-            "These options may also be nested in style; unsupported styles are errors. "
+            "These options may also be nested in style; only these documented keys and type "
+            "are accepted. QGIS renderer/outline_color/width_mm/size_mm/opacity use the typed "
+            "geo_qgis_project tool instead. Do not mix its style schema into this bridge. "
             "For map-only subsets of native analysis outputs, keep the original file_path and "
             "use derivation={feature_indices:[zero-based rows],keep_fields:[attributes],"
             "annotations:{new_field:[one scalar per selected feature]}}. "
@@ -195,7 +197,8 @@ class GeoCartographyInput(BaseModel):
     )
     qgis_layout: QgisProjectLayout | None = Field(
         default=None,
-        description="Native layout: main map, optional detail, legend and footer.",
+        description=("Native layout: main map, optional detail, legend and footer. "
+                     "Map title uses the top-level title field, not qgis_layout.title."),
     )
     map_extent: list[float] | QgisExtent | None = Field(
         default=None,

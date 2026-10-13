@@ -112,6 +112,96 @@ app.exitQgis()
     assert "marker_shape" not in values["compound"]
 
 
+def test_native_line_width_units_and_mixed_symbols_are_not_guessed(tmp_path):
+    settings, _ = _case(tmp_path)
+    runtime = discover_qgis(settings, cwd=tmp_path)
+    worker = Path(__file__).parents[1] / "src/geoharness/qgis/worker.py"
+    script = """
+import json,os,runpy,sys
+runpy.run_path(sys.argv[1],run_name='line_units_fixture')
+from qgis.core import Qgis,QgsApplication,QgsLineSymbol,QgsProperty,QgsSimpleLineSymbolLayer
+from geoharness.qgis.project_worker import _symbol_metadata
+QgsApplication.setPrefixPath(os.environ['QGIS_PREFIX_PATH'],True)
+app=QgsApplication([],False);app.initQgis()
+symbol=QgsLineSymbol.createSimple({'line_width':'0.6'})
+symbol.symbolLayer(0).setOffsetUnit(Qgis.RenderUnit.MapUnits)
+millimeters=_symbol_metadata(symbol)
+symbol.setWidthUnit(Qgis.RenderUnit.MapUnits)
+symbol.symbolLayer(0).setOffsetUnit(Qgis.RenderUnit.Millimeters)
+map_units=_symbol_metadata(symbol)
+symbol.appendSymbolLayer(QgsSimpleLineSymbolLayer())
+mixed=_symbol_metadata(symbol)
+symbol.setWidthUnit(Qgis.RenderUnit.Millimeters)
+symbol.setDataDefinedWidth(QgsProperty.fromExpression('1 + 1'))
+data_defined=_symbol_metadata(symbol)
+print(json.dumps({'millimeters':millimeters,'map_units':map_units,
+                  'mixed':mixed,'data_defined':data_defined}))
+app.exitQgis()
+"""
+    response = subprocess.run([str(runtime.python_executable), "-c", script, str(worker)],
+        env=child_environment(runtime, tmp_path / "line-runtime"),
+        capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert response.returncode == 0, response.stderr
+    values = json.loads(response.stdout)
+    assert values["millimeters"]["width_unit"] == "Millimeters"
+    assert values["millimeters"]["width_mm"] == pytest.approx(0.6)
+    assert values["map_units"]["width_unit"] == "MapUnits"
+    assert values["map_units"]["width"] == pytest.approx(0.6)
+    assert "width_mm" not in values["map_units"]
+    assert values["mixed"]["width_unit"] == "Unknown"
+    assert values["mixed"]["symbol_layer_count"] == 2
+    assert "width_mm" not in values["mixed"]
+    assert values["data_defined"]["data_defined"] is True
+    assert "width_mm" not in values["data_defined"]
+
+
+async def test_native_line_symbols_and_legend_survive_create_and_saved_export(tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import LineString
+
+    settings, payload = _case(tmp_path)
+    roads = tmp_path / "roads.geojson"
+    gpd.GeoDataFrame({"kind": ["arterial", "local"]}, geometry=[
+        LineString([(600, 700), (1400, 1300)]),
+        LineString([(600, 1300), (1400, 700)]),
+    ], crs=3857).to_file(roads)
+    payload["layout"].update(legend=True, height_mm=297)
+    payload["layers"] = [
+        {"file_path": str(roads), "name": "road classes", "style": {
+            "renderer": "categorized", "field": "kind", "categories": [
+                {"value": "arterial", "color": "#d73027", "width_mm": 0.9},
+                {"value": "local", "color": "#4575b4", "width_mm": 0.4},
+            ]}},
+        {"file_path": str(roads), "name": "road outline", "style": {
+            "renderer": "single", "color": "#222222", "width_mm": 0.5}},
+    ]
+    created = await execute_qgis("project_create", payload, cwd=tmp_path,
+                                settings=settings, read_roots=[tmp_path])
+    assert created["status"] == "succeeded", created.get("error_summary")
+    exported = await execute_qgis("project_export",
+        {"project_path": created["result"]["project_file"], "dpi": 72},
+        cwd=tmp_path, settings=settings, read_roots=[tmp_path])
+    assert exported["status"] == "succeeded", exported.get("error_summary")
+    for response in (created, exported):
+        result = response["result"]
+        assert [layer["name"] for layer in result["layers"]] == ["road classes", "road outline"]
+        assert all(layer["geometry_type"] == "Line" for layer in result["layers"])
+        categories = result["layers"][0]["categories"]
+        assert {item["width_mm"] for item in categories} == {0.9, 0.4}
+        assert all(item["width_unit"] == "Millimeters" for item in categories)
+        assert result["layers"][1]["symbol"]["width_mm"] == pytest.approx(0.5)
+        legend = result["layout"]["legends"]["legend"]
+        assert legend["row_count"] == 3 and legend["truncated"] is False
+        rows = [row for row in legend["rows"] if row["layer_index"] == 0]
+        assert {row["text"] for row in rows} == {"arterial", "local"}
+        assert {row["symbol"]["width_mm"] for row in rows} == {0.9, 0.4}
+        assert all(row["symbol"]["width_unit"] == "Millimeters" for row in rows)
+        facts = result["native_facts"]
+        assert set(facts["frames"]["main_map"]["source_indices"]) == {0, 1}
+        assert facts["image_sha256"] == hashlib.sha256(
+            Path(result["preview_path"]).read_bytes()).hexdigest()
+
+
 async def test_actual_png_export_reports_pal_and_classified_hollow_symbols(tmp_path):
     settings, payload = _case(tmp_path)
     payload["layout"].update(legend=True, height_mm=297)

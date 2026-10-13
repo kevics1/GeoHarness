@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import heapq
 import json
 import math
@@ -12,7 +13,7 @@ from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field, model_validator
 
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_python_render
-from geoharness.config.settings import CartographyConfig, ExecutionConfig
+from geoharness.config.settings import CartographyConfig, ExecutionConfig, GeoConfig
 from geoharness.execution import execute_python
 
 
@@ -65,6 +66,34 @@ def qgis_diagnostic_files(root: Path) -> tuple[Path, ...]:
         except (OSError, ValueError, TypeError):
             continue
     return tuple(files)
+
+
+def registered_review_files(
+    root: Path, context: ToolExecutionContext, config: GeoConfig,
+) -> tuple[Path, ...]:
+    """Read exact, unchanged review reports recorded for this active map job."""
+    from geoharness.cartography.jobs import map_job_receipt
+
+    root = root.resolve()
+    try:
+        receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config)
+        files = []
+        for version in receipt.get("versions", [])[-8:]:
+            reference = version.get("stages", {}).get("visual_checked", {}).get(
+                "report_reference", {})
+            value = reference.get("path")
+            if not isinstance(value, str) or not isinstance(reference.get("sha256"), str):
+                continue
+            path = Path(value).absolute()
+            if path.name != "report.json" or not path.is_relative_to(root) \
+                    or path.resolve() != path or not path.is_file() \
+                    or path.stat().st_size > 1024 * 1024:
+                continue
+            if hashlib.sha256(path.read_bytes()).hexdigest() == reference["sha256"]:
+                files.append(path)
+        return tuple(dict.fromkeys(files))
+    except (OSError, ValueError, TypeError):
+        return ()
 
 
 def python_recovery_hints(code: str, stderr: str) -> list[str]:
@@ -158,7 +187,10 @@ class GeoPythonTool(BaseTool):
         "Injected: SOURCE_CWD: Path, RUN_DIR: Path, DATA_DIRS: list[Path] (iterate directly). "
         "DATA_DIRS[0] is SOURCE_CWD, a workspace read root; do not assume a dataset subfolder. "
         "Only os.environ['DATA_DIRS'] is an os.pathsep-separated string. "
-        "DATA_REFS contains stable IDs bound to measured sources and actual producer outputs; "
+        "DATA_REFS is dict[stable_id, record], where each record has name, path and ref; "
+        "names are values, not substrings of the opaque ID keys. "
+        "Use read_vector('a unique registered name') directly, without a custom name lookup. "
+        "Stable IDs bind measured sources and actual producer outputs; "
         "resolve_data(ref) returns their original Path and read_vector(ref, target_crs=None) "
         "reads vectors with optional CRS transformation. Unique registered names/paths work; "
         "unknown, ambiguous, changed or deleted refs are rejected. native_layer(ref, "
@@ -264,7 +296,8 @@ class GeoPythonTool(BaseTool):
         if qgis_directory:
             qgis_root = Path(qgis_directory).expanduser()
             qgis_root = qgis_root if qgis_root.is_absolute() else context.cwd / qgis_root
-            diagnostic_files = qgis_diagnostic_files(qgis_root)
+            diagnostic_files = qgis_diagnostic_files(qgis_root) + registered_review_files(
+                qgis_root, context, config)
         try:
             from geoharness.data.profiles import current_profiles
             from geoharness.data.task_context import data_ref_snapshot, recent_outputs
