@@ -134,6 +134,9 @@ async def build_geo_runtime(
             "cascade_manager": cascade_manager,
             "map_workflow_state": {},
             "map_job_state": {},
+            # Upstream execution shallow-copies metadata for each tool. Share
+            # this bucket before the first inspect so measured profiles survive.
+            "geo_data_context": {},
             # The `skill` tool reads this key to find skill directories.
             # Without it, project skills (cartography, spatial-analysis, …)
             # are invisible at runtime even though they are bundled — which

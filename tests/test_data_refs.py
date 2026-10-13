@@ -144,6 +144,57 @@ def test_empty_context_exposes_actual_data_root_and_discovery(tmp_path):
     assert metadata["_data_refs_snapshot"] == {}
 
 
+async def test_runtime_tool_loop_shares_inspected_profiles_and_refs(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from openharness.api.client import ApiMessageCompleteEvent
+    from openharness.api.usage import UsageSnapshot
+    from openharness.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
+    from openharness.engine.stream_events import ToolExecutionCompleted
+
+    from geoharness.runtime import build_geo_runtime
+
+    source = tmp_path / "data/points.geojson"
+    _profile(source)
+
+    class Client:
+        snapshots = []
+
+        async def stream_message(self, request):
+            snapshot = json.loads(self.data_context_provider().split("\n")[-1])
+            step = len(self.snapshots)
+            self.snapshots.append(snapshot)
+            if step == 0:
+                block = ToolUseBlock(id="inspect", name="geo_vector_data", input={
+                    "action": "inspect", "file_path": str(source)})
+            elif step == 1:
+                block = ToolUseBlock(id="read", name="geo_python", input={"code": (
+                    "import json\nref = next(iter(DATA_REFS))\n"
+                    "assert len(read_vector(ref)) == 2\n"
+                    "print(json.dumps({'profiles': len(GEO_DATA), 'refs': len(DATA_REFS)}))")})
+            else:
+                block = TextBlock(text="done")
+            yield ApiMessageCompleteEvent(
+                message=ConversationMessage(role="assistant", content=[block]),
+                usage=UsageSnapshot(), stop_reason="tool_calls" if step < 2 else "stop",
+            )
+
+    client = Client()
+    monkeypatch.setattr("geoharness.runtime._build_api_client", lambda config: client)
+    monkeypatch.setattr("geoharness.runtime._warm_data_layer", lambda catalog: None)
+    config = GeoConfig()
+    config = replace(config, data=replace(config.data, file_dir=str(source.parent)))
+    bundle = await build_geo_runtime(tmp_path, config_override=config)
+    bundle.engine._hook_executor = None
+    events = [event async for event in bundle.engine.submit_message("inspect then read data")]
+    assert client.snapshots[1]["profiles"]
+    assert client.snapshots[1]["data_refs"]
+    completed = [event for event in events if isinstance(event, ToolExecutionCompleted)]
+    assert len(completed) == 2 and all(not event.is_error for event in completed)
+    execution = json.loads(completed[1].output)
+    assert json.loads(execution["stdout"]) == {"profiles": 1, "refs": 1}
+
+
 async def test_model_visible_refs_are_passed_unchanged_to_child(tmp_path, monkeypatch):
     profile = _profile(tmp_path / "points.geojson")
     metadata = {"geoharness_config": GeoConfig(),

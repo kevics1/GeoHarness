@@ -73,7 +73,9 @@ async def test_unrelated_previous_analysis_cannot_attach_to_new_thematic_map(tmp
     }
     result = await GeoQgisProjectTool().execute(_create(), context)
     assert not result.is_error, result.output
-    assert "analysis_facts" not in payloads[0]
+    assert payloads[0]["analysis_facts"]["status"] == "none"
+    assert payloads[0]["analysis_facts"]["analyses"] == []
+    assert "旧地图" not in json.dumps(payloads[0]["analysis_facts"], ensure_ascii=False)
     assert "旧地图" not in (payloads[0].get("layout") or {}).get("footer_text", "")
 
 
