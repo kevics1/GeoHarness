@@ -73,6 +73,8 @@ PDF/SVG 使用同参数 PNG 预览检查，不能替代导出文件自身的排�
 
 geo_python 生成图片后调用 geo_map_review(file_path=..., task=..., evidence=..., map_id=...)，使用与 Python 相同的 map_id。合并处理具体错误。保留脚本、产物和报告；未解决问题与地图一起说明，不因布局建议修改分析结果。
 
+密集标注优先使用每框职责：main_frame/detail_frame分别设置focus_layers、render_layers、label_layers。label_layers=[]只关闭本框文字，符号仍保留；不能通过删除必要图层解决压盖。设置detail_minimum_zoom>1并先preflight，确认最终纸面详图确实放大。需要编号时用layer.derivation.number_field生成1..N的地图注记，label_field指向它，layout.label_table绑定该层并列出编号/名称字段及headers；不要把编号名单塞进footer_text。属性表原生测量，放不下时增加表格高度/列数或页面尺寸，不截掉名单。
+
 一次制图脚本生成多图时，系统只将最后写出的 primary_map 候选登记为一个版本，map_candidates 列出全部图片候选。附件不是连续修订；明确选择需审查/交付的主图。重审已登记旧图只更新该版本检查，不增加成图版本。
 
 geo_map_review 可登记实际图片与其布局报告，但不会给自定义脚本补造数据 preflight。缺少同图 data_checked 时，即使视觉 passed 最终也为 draft；单独跑一次预检不能自动变成当前图片的检查证明。

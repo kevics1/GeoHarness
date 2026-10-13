@@ -185,6 +185,12 @@ class QgisMapFrameSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
+    label_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
+        default=None, max_length=64, description=(
+            "Layers allowed to label in this frame. [] hides labels here while keeping symbols; "
+            "use a detail frame and label_table to retain dense names. None preserves labels."
+        ))
+
     focus_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
         default=None, min_length=1, max_length=64,
         description="0-based layer indices whose bounds define the subject; excludes backgrounds.",
@@ -200,7 +206,7 @@ class QgisMapFrameSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_selection(self) -> QgisMapFrameSpec:
-        for name in ("focus_layers", "render_layers"):
+        for name in ("focus_layers", "render_layers", "label_layers"):
             indices = getattr(self, name)
             if indices is not None:
                 if len(indices) != len(set(indices)):
@@ -210,6 +216,10 @@ class QgisMapFrameSpec(BaseModel):
             set(self.focus_layers) <= set(self.render_layers)
         ):
             raise ValueError("focus_layers must be included in render_layers")
+        if self.label_layers and self.render_layers is not None and not (
+            set(self.label_layers) <= set(self.render_layers)
+        ):
+            raise ValueError("label_layers must be included in render_layers")
         return self
 
 
@@ -230,6 +240,20 @@ class QgisLayoutPlan(BaseModel):
     adaptations: list[dict[str, Any]]
 
 
+class QgisLabelTable(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_index: int = Field(ge=0, description="Numbered source vector layer; never guessed.")
+    fields: list[str] = Field(min_length=2, max_length=8, description=(
+        "Existing fields in display order. First field is a unique non-null stable roster key."
+    ))
+    headers: dict[str, str] = Field(default_factory=dict, max_length=8,
+                                   description="Optional display headings for existing fields.")
+    columns: int = Field(default=3, ge=1, le=4)
+    height_mm: float = Field(default=50, ge=15, le=400)
+    font_size_pt: float = Field(default=8, ge=5, le=20)
+
+
 class QgisProjectLayout(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -244,6 +268,11 @@ class QgisProjectLayout(BaseModel):
     )
     main_frame: QgisMapFrameSpec | None = None
     detail_frame: QgisMapFrameSpec | None = None
+    label_table: QgisLabelTable | None = None
+    detail_minimum_zoom: float | None = Field(default=None, ge=1, le=20, description=(
+        "Require main scale/detail scale >= this value, measured after native layout fitting. "
+        "Use >1 for a real magnified detail; unset allows a locator/legacy inset."
+    ))
     layout_plan: QgisLayoutPlan | None = Field(default=None, description=(
         "Unchanged preflight.layout_plan to consume; changed sources/styles/fonts are rejected."
     ))
@@ -377,7 +406,8 @@ class GeoQgisProjectInput(BaseModel):
                 frame = getattr(self.layout, name)
                 if name == "detail_frame" and frame is None and self.layout.detail_extent is None:
                     continue
-                for indices in ((frame.focus_layers, frame.render_layers) if frame else ()):
+                for indices in ((frame.focus_layers, frame.render_layers, frame.label_layers)
+                                if frame else ()):
                     if indices is not None and any(index >= len(self.layers) for index in indices):
                         raise ValueError(f"{name} contains an out-of-range layer index")
                 rendered.update(frame.render_layers if frame and frame.render_layers is not None
@@ -385,6 +415,8 @@ class GeoQgisProjectInput(BaseModel):
             if any(layer.required and index not in rendered
                    for index, layer in enumerate(self.layers)):
                 raise ValueError("Required layer is omitted from every map frame")
+            if self.layout.label_table and self.layout.label_table.layer_index >= len(self.layers):
+                raise ValueError("label_table references an unknown layer_index")
         return self
 
 
@@ -403,6 +435,10 @@ class GeoQgisProjectTool(BaseTool):
         "previous map facts are never inherited. Datetime categories normalize automatically. "
         "preflight measures actual fonts/footer/legend without exporting. Legend auto-fit "
         "widens the sidebar or shortens the detail map within the requested page. "
+        "Use main_frame/detail_frame focus_layers, render_layers and label_layers to separate "
+        "overview and detail duties without removing required features. label_table retains "
+        "number/name attributes in an editable table separate from footer notes. "
+        "detail_minimum_zoom checks actual paper magnification after native fitting. "
         "Use effective_parameters, adaptations and content_metrics for layout diagnosis. "
         "legend_font_size_pt controls the legend; body_font_size_pt controls footer text. "
         "duplicate_error_blocked requires changing the diagnosed arguments or input data. "
@@ -723,6 +759,16 @@ class GeoQgisProjectTool(BaseTool):
                                        "layer_index": index,
                                        "derivation": derivation})
         settings = config.cartography
+        table = arguments.layout.label_table if arguments.layout else None
+        if table:
+            frame = frames[table.layer_index].get("gdf")
+            if frame is None or len(set(table.fields)) != len(table.fields) or any(
+                field not in frame.columns or field == frame.geometry.name for field in table.fields
+            ):
+                raise ValueError("label_table requires distinct existing vector attributes")
+            key = frame[table.fields[0]]
+            if key.isna().any() or key.duplicated().any():
+                raise ValueError("label_table first field must be a unique non-null roster key")
         planned_frames = bool(arguments.layout and (
             arguments.layout.main_frame is not None or arguments.layout.detail_frame is not None
         ))

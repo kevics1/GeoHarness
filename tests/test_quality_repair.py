@@ -221,6 +221,72 @@ def test_hollow_plan_preserves_snapshot_analysis_and_raw_notes(tmp_path):
     assert plan.parameters.output_format == "pdf"
 
 
+def test_info_reference_does_not_discard_an_independent_valid_patch(tmp_path):
+    from geoharness.cartography.quality import MapIssue
+    from geoharness.cartography.quality_repair import build_repair_plan
+
+    image, receipt, _, _ = package(tmp_path)
+    review = overlapping_review()
+    review.issues.append(MapIssue(issue_id="note", severity="info", description="Optional"))
+    review.qgis_patch.issue_ids.append("note")
+    plan = build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+    assert plan.parameters.layers[1].style.fill_opacity == 0
+    assert plan.issue_ids == ["capacity-covered"]
+
+
+def test_strategy_uses_its_own_issues_instead_of_first_whitespace_patch(tmp_path):
+    from geoharness.cartography.quality import MapIssue, ReviewStrategy
+    from geoharness.cartography.quality_repair import build_repair_plan
+
+    image, receipt, _, _ = package(tmp_path)
+    review = overlapping_review()
+    review.issues.insert(0, MapIssue(issue_id="whitespace", severity="warning",
+        description="Layout whitespace", issue_code="extent_whitespace", frame_id="main_map",
+        roi_ref="main_map", bbox=[0, 0, 1, 1], source_indices=[0]))
+    review.qgis_patch.issue_ids = ["whitespace", "capacity-covered"]
+    review.next_strategy = ReviewStrategy(strategy="detail_map", reason="Show local overlap",
+                                          issue_ids=["capacity-covered"])
+    plan = build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+    assert plan.strategy == "detail_map"
+    assert plan.parameters.layout.detail_extent.xmax < 90
+
+
+def test_repeated_conflict_uses_stable_keys_and_overlapping_roi_after_reorder():
+    from geoharness.cartography.quality import MapIssue
+    from geoharness.cartography.quality_repair import _repeat
+
+    issue = MapIssue(issue_id="new", severity="warning", description="Labels still overlap",
+        frame_id="main_map", roi_ref="new_crop", bbox=[0.21, 0.2, 0.81, 0.8],
+        source_indices=[1], issue_code="label_overlap")
+    receipt = {"versions": [{"image_sha256": "old", "stages": {
+        "data_checked": {"report": {"frame_checks": {"layers": [
+            {"source_index": 0, "layer_key": "sites"}]}}},
+        "visual_checked": {"status": "issues", "report": {"issues": [
+            {"issue_id": "old", "frame_id": "main_map", "roi_ref": "old_crop",
+             "bbox": [0.2, 0.2, 0.8, 0.8], "source_indices": [0],
+             "issue_code": "label_overlap"}]}}}}]}
+    assert _repeat(issue, receipt, "new", ["sites"])
+    assert not _repeat(issue, receipt, "new", ["event"])
+    issue.bbox = [0, 0, 0.1, 0.1]
+    assert not _repeat(issue, receipt, "new", ["sites"])
+
+
+def test_native_numbering_is_a_source_bound_derivation_and_cannot_overwrite():
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    from geoharness.cartography.derivation import derive_frame
+
+    source = gpd.GeoDataFrame({"name": ["A", "B", "C"]},
+                              geometry=[Point(i, i) for i in range(3)], crs=3857)
+    numbered = derive_frame(source, {"feature_indices": [2, 0], "number_field": "number"})
+    assert numbered["number"].tolist() == [1, 2]
+    assert numbered["name"].tolist() == ["C", "A"]
+    assert "number" not in source.columns
+    with pytest.raises(ValueError, match="overwrite"):
+        derive_frame(source, {"number_field": "name"})
+
+
 async def test_automatic_review_creates_once_in_same_job_and_reviews_new_png(tmp_path, monkeypatch):
     from openharness.config.settings import PermissionSettings
     from openharness.permissions.checker import PermissionChecker

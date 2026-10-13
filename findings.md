@@ -236,3 +236,4 @@
 - 阶段1已实现并提交a357f04：真实QGIS不再把内部主键写成业务属性，用户fid和同名字段保留，业务修改仍拒绝；候选按稳定源身份比较，未知身份不伪造覆盖。地图版数、修正/审查次数及累积时长不限，旧配置仅兼容。
 - 阶段2新增原生参考属性筛选、reference_relation和可选距离分级，并将实际参考集合/时刻筛选与结果清单绑定；制图事实独立从落盘几何复算关系与距离。向量inspect返回实际dtype和空值，原生派生输出登记schema。当前环境字符串dtype可为str而非object，测试不把一种Pandas版本的dtype名字写死。
 - QGIS3.44官方API确认布局属性表可绑定向量层、字段及筛选，布局多框支持内容跨框；后续编号名单优先复用这些原生组件，保持工程可编辑：https://qgis.org/pyqgis/3.44/core/QgsLayoutItemAttributeTable.html 。
+- QGIS实际表格宽度包括每列两侧cellMargin和所有gridStrokeWidth，不能只按列文本宽度分配；已按原生参数计入边框。createRenderContextForLayout需显式painter=None及DPI。QGS毫米序列化有约0.0005mm变化，已有几何容差可接受；比例尺单独记在实际布局中，不把其派生微差添加到冻结几何摘要。空业务属性列表在QGIS customProperty可读为None，按空列表处理。独立QGIS命名空间避免主Python dotenv/ABI依赖泄漏。

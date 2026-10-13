@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from geoharness.cartography.layer_identity import stable_layer_key
 from geoharness.cartography.values import TEMPORAL_FIELDS, frame_content, normalize_frame
+from geoharness.qgis.layer_identity import stable_layer_key
 
 
 def _digest(path: Path) -> str:

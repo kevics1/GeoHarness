@@ -21,6 +21,10 @@ class MapDerivation(BaseModel):
         default_factory=dict, max_length=32,
         description="New map-only fields, with one value per selected feature; never statistics.",
     )
+    number_field: str = Field(default="", max_length=128, description=(
+        "Optional new map-only ordinal field, 1..N in selected source order. "
+        "Use as label_field and first label_table field; no hand-written number arrays."
+    ))
 
     @model_validator(mode="after")
     def unique_selection(self):
@@ -49,6 +53,8 @@ def derive_frame(frame, specification):
     if len(set(names)) != len(names) or any(not name or name.casefold() in reserved
                                           for name in spec.annotations):
         raise ValueError("derivation annotations cannot overwrite source or geometry fields")
+    if spec.number_field and spec.number_field.casefold() in reserved | set(names):
+        raise ValueError("derivation number_field cannot overwrite an existing attribute")
     if any(len(values) != len(indices) for values in spec.annotations.values()):
         raise ValueError("derivation annotations require one value per selected feature")
     result = frame.iloc[indices].copy()
@@ -61,4 +67,6 @@ def derive_frame(frame, specification):
             # new annotations before freezing so validation compares actual data.
             series = series.map(lambda value: None if pd.isna(value) else str(value))
         result[name] = series
+    if spec.number_field:
+        result[spec.number_field] = range(1, len(result) + 1)
     return result

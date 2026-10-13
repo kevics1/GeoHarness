@@ -28,7 +28,9 @@ async def test_native_package_rebuild_preserves_business_schema_and_analysis(
         pytest.skip(f"QGIS unavailable: {exc}")
     properties = {"name": ["inside", "outside"]}
     if business_fid:
-        properties.update(fid=[41, 42], _geoharness_fid=[81, 82])
+        properties.update(fid=[41, 42], _geoharness_fid=[81, 82],
+                          geom=["business A", "business B"],
+                          _geoharness_geometry=["other A", "other B"])
     assets = gpd.GeoDataFrame(properties, geometry=[Point(0, 0), Point(100, 100)], crs=3857)
     hazard = gpd.GeoDataFrame(geometry=[box(-10, -10, 10, 10)], crs=3857)
     analysis = analyze_vectors(GeoAnalysisInput(action="impact",
@@ -67,7 +69,7 @@ async def test_native_package_rebuild_preserves_business_schema_and_analysis(
     packed.loc[0, "name"] = "changed"
     tampered = tmp_path / "changed.gpkg"
     packed.to_file(tampered, driver="GPKG", layer="changed", index=False,
-                   FID="separate_internal_pk")
+                   FID="separate_internal_pk", GEOMETRY_NAME="separate_internal_geom")
     parameters["layers"][0].update(file_path=str(tampered), layer_name="changed")
     rejected = await tool.execute(GeoQgisProjectInput(action="create", **parameters), context,
                                   _source_bindings=capsule["source_bindings"])

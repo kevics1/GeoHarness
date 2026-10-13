@@ -267,6 +267,8 @@ def _plan_frames(layout: Any, project: Any, layers: list[Any], payload: dict) ->
             "coverage": coverage, "bbox_fraction": [bbox.width() / extent.width(),
                                                        bbox.height() / extent.height()],
             "page_index": item.page()}
+        frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
+        result[name]["label_layers"] = frame.get("label_layers")
     return result
 
 
@@ -313,6 +315,8 @@ def _frame_evidence(
             request = QgsFeatureRequest().setFilterRect(inverse.transformBoundingBox(extent))
             labeling = (layer.labeling().settings()
                         if layer.labelsEnabled() and layer.labeling() else None)
+            if frame.get("label_layers") is not None and index not in frame["label_layers"]:
+                labeling = None
             field = (labeling.fieldName
                      if labeling and labeling.drawLabels and not labeling.isExpression else None)
             layer_count = 0
@@ -919,14 +923,18 @@ def _snapshot_layer(layer: Any, index: int, project: Any, context: Any) -> dict[
         options.layerName = f"layer_{index}"
         options.fileEncoding = "UTF-8"
         primary_key = layer.customProperty("geoharness/snapshot_primary_key", "")
-        business_fields = layer.customProperty("geoharness/business_fields", [])
+        business_fields = layer.customProperty("geoharness/business_fields", []) or []
         if primary_key:
             if primary_key in business_fields:
                 raise ValueError("Internal snapshot key collides with a business field")
             options.attributes = [field_index for field_index, field in enumerate(layer.fields())
                                   if field.name() != primary_key]
             options.skipAttributeCreation = not options.attributes
-            options.layerOptions = ["FID=" + primary_key]
+            geometry_name = "_geoharness_geometry"
+            occupied = {field.casefold() for field in business_fields} | {primary_key.casefold()}
+            while geometry_name.casefold() in occupied:
+                geometry_name += "_"
+            options.layerOptions = ["FID=" + primary_key, "GEOMETRY_NAME=" + geometry_name]
         result = QgsVectorFileWriter.writeAsVectorFormatV3(
             layer,
             target,
@@ -995,6 +1003,9 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
     top = margin + title_height + (gap if title else 0)
     footer_y = height - margin - footer_height
     map_height = footer_y - gap - top
+    table = spec.get("label_table")
+    if table:
+        map_height -= table.get("height_mm", 50) + gap
     has_detail = spec.get("detail_extent") is not None or spec.get("detail_frame") is not None
     sidebar = spec.get("legend", True) or has_detail
     sidebar_width = spec.get("sidebar_width_mm", 60) if sidebar else 0
@@ -1007,6 +1018,13 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
     }
     if title:
         regions["title"] = [margin, margin, inner_width, title_height]
+    if table:
+        count = table.get("columns", 3)
+        column_width = (inner_width - gap * (count - 1)) / count
+        for index in range(count):
+            regions[f"label_table_{index}"] = [margin + index * (column_width + gap),
+                footer_y - gap - table.get("height_mm", 50), column_width,
+                table.get("height_mm", 50)]
     sidebar_x = width - margin - sidebar_width
     if has_detail:
         detail_height = (map_height * spec.get("detail_height_ratio", 0.4)
@@ -1014,7 +1032,7 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
         regions["detail_map"] = [sidebar_x, top, sidebar_width, detail_height]
         top += detail_height + gap
     if spec.get("legend", True):
-        legend_height = footer_y - gap - top
+        legend_height = regions["main_map"][1] + map_height - top
         if legend_height < 20:
             raise ValueError("Structured layout requires at least 20mm for the legend")
         regions["legend"] = [sidebar_x, top, sidebar_width, legend_height]
@@ -1075,6 +1093,23 @@ def _create_layout(
         render, _ = _frame_selection(name, spec, len(layers))
         item.setLayers([layers[index] for index in reversed(render)])
         item.setKeepLayerSet(True)
+        frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
+        if frame.get("label_layers") is not None:
+            from qgis.core import QgsMapLayerStyle, QgsVectorLayer
+
+            overrides = {}
+            for index in render:
+                layer = layers[index]
+                if isinstance(layer, QgsVectorLayer) and index not in frame["label_layers"]:
+                    original = QgsMapLayerStyle()
+                    original.readFromLayer(layer)
+                    layer.setLabelsEnabled(False)
+                    hidden = QgsMapLayerStyle()
+                    hidden.readFromLayer(layer)
+                    overrides[layer.id()] = hidden.xmlData()
+                    original.writeToLayer(layer)
+            item.setLayerStyleOverrides(overrides)
+            item.setKeepLayerStyles(True)
         item.zoomToExtent(QgsRectangle(*frozen["extent"]) if frozen else
                           _frame_extent(project, layers, name, payload, rect))
         item.setFrameEnabled(True)
@@ -1084,6 +1119,11 @@ def _create_layout(
     layout.setReferenceMap(map_item)
     if "detail_map" in regions:
         add_map("detail_map", extent)
+    if spec.get("label_table"):
+        from geoharness.qgis.layout_table import add_label_tables
+
+        add_label_tables(layout, layers, spec["label_table"], regions,
+                         _text_format(font, spec["label_table"].get("font_size_pt", 8)))
     if title:
         label = QgsLayoutItemLabel(layout)
         label.setText(title)
@@ -1170,7 +1210,12 @@ def _create_layout(
         if minimum.height() > available[3] + 0.05 and "detail_map" in regions:
             height = regions["main_map"][3]
             detail_height = height - spec.get("gap_mm", 5) - minimum.height() - 0.5
-            if detail_height >= max(20, height * 0.1):
+            if spec.get("detail_minimum_zoom") is not None:
+                extra = (minimum.height() + 0.5 - available[3]) / (
+                    1 - spec.get("detail_height_ratio", 0.4))
+                if spec.get("height_mm", 210) + extra <= 2000:
+                    resized["height_mm"] = spec.get("height_mm", 210) + extra
+            elif detail_height >= max(20, height * 0.1):
                 resized["detail_height_ratio"] = detail_height / height
         if resized != spec and payload.get("_consume_plan"):
             raise ValueError("layout_plan is stale: measured legend changed; run preflight again")
@@ -1185,8 +1230,28 @@ def _create_layout(
                            for key, value in resized.items() if spec.get(key) != value]
                 return _create_layout(project, layers, extent, {**payload, "layout": resized},
                     context, _fit_attempt=_fit_attempt + 1, _adaptations=[*adaptations, *changes])
-    project.layoutManager().addLayout(layout)
+    from geoharness.qgis.layout_table import label_table_facts
+
+    tables = label_table_facts(layout)
+    if any(table["visible_rows"] < table["rows"] for table in tables):
+        if _fit_attempt >= 3 or payload.get("_consume_plan"):
+            raise ValueError("label_table does not fit: increase height_mm, columns or page size")
+        required = max(table["rows"] / max(1, table["visible_rows"]) for table in tables)
+        resized = {**spec, "label_table": {**spec["label_table"],
+                   "height_mm": spec["label_table"].get("height_mm", 50) * required + 5}}
+        return _create_layout(project, layers, extent, {**payload, "layout": resized},
+            context, _fit_attempt=_fit_attempt + 1, _adaptations=[*adaptations, {
+                "parameter": "label_table.height_mm", "reason": "measured table rows",
+                "after": resized["label_table"]["height_mm"]}])
+    minimum_zoom = spec.get("detail_minimum_zoom")
+    detail = layout.itemById("detail_map")
+    if minimum_zoom is not None and detail is not None:
+        zoom = map_item.scale() / detail.scale()
+        if zoom + 1e-6 < minimum_zoom:
+            raise ValueError(f"detail frame is not magnified enough (zoom={zoom:.3f}, "
+                             f"required={minimum_zoom}); use a smaller subject or larger frame")
     _validate_layout_bounds(layout)
+    project.layoutManager().addLayout(layout)
     return layout
 
 
@@ -1502,8 +1567,11 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                 "id": item.id(), "units": item.units().name,
                 "units_per_segment": item.unitsPerSegment(), "segments": item.numberOfSegments(),
             })
+    from geoharness.qgis.layout_table import label_table_facts
+
     return {
         "name": layout.name(), "pages": layout.pageCollection().pageCount(), "map_frames": maps,
+        "label_tables": label_table_facts(layout),
         "map_extents": {item["id"]: item["extent"] for item in maps},
         "scale_bars": scale_bars,
         "legends": legends,
@@ -2033,7 +2101,7 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
                 layer.setCustomProperty("geoharness/source_index", index)
                 layer_key = payload["layers"][index].get("layer_key", "")
                 if not layer_key:
-                    from geoharness.cartography.layer_identity import stable_layer_key
+                    from geoharness.qgis.layer_identity import stable_layer_key
 
                     source = payload["layers"][index]
                     path, _ = _local_source(source["file_path"], context)

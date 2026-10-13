@@ -872,7 +872,7 @@ def _retention_layer_key(layer: dict, report: dict) -> str | None:
         return None
     if type(selector) not in {str, int}:
         return None
-    from geoharness.cartography.layer_identity import stable_layer_key
+    from geoharness.qgis.layer_identity import stable_layer_key
 
     return stable_layer_key(kind, label, path, selector)
 

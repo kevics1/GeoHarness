@@ -56,6 +56,7 @@ class QgisLayoutPatch(BaseModel):
     body_font_size_pt: float | None = Field(default=None, ge=5, le=20)
     legend_font_size_pt: float | None = Field(default=None, ge=5, le=20)
     detail_height_ratio: float | None = Field(default=None, ge=0.1, le=0.8)
+    detail_minimum_zoom: float | None = Field(default=None, ge=1, le=20)
 
 
 class QgisSymbolPatch(BaseModel):

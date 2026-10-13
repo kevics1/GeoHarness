@@ -199,16 +199,35 @@ def previous_conflicts(receipt: dict, image_sha256: str) -> list[dict]:
                         for k in ("issue_code", "frame_id", "source_indices", "bbox", "roi_ref")
                     }
                 )
+                report = version.get("stages", {}).get("data_checked", {}).get("report", {})
+                result[-1]["source_keys"] = _source_keys(report, issue["source_indices"])
     return result[-10:]
 
 
-def _repeat(issue: MapIssue, receipt: dict, digest: str) -> bool:
+def _source_keys(report: dict, indices: list[int]) -> list[str]:
+    from geoharness.cartography.jobs import _retention_layer_key
+
+    checks = {item.get("source_index"): item for item in
+              (report.get("frame_checks") or {}).get("layers", [])}
+    keys = [_retention_layer_key(checks.get(i, {"source_index": i}), report) for i in indices]
+    return sorted(keys) if keys and all(keys) else []
+
+
+def _repeat(issue: MapIssue, receipt: dict, digest: str, source_keys: list[str]) -> bool:
+    def overlaps(box):
+        if issue.bbox is None or not box or len(box) != 4:
+            return False
+        a, b = issue.bbox, box
+        intersection = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
+            0, min(a[3], b[3]) - max(a[1], b[1]))
+        union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection
+        return union > 0 and intersection / union >= 0.5
+
     return any(
         old["issue_code"] == issue.issue_code
         and old["frame_id"] == issue.frame_id
-        and old["source_indices"] == issue.source_indices
-        and old["bbox"] == issue.bbox
-        and old["roi_ref"] == issue.roi_ref
+        and bool(source_keys) and old["source_keys"] == source_keys
+        and overlaps(old["bbox"])
         for old in previous_conflicts(receipt, digest)
     )
 
@@ -273,8 +292,14 @@ def build_repair_plan(
     if len(issues) != len([i for i in review.issues if i.severity in {"warning", "error"}]):
         raise RepairUnavailable("Actionable issues require unique identifiers.")
     patch, strategy = review.qgis_patch, review.next_strategy
-    identifiers = patch.issue_ids if patch is not None else strategy.issue_ids if strategy else []
-    if not identifiers or any(i not in issues for i in identifiers):
+    all_ids = {i.issue_id for i in review.issues}
+    proposed = [*(patch.issue_ids if patch else []), *(strategy.issue_ids if strategy else [])]
+    if any(i not in all_ids for i in proposed):
+        raise RepairUnavailable("Presentation proposal references unknown issue identifiers.")
+    patch_ids = [i for i in patch.issue_ids if i in issues] if patch else []
+    strategy_ids = [i for i in strategy.issue_ids if i in issues] if strategy else []
+    identifiers = list(dict.fromkeys([*patch_ids, *strategy_ids]))
+    if not identifiers:
         raise RepairUnavailable("Presentation proposal is not bound to concrete issues.")
     selected = [issues[i] for i in identifiers]
     frames = manifest["native_facts"].get("frames", {})
@@ -297,15 +322,23 @@ def build_repair_plan(
                 raise RepairUnavailable("Legend issue sources have no actual legend nodes.")
         elif issue.frame_id != "footer" or issue.source_indices:
             raise RepairUnavailable("Non-map ROI only supports its measured layout presentation.")
-    mode = strategy.strategy if strategy and set(strategy.issue_ids) == set(identifiers) else None
-    if any(_repeat(i, receipt, package["image_sha256"]) for i in selected):
+    mode = strategy.strategy if strategy_ids else None
+    identity_report = {"source_bindings": sources, "layers": manifest.get("layers", [])}
+    if any(_repeat(i, receipt, package["image_sha256"],
+                   _source_keys(identity_report, i.source_indices)) for i in selected):
         mode = (
             "split_maps"
             if any(_covering_pair(manifest, i, review) for i in selected)
             else "detail_map"
         )
     if mode in {"detail_map", "split_maps"}:
-        issue = selected[0]
+        relevant = [issues[i] for i in strategy_ids] if strategy_ids else selected
+        subjects = [i for i in relevant if i.frame_id in frames and i.source_indices
+                    and i.issue_code in {"label_overlap", "symbol_overlap", "label_missing",
+                                         "layer_occlusion"}]
+        if not subjects:
+            raise RepairUnavailable("Detail/split has no actionable local content issue")
+        issue = subjects[0]
         if issue.frame_id not in frames or not issue.source_indices:
             raise RepairUnavailable("Detail/split needs a native frame and measured subject.")
         extent = _issue_extent(issue, review, frames[issue.frame_id])
@@ -338,16 +371,26 @@ def build_repair_plan(
         if mode == "split_maps":
             pair = _covering_pair(manifest, issue, review)
             if pair is None:
-                raise RepairUnavailable(
-                    "Split requires actual coincident classified/overlay points."
-                )
-            base, overlay = pair
-            main["render_layers"] = [i for i in main["render_layers"] if i != overlay]
-            if main.get("focus_layers"):
-                main["focus_layers"] = [i for i in main["focus_layers"] if i != overlay] or [base]
-            detail["render_layers"] = [i for i in original if i != base]
-            detail["focus_layers"] = [overlay]
-        else:
+                labeled = [i for i in issue.source_indices if raw["layers"][i].get("label_field")
+                           and manifest.get("layers", [])[i].get("labels_enabled")]
+                distinct = {(p["layer_index"], p["feature_id"]) for p in points
+                            if p.get("layer_index") in labeled}
+                if issue.issue_code not in {"label_overlap", "label_missing"} or len(distinct) < 2:
+                    raise RepairUnavailable(
+                        "Split requires actual coincident points or measured dense labels.")
+                main["label_layers"] = [i for i in (main.get("label_layers")
+                    if main.get("label_layers") is not None else main["render_layers"])
+                    if i not in labeled]
+                detail["label_layers"] = labeled
+            else:
+                base, overlay = pair
+                main["render_layers"] = [i for i in main["render_layers"] if i != overlay]
+                if main.get("focus_layers"):
+                    main["focus_layers"] = [i for i in main["focus_layers"]
+                                           if i != overlay] or [base]
+                detail["render_layers"] = [i for i in original if i != base]
+                detail["focus_layers"] = [overlay]
+        if mode == "detail_map" or "label_layers" in detail:
             # Crop only the actual subject implicated by the original-pixel ROI.
             # Aggregate polygon boxes with multiple features do not prove a local subject.
             bounds = [[p["x"], p["y"], p["x"], p["y"]] for p in points]
@@ -375,6 +418,9 @@ def build_repair_plan(
         for suggestion in patch.layers:
             index = suggestion.layer_index
             related = [i for i in selected if index in i.source_indices and i.frame_id in frames]
+            if not related and any(i.severity == "info" and i.issue_id in patch.issue_ids
+                                   and index in i.source_indices for i in review.issues):
+                continue
             if index >= len(raw["layers"]) or not related:
                 raise RepairUnavailable("Layer repair has no matching native frame/ROI issue.")
             layer = raw["layers"][index]

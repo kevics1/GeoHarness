@@ -1,4 +1,4 @@
-"""Business layer identities are independent of display order and package paths."""
+"""Dependency-free business layer identities shared with the standalone QGIS worker."""
 
 from __future__ import annotations
 
