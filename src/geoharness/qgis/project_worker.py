@@ -36,6 +36,7 @@ def _layout_input_digest(payload: dict[str, Any]) -> str:
     bound = {key: value for key, value in payload.items() if key not in {
         "action", "map_id", "output_path", "output_format", "project_format",
         "strict_layout", "_frozen_frames", "_consume_plan",
+        "_creation_spec",
     }}
     bound["layout"] = {key: value for key, value in (payload.get("layout") or {}).items()
                        if key != "layout_plan"}
@@ -697,7 +698,10 @@ def _symbol(layer: Any, style: dict[str, Any], entry: dict[str, Any]) -> Any:
     symbol = QgsSymbol.defaultSymbol(layer.geometryType())
     if symbol is None:
         raise ValueError("Project maps require a spatial vector layer")
-    symbol.setColor(_color(entry.get("color", style.get("color", "#4c78a8"))))
+    color = _color(entry.get("color", style.get("color", "#4c78a8")))
+    if isinstance(symbol, (QgsMarkerSymbol, QgsFillSymbol)):
+        color.setAlphaF(color.alphaF() * float(style.get("fill_opacity", 1.0)))
+    symbol.setColor(color)
     width = entry.get("width_mm", style.get("width_mm", 0.3))
     size = entry.get("size_mm", style.get("size_mm", 3))
     if isinstance(symbol, QgsMarkerSymbol):
@@ -715,17 +719,38 @@ def _symbol(layer: Any, style: dict[str, Any], entry: dict[str, Any]) -> Any:
 
 
 def _symbol_metadata(symbol: Any) -> dict[str, Any]:
-    from qgis.core import QgsLineSymbol, QgsMarkerSymbol
+    from qgis.core import Qgis, QgsFillSymbol, QgsLineSymbol, QgsMarkerSymbol
 
-    result = {"color": symbol.color().name()}
+    color = symbol.color()
+    result = {"color": color.name(), "color_alpha": color.alphaF(),
+              "symbol_opacity": symbol.opacity(), "symbol_layer_count": symbol.symbolLayerCount()}
+    result["data_defined"] = any(
+        layer.hasDataDefinedProperties() for layer in symbol.symbolLayers())
+    if isinstance(symbol, (QgsMarkerSymbol, QgsFillSymbol)):
+        result["fill_opacity"] = color.alphaF()
     if isinstance(symbol, QgsMarkerSymbol):
-        result["size_mm"] = symbol.size()
+        result.update(size=symbol.size(), size_unit=symbol.sizeUnit().name)
+        if symbol.sizeUnit() == Qgis.RenderUnit.Millimeters and not result["data_defined"]:
+            result["size_mm"] = symbol.size()
     if isinstance(symbol, QgsLineSymbol):
-        result["width_mm"] = symbol.width()
-    else:
-        stroke_width = getattr(symbol.symbolLayer(0), "strokeWidth", None)
-        if callable(stroke_width):
-            result["width_mm"] = stroke_width()
+        result.update(width=symbol.width(), width_unit=symbol.widthUnit().name)
+        if symbol.widthUnit() == Qgis.RenderUnit.Millimeters and not result["data_defined"]:
+            result["width_mm"] = symbol.width()
+    elif not isinstance(symbol, QgsLineSymbol):
+        first = symbol.symbolLayer(0)
+        stroke_width = getattr(first, "strokeWidth", None)
+        stroke_unit = getattr(first, "strokeWidthUnit", None)
+        if callable(stroke_width) and callable(stroke_unit):
+            result.update(width=stroke_width(), width_unit=stroke_unit().name)
+            if stroke_unit() == Qgis.RenderUnit.Millimeters and not result["data_defined"]:
+                result["width_mm"] = stroke_width()
+        stroke_color = getattr(first, "strokeColor", None)
+        if callable(stroke_color):
+            outline = stroke_color()
+            result.update(outline_color=outline.name(), outline_alpha=outline.alphaF())
+        if first.layerType() == "SimpleMarker" and symbol.symbolLayerCount() == 1 and \
+                not result["data_defined"]:
+            result["marker_shape"] = first.properties().get("name")
     return result
 
 
@@ -1353,6 +1378,45 @@ def _validate_layout_bounds(layout: Any) -> None:
         raise error
 
 
+def _legend_node_facts(legend: Any, layout: Any) -> dict[str, Any]:
+    """The current legend node model, independent of pixel readability."""
+    from qgis.core import Qgis, QgsSymbolLegendNode
+    from qgis.PyQt.QtCore import Qt
+
+    rows, layers = [], []
+    truncated = False
+    model = legend.model()
+    for tree_layer in model.rootGroup().findLayers():
+        layer = tree_layer.layer()
+        index = layer.customProperty("geoharness/source_index", None) if layer else None
+        index = int(index) if index is not None else None
+        symbol_count, unknown_count = 0, 0
+        nodes = model.layerLegendNodes(tree_layer)
+        for node in nodes:
+            if len(rows) >= 256:
+                truncated = True
+                break
+            row = {"layer_index": index, "text": str(node.data(Qt.DisplayRole) or ""),
+                   "node_type": type(node).__name__}
+            if isinstance(node, QgsSymbolLegendNode) and node.symbol() is not None:
+                row["symbol"] = _symbol_metadata(node.symbol())
+                symbol_count += 1
+            else:
+                unknown_count += 1
+            rows.append(row)
+        layers.append({"layer_index": index, "layer_label": tree_layer.name(),
+            "symbolnode_count": symbol_count, "unknown_node_count": unknown_count,
+            "count_complete": not truncated})
+        if truncated:
+            break
+    rect = legend.mapRectToScene(legend.rect())
+    scene = [rect.x(), rect.y(), rect.width(), rect.height()]
+    return {"scope": "actual_legend_node_model; not_pixel_legibility", "rows": rows,
+            "row_count": len(rows), "layers": layers, "sample_limit": 256,
+            "truncated": truncated, "rect_scene": scene, "layout_unit": layout.units().name,
+            "rect_mm": scene if layout.units() == Qgis.LayoutUnit.Millimeters else None}
+
+
 def _layout_metadata(layout: Any) -> dict[str, Any]:
     from qgis.core import (
         Qgis,
@@ -1364,6 +1428,7 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
 
     maps = []
     scale_bars = []
+    legends = {}
     page = layout.pageCollection().page(0)
     converter = layout.renderContext().measurementConverter()
     page_size = converter.convert(page.pageSize(), Qgis.LayoutUnit.Millimeters) if page else None
@@ -1399,6 +1464,7 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                 effective["detail_height_ratio"] = (
                     item.rect().height() / main.rect().height())
         elif isinstance(item, QgsLayoutItemLegend):
+            legends[item.id() or item.uuid()] = _legend_node_facts(item, layout)
             effective["sidebar_width_mm"] = converter.convert(
                 item.sizeWithUnits(), Qgis.LayoutUnit.Millimeters).width()
             record_font("legend_font_size", item.style(
@@ -1419,6 +1485,7 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
         "name": layout.name(), "pages": layout.pageCollection().pageCount(), "map_frames": maps,
         "map_extents": {item["id"]: item["extent"] for item in maps},
         "scale_bars": scale_bars,
+        "legends": legends,
         "template": layout.customProperty("geoharness/template", ""),
         "regions": json.loads(layout.customProperty("geoharness/regions", "{}")),
         "font": json.loads(layout.customProperty("geoharness/font", "{}")),
@@ -1456,7 +1523,160 @@ def _validate_project_coordinates(
                 raise ValueError(f"Layout map {frame['id']} has an invalid scale")
 
 
-def _export_layout(layout: Any, payload: dict[str, Any], context: Any) -> tuple[Path, Path]:
+def _export_label_facts(layout: Any, exporter: Any) -> dict[str, list[dict[str, Any]]]:
+    """Read PAL results owned by the exporter immediately after this PNG export."""
+    from qgis.core import QgsLayoutItemMap
+
+    results = exporter.labelingResults()
+    labels = {}
+    for item in layout.items():
+        if not isinstance(item, QgsLayoutItemMap) or item.page() != 0:
+            continue
+        indices = {layer.id(): layer.customProperty("geoharness/source_index", None)
+                   for layer in layout.project().mapLayers().values()}
+        positions = results[item.uuid()].allLabels() if item.uuid() in results else []
+        labels[item.id() or item.uuid()] = [{
+            "layer_index": (int(indices[position.layerID])
+                            if indices.get(position.layerID) is not None else None),
+            "feature_id": int(position.featureId), "text": position.labelText,
+            "bbox": _rect_values(position.labelRect), "is_unplaced": position.isUnplaced,
+        } for position in positions[:512]]
+    return labels
+
+
+def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, Any]:
+    """Bounded geometry and real renderer symbols from the saved layout being exported."""
+    from qgis.core import (
+        Qgis,
+        QgsCoordinateTransform,
+        QgsFeatureRequest,
+        QgsGeometry,
+        QgsLayoutItemMap,
+        QgsRectangle,
+        QgsRenderContext,
+        QgsVectorLayer,
+    )
+    from qgis.PyQt.QtCore import QSizeF
+
+    frames = {}
+    for item in layout.items():
+        if not isinstance(item, QgsLayoutItemMap) or item.page() != 0:
+            continue
+        name = item.id() or item.uuid()
+        extent = item.extent()
+        rect = item.mapRectToScene(item.rect())
+        millimeters = layout.units() == Qgis.LayoutUnit.Millimeters
+        physical = layout.renderContext().measurementConverter().convert(
+            item.sizeWithUnits(), Qgis.LayoutUnit.Millimeters)
+        settings = item.mapSettings(extent,
+            QSizeF(physical.width() * dpi / 25.4, physical.height() * dpi / 25.4), dpi, True)
+        points, bboxes = [], []
+        source_indices = []
+        for layer in settings.layers():
+            source_index = layer.customProperty("geoharness/source_index", None)
+            if source_index is not None:
+                source_index = int(source_index)
+                source_indices.append(source_index)
+            if not isinstance(layer, QgsVectorLayer) or layer.renderer() is None:
+                continue
+            transform = QgsCoordinateTransform(layer.crs(), item.crs(), layout.project())
+            inverse = QgsCoordinateTransform(item.crs(), layer.crs(), layout.project())
+            request = QgsFeatureRequest().setFilterRect(inverse.transformBoundingBox(extent))
+            context = QgsRenderContext.fromMapSettings(settings)
+            context.setCoordinateTransform(transform)
+            renderer = layer.renderer()
+            renderer.startRender(context, layer.fields())
+            bbox, minimum, sampled = None, None, 0
+            try:
+                for feature in layer.getFeatures(request):
+                    geometry = QgsGeometry(feature.geometry())
+                    if geometry.isEmpty():
+                        continue
+                    geometry.transform(transform)
+                    if not geometry.intersects(extent):
+                        continue
+                    context.expressionContext().setFeature(feature)
+                    symbol = renderer.symbolForFeature(feature, context)
+                    if symbol is None:
+                        continue
+                    if geometry.type() == Qgis.GeometryType.Point and len(points) < 512:
+                        positions = geometry.asMultiPoint() if geometry.isMultipart() else [
+                            geometry.asPoint()]
+                        symbol_info = _symbol_metadata(symbol)
+                        symbol_info["layer_opacity"] = layer.opacity()
+                        for point in positions:
+                            if extent.contains(point) and len(points) < 512:
+                                points.append({"layer_index": source_index,
+                                    "feature_id": int(feature.id()), "x": point.x(), "y": point.y(),
+                                    "symbol": symbol_info})
+                    elif geometry.type() == Qgis.GeometryType.Polygon:
+                        visible = geometry.intersection(QgsGeometry.fromRect(extent)).boundingBox()
+                        if visible.isFinite() and not visible.isEmpty():
+                            sampled += 1
+                            bbox = QgsRectangle(visible) if bbox is None else bbox
+                            bbox.combineExtentWith(visible)
+                            if millimeters:
+                                span = min(visible.width() / extent.width() * rect.width(),
+                                           visible.height() / extent.height() * rect.height())
+                                minimum = span if minimum is None else min(minimum, span)
+                            if sampled >= 512:
+                                break
+                    if geometry.type() == Qgis.GeometryType.Point and len(points) >= 512:
+                        break
+            finally:
+                renderer.stopRender(context)
+            if bbox is not None:
+                bboxes.append({"layer_index": source_index, "bbox": _rect_values(bbox),
+                    "minimum_span_mm": minimum, "sample_size": sampled, "sample_limit": 512,
+                    "scope": "sampled_visible_polygon_feature_bboxes"})
+        frames[name] = {"extent": _rect_values(extent),
+            "crs": item.crs().authid() or item.crs().toWkt(),
+            "rect_mm": ([rect.x(), rect.y(), rect.width(), rect.height()] if millimeters else None),
+            "rect_scene": [rect.x(), rect.y(), rect.width(), rect.height()],
+            "layout_unit": layout.units().name,
+            "source_indices": source_indices, "layer_order": "top_to_bottom",
+            "points": points, "labels": labels.get(name, []), "layer_bboxes": bboxes[:512],
+            "sample_limit": 512}
+    return {"frames": frames,
+        "scope": "actual_export_geometry_and_native_symbol_state; not_pixel_acceptance"}
+
+
+def _packaged_creation_spec(spec: Any, layers: list[dict], layout: dict) -> dict | None:
+    """Rebuild only from a supplied creation contract and the delivered package assets."""
+    if not isinstance(spec, dict) or not isinstance(spec.get("parameters"), dict):
+        return None
+    result = json.loads(json.dumps(spec))
+    parameters = result["parameters"]
+    selected = parameters.get("layers", [])
+    if len(selected) != len(layers):
+        raise ValueError("Creation parameters must match the packaged source layer array")
+    for index, (source, packaged) in enumerate(zip(selected, layers)):
+        source["file_path"] = packaged["file"]
+        source.pop("derivation", None)
+        source.pop("layer_name", None)
+        if packaged["kind"] == "vector":
+            source["layer_name"] = f"layer_{index}"
+        label = source.get("label_style")
+        if isinstance(label, dict):
+            font = (packaged.get("label_style") or {}).get("font") or {}
+            if font.get("packaged"):
+                label["font_file"] = font["file"]
+            else:
+                label.pop("font_file", None)
+    planned = parameters.get("layout")
+    if isinstance(planned, dict):
+        planned.pop("layout_plan", None)
+        font = layout.get("font") or {}
+        if font.get("packaged"):
+            planned["font_file"] = font["file"]
+        else:
+            planned.pop("font_file", None)
+    return result
+
+
+def _export_layout(
+    layout: Any, payload: dict[str, Any], context: Any,
+) -> tuple[Path, Path, dict[str, Any]]:
     from qgis.core import QgsLayoutExporter
 
     exporter = QgsLayoutExporter(layout)
@@ -1473,6 +1693,8 @@ def _export_layout(layout: Any, payload: dict[str, Any], context: Any) -> tuple[
         preview.with_stem("preview_1").rename(preview)
     if not preview.is_file():
         raise ValueError("QGIS did not write the layout preview")
+    labels = _export_label_facts(layout, exporter)
+    native_facts = _export_geometry_facts(layout, labels, image_settings.dpi)
     if payload.get("strict_layout", False):
         _validate_layout_bounds(layout)
     output_format = payload.get("output_format", "png")
@@ -1499,7 +1721,7 @@ def _export_layout(layout: Any, payload: dict[str, Any], context: Any) -> tuple[
             raise ValueError(f"QGIS PDF export failed: {exporter.errorMessage()}")
     else:
         raise ValueError("Only PNG/PDF layout export is supported")
-    return preview, output
+    return preview, output, native_facts
 
 
 def _save_package(
@@ -1529,6 +1751,10 @@ def _save_package(
         if recorded:
             try:
                 facts = json.loads(recorded)
+                if isinstance(facts, dict):
+                    facts = {**facts,
+                        "original_status": facts.get("original_status", facts.get("status")),
+                        "status": "historical_unverified", "current_export_verified": False}
             except (TypeError, ValueError):
                 facts = None
     if isinstance(facts, dict):
@@ -1537,6 +1763,9 @@ def _save_package(
         project.writeEntry("geoharness", "analysis_facts", json.dumps(facts, ensure_ascii=False))
     if payload.get("map_id"):
         project.writeEntry("geoharness", "map_job_id", payload["map_id"])
+    engine_settings = project.labelingEngineSettings()
+    engine_settings.setFlag(Qgis.LabelingFlag.CollectUnplacedLabels, True)
+    project.setLabelingEngineSettings(engine_settings)
     project_path = Path(context.output_path(None, "map." + payload.get("project_format", "qgz")))
     project.setPresetHomePath("")
     project.setFilePathStorage(Qgis.FilePathType.Relative)
@@ -1583,11 +1812,20 @@ def _save_package(
                                   layout_plan, context)
         # Native save/read normalizes floating coordinates and scale-bar metrics.
         # Export the saved layout so preview pixels correspond to the delivered QGS.
-        preview, output = _export_layout(saved_layout, payload, context)
+        preview, output, native_facts = _export_layout(saved_layout, payload, context)
         layout_info = _layout_metadata(saved_layout)
+        if payload.get("_consume_plan") and layout_plan is not None:
+            for name, frame in native_facts["frames"].items():
+                planned = layout_plan["frames"].get(name)
+                if planned is not None:
+                    frame.update({key: planned[key] for key in (
+                        "focus_bbox", "normalized_center", "bbox_fraction", "coverage")})
+                    frame["focus_scope"] = "validated_current_layout_plan"
     finally:
         reopened.clear()
     digest = hashlib.sha256(preview.read_bytes()).hexdigest()
+    native_facts["image_sha256"] = digest
+    creation_spec = _packaged_creation_spec(payload.get("_creation_spec"), layer_info, layout_info)
     readme = Path(context.output_path(None, "README.md"))
     readme.write_text(
         "# Editable QGIS map\n\nOpen `" + project_path.name + "` in QGIS. Packaged data and "
@@ -1628,6 +1866,9 @@ def _save_package(
         "layout_plan": layout_plan,
         "composition": composition,
         "frame_checks": frame_checks,
+        "native_facts": native_facts,
+        "creation_spec": creation_spec,
+        "automatic_repair_eligible": creation_spec is not None,
         "files": sorted({path.relative_to(context.run_dir).as_posix() for path in files}),
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1649,6 +1890,9 @@ def _save_package(
         "layout_plan": layout_plan,
         "composition": composition,
         "frame_checks": frame_checks,
+        "native_facts": native_facts,
+        "creation_spec": creation_spec,
+        "automatic_repair_eligible": creation_spec is not None,
         "render_executed": True,
     }
 

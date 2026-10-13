@@ -55,6 +55,10 @@ class QgisVectorStyle(BaseModel):
     categories: list[QgisCategory] = Field(default_factory=list)
     ranges: list[QgisRange] = Field(default_factory=list)
     opacity: float = Field(default=1.0, ge=0, le=1)
+    fill_opacity: float = Field(default=1.0, ge=0, le=1, description=(
+        "Symbol fill alpha only; stroke and labels remain visible. Hollow point rings "
+        "can preserve a classified point underneath. Never use to hide required polygons."
+    ))
     size_mm: float = Field(default=3, gt=0, le=50)
     width_mm: float = Field(default=0.3, ge=0, le=20)
     outline_color: str = "#ffffff"
@@ -432,6 +436,18 @@ class GeoQgisProjectTool(BaseTool):
 
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
         if preflight:
+            creation = arguments.model_dump(exclude={"action"},
+                                            exclude_unset=True)
+            if not creation.get("crs"):
+                creation["crs"] = preflight["display_crs"]
+            if creation.get("layout"):
+                creation["layout"].pop("layout_plan", None)
+            payload["_creation_spec"] = {
+                "parameters": creation,
+                "source_bindings": preflight.get("source_bindings", []),
+                "analysis_manifests": preflight.get("analysis_manifests", []),
+            }
+        if preflight:
             payload.update(crs=preflight["display_crs"], map_extent=preflight["map_extent"])
             payload["_explicit_map_extent"] = preflight["map_extent_source"] == "explicit"
             payload["_layout_sources"] = preflight.get("layout_sources", [])
@@ -591,6 +607,9 @@ class GeoQgisProjectTool(BaseTool):
             for source, binding in zip(snapshot.layout_sources, source_bindings):
                 source.update(source=binding.get("file_path", source["source"]),
                               derivation=binding.get("derivation"))
+        for original, layer in zip(snapshot.original_sources, arguments.layers):
+            if "derivation" not in original and layer.derivation is not None:
+                original["derivation"] = layer.derivation.model_dump(exclude_none=True)
         frozen = arguments.model_copy(update={
             "layers": [layer.model_copy(update=updates)
                        for layer, updates in zip(arguments.layers, snapshot.layers)],
@@ -608,6 +627,7 @@ class GeoQgisProjectTool(BaseTool):
                 )
         report = self._preflight(frozen, context, snapshot=snapshot)
         report["layout_sources"] = snapshot.layout_sources
+        report["source_bindings"] = snapshot.original_sources
         # Analysis evidence was checked at original locators, against frozen GDFs.
         # Sources may change after this point: the worker only uses the snapshots.
         snapshot.verify_sources()
@@ -705,6 +725,7 @@ class GeoQgisProjectTool(BaseTool):
             *infer_analysis_manifests(mapped_sources, cwd=context.cwd, read_roots=roots),
         ]))
         report["analysis_evidence_status"] = "verified" if manifests else "not_provided"
+        report["analysis_manifests"] = manifests
         if manifests:
 
             report["analysis"] = load_analysis_facts(

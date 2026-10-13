@@ -28,15 +28,20 @@ class GeoMapReviewInput(BaseModel):
         default=False,
         description="Allow one budgeted retry of a cached JSON/schema failure; never loops.",
     )
+    auto_repair: bool | None = Field(
+        default=None, description="False disables evidence-bound automatic presentation repair.",
+    )
 
 
 def _verified_render_evidence(
     path: Path, digest: str, receipt: dict[str, Any], roots: list[Path],
 ) -> dict[str, Any]:
     """Bind backend identity to the actual image, never a caller's backend claim."""
+    from geoharness.cartography.jobs import _matching_version
+
     candidates: dict[Path, str | None] = {}
-    versions = receipt.get("versions", []) if isinstance(receipt, dict) else []
-    for version in versions if isinstance(versions, list) else []:
+    matching = _matching_version(receipt, path) if receipt.get("versions") else None
+    for version in [matching] if matching else []:
         if not isinstance(version, dict):
             continue
         if version.get("image_sha256") != digest:
@@ -83,12 +88,19 @@ def _verified_render_evidence(
             backend = manifest.get("backend")
             if backend not in {"matplotlib", "qgis"}:
                 continue
+            if backend == "qgis" and not recorded_hash:
+                # An adjacent JSON file written by a script is not native engineering proof.
+                continue
             return {
                 "backend": backend,
-                "backend_proof": {"manifest_path": str(manifest_path), "image_sha256": digest},
-                "render_metadata": {key: manifest[key] for key in (
-                    "layers", "layout", "crs", "extent", "analysis",
-                ) if key in manifest},
+                "backend_proof": {"manifest_path": str(manifest_path), "image_sha256": digest,
+                                  "manifest_sha256": hashlib.sha256(raw).hexdigest()},
+                "render_metadata": {
+                    "creation_spec_available": isinstance(manifest.get("creation_spec"), dict),
+                    **{key: manifest[key] for key in (
+                    "layers", "layout", "crs", "extent", "analysis", "layout_plan",
+                    "native_facts", "frame_checks", "composition",
+                ) if key in manifest}},
             }
         except (OSError, ValueError, TypeError):
             continue
@@ -101,14 +113,161 @@ class GeoMapReviewTool(BaseTool):
         "Read actual map pixels and review layer visibility, legends, text and layout. "
         "Use after a Python or QGIS workflow produces a PNG map. Returns issues and "
         "suggestions using the verified backend's units; QGIS suggestions use qgis_patch "
-        "and explicit zero-based layer_index. Apply suggestions to the next render call "
-        "or script and re-render, then review actual pixels again within max_repairs. "
-        "The review does not apply patches or prove successful label placement. "
+        "and explicit zero-based layer_index. Automatic mode applies only image/ROI-bound "
+        "native presentation plans, re-renders in the same job budget and reviews the "
+        "actual new PNG. Returns the selected candidate, final_render and repair_stop_reason; "
+        "use these returned artifacts and do not repeat an already applied repair plan. "
+        "Unsupported suggestions remain issues. Review-only mode does not apply patches; "
+        "a supported manual presentation change needs a new render and pixel review. "
         "A failed API call means unverified, never passed."
     )
     input_model = GeoMapReviewInput
 
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
+        from geoharness.cartography.workflow import repair_loop_lock
+
+        # Include the first review: parallel callers share one provider request and repair loop.
+        async with repair_loop_lock(context.metadata, "review-and-repair"):
+            return await self._execute_locked(arguments, context)
+
+    async def _execute_locked(self, arguments, context) -> ToolResult:
+        assert isinstance(arguments, GeoMapReviewInput)
+        from geoharness.cartography.jobs import map_job_receipt
+        from geoharness.cartography.quality_repair import (
+            RepairUnavailable,
+            build_repair_plan,
+            verified_package,
+        )
+        from geoharness.cartography.workflow import claim_repair_attempt, repair_loop_lock
+        from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
+
+        config = context.metadata.get("geoharness_config")
+        if config is None:
+            return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        first = await self._review_one(arguments, context)
+        if first.is_error:
+            return first
+        identity = first.metadata["map_id"]
+        async with repair_loop_lock(context.metadata, identity):
+            current = first
+            latest_render = None
+            repaired = 0
+            stop = "review_complete"
+            enabled = (arguments.auto_repair if arguments.auto_repair is not None
+                       else config.map_review.auto_repair)
+            for _ in range(1 + config.map_review.max_repairs):
+                if current.metadata.get("review_status") != "issues" or not enabled:
+                    stop = "review_complete" if enabled else "review_only"
+                    break
+                checker = context.metadata.get("geoharness_permission_checker")
+                if checker is None:
+                    stop = "Automatic create permission is unavailable; issues retained."
+                    break
+                decision = checker.evaluate("geo_qgis_project", is_read_only=False)
+                if not decision.allowed or decision.requires_confirmation:
+                    stop = "Automatic create is not currently allowed; issues retained."
+                    break
+                try:
+                    image = Path(current.metadata["image_path"])
+                    receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
+                                              map_id=identity, artifact_path=image)
+                    reference = receipt.get("stages", {}).get("visual_checked", {}).get(
+                        "report_reference", {})
+                    report_path = Path(current.metadata["review_path"])
+                    if (reference.get("path") != str(report_path)
+                            or hashlib.sha256(report_path.read_bytes()).hexdigest()
+                            != reference.get("sha256")):
+                        stop = "Visual evidence changed; prior candidate retained."
+                        break
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    review = MapReview.model_validate({k: v for k, v in report.items()
+                                                       if k in MapReview.model_fields})
+                    plan = build_repair_plan(image, review, receipt,
+                                             config=config, cwd=context.cwd)
+                    if not claim_repair_attempt(context.metadata, plan.digest):
+                        stop = "This presentation plan was already attempted; issues retained."
+                        break
+                    rendered = await GeoQgisProjectTool().execute(
+                        plan.parameters, context, _source_bindings=plan.source_bindings)
+                    if rendered.is_error:
+                        stop = "Native presentation create failed; prior candidate retained."
+                        break
+                    if rendered.metadata.get("render_budget_exhausted"):
+                        stop = "Successful map-version limit reached; remaining issues retained."
+                        break
+                    preview = (rendered.metadata.get("preview_path")
+                               or rendered.metadata.get("primary_map"))
+                    if not preview or not Path(preview).is_file():
+                        stop = "Native create returned no actual PNG; prior candidate retained."
+                        break
+                    repaired += 1
+                    latest_render = rendered.metadata
+                    new_digest = hashlib.sha256(Path(preview).read_bytes()).hexdigest()
+                    if new_digest == hashlib.sha256(image.read_bytes()).hexdigest():
+                        current = ToolResult(output=current.output, metadata={
+                            **current.metadata, "image_path": str(preview),
+                        })
+                        stop = "Presentation repair produced unchanged pixels; no repeat review."
+                        break
+                    current = await self._review_one(arguments.model_copy(update={
+                        "file_path": str(preview), "map_id": identity,
+                        "retry_invalid_response": False,
+                    }), context)
+                    if current.is_error:
+                        stop = "Review of the new PNG failed; visual quality is unverified."
+                        break
+                except (OSError, ValueError, RuntimeError) as exc:
+                    stop = (str(exc) if isinstance(exc, RepairUnavailable)
+                            else "Presentation validation failed; issues retained.")
+                    break
+            else:
+                stop = "Successful map-version limit reached; remaining issues retained."
+            latest_image = current.metadata.get("image_path", first.metadata["image_path"])
+            receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
+                                      map_id=identity, artifact_path=Path(latest_image))
+            candidate = receipt.get("delivery_candidate")
+            selected_image = candidate["image_path"] if candidate else latest_image
+            selected = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
+                                       map_id=identity, artifact_path=Path(selected_image))
+            final_render = None
+            try:
+                package = verified_package(Path(selected_image), selected, cwd=context.cwd,
+                                           config=config, require_facts=False)
+                manifest, root = package["manifest"], package["root"]
+                pdf = next((p for p in package["recorded"] if p.suffix.lower() == ".pdf"), None)
+                packaged_preview = str(root / manifest["preview"])
+                final_render = {"project_dir": str(root),
+                    "project_file": str(root / manifest["project_file"]),
+                    "project_manifest": str(root / "project.json"),
+                    "preview_path": packaged_preview, "primary_map": packaged_preview,
+                    "output_path": str(pdf) if pdf else packaged_preview,
+                    "preflight": selected.get("stages", {}).get("data_checked", {}).get("report"),
+                    **{k: manifest[k] for k in ("layout", "layers", "native_facts", "frame_checks",
+                                               "analysis", "preflight") if k in manifest}}
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            visual = selected.get("stages", {}).get("visual_checked", {})
+            selected_layout = selected.get("stages", {}).get("layout_checked", {})
+            selected_review = ("issues" if selected_layout.get("status") == "issues"
+                               else visual.get("status", "unverified"))
+            selected_review_path = visual.get("report_reference", {}).get("path")
+            metadata = {**current.metadata, "map_receipt": selected, "latest_image": latest_image,
+                "latest_image_sha256": hashlib.sha256(Path(latest_image).read_bytes()).hexdigest(),
+                "latest_review_status": current.metadata.get("review_status", "unverified"),
+                "latest_review_path": current.metadata.get("review_path"),
+                "latest_render": latest_render, "repair_count": repaired,
+                "repair_stop_reason": stop,
+                "selected_candidate": candidate, "final_render": final_render,
+                "image_path": selected_image, "review_status": selected_review,
+                "image_sha256": selected.get("image_sha256"), "review_path": selected_review_path,
+                "quality_status": selected.get("quality_status", "draft")}
+            return ToolResult(output=current.output + "\nPresentation repair: " + stop
+                              + "\nSelected map: " + selected_image
+                              + f"\nSelected visual status: {selected_review}; quality: "
+                              + selected.get("quality_status", "draft"),
+                              is_error=current.is_error, metadata=metadata)
+
+    async def _review_one(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         assert isinstance(arguments, GeoMapReviewInput)
         config = context.metadata.get("geoharness_config")
         if config is None:

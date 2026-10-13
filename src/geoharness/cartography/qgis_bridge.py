@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import shutil
@@ -13,11 +14,9 @@ from typing import Any
 from openharness.tools.base import ToolResult
 
 from geoharness.cartography.project import _vector_style
-from geoharness.cartography.quality import save_review
 from geoharness.cartography.renderer import _layer_style_options
 from geoharness.cartography.sources import resolve_geodataframe
 from geoharness.cartography.values import normalize_frame, normalize_style
-from geoharness.cartography.workflow import review_with_budget
 from geoharness.files.publication import publish_directory
 from geoharness.tools.geo_qgis_project import (
     GeoQgisProjectInput,
@@ -280,65 +279,109 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
         if desired.exists():
             desired = desired.with_stem(f"{desired.stem}-{written.parent.name}")
         await asyncio.to_thread(shutil.copy2, written, desired)
+        copied_digest = hashlib.sha256(desired.read_bytes()).hexdigest()
     except OSError as exc:
         return ToolResult(
             output=f"Map retained at {written}; output copy failed: {exc}",
             is_error=True,
             metadata=result.metadata,
         )
-    checked, budget = await review_with_budget(
-        preview,
-        config=config,
-        task=args.review_task or args.title or args.layer_name,
-        evidence={
-            "backend": "qgis",
-            "render_metadata": {
-                key: result.metadata[key]
-                for key in ("layers", "crs", "extent", "layout", "image_sha256", "analysis")
-                if key in result.metadata
-            },
-        },
-        metadata=context.metadata,
-        map_id=args.map_id,
-        client=context.metadata.get("map_review_client"),
-    )
-    report = await asyncio.to_thread(
-        save_review,
-        preview,
-        {
-            **checked.model_dump(),
-            "image_sha256": result.metadata["image_sha256"],
-            "map_id": args.map_id,
-            "repair_count": 0,
-            "reviewed_artifact": "exported_png",
-        },
-    )
-    response = ToolResult(
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+    checker = context.metadata.get("geoharness_permission_checker")
+    decision = checker.evaluate("geo_map_review", is_read_only=False) if checker else None
+    if decision is not None and (not decision.allowed or decision.requires_confirmation):
+        checked = ToolResult(output="Map retained; current permissions block visual review.",
+            metadata={"image_path": str(preview), "review_status": "unverified",
+                      "repair_count": 0, "repair_stop_reason": "visual_review_not_authorized"})
+    else:
+        checked = await GeoMapReviewTool().execute(GeoMapReviewInput(
+            file_path=str(preview), task=args.review_task or args.title or args.layer_name,
+            map_id=args.map_id,
+        ), context)
+    if checked.is_error:
+        return checked
+    selected_image = Path(checked.metadata["image_path"])
+    digest = hashlib.sha256(selected_image.read_bytes()).hexdigest()
+    metadata = dict(result.metadata)
+    candidate = checked.metadata.get("selected_candidate") or {}
+    selected_version = candidate.get("version") or checked.metadata.get("map_receipt", {}).get(
+        "selected_version")
+    initial_version = result.metadata.get("map_receipt", {}).get("current_version")
+    output_changed = (desired.resolve() != desired.absolute() or not desired.is_file()
+                      or hashlib.sha256(desired.read_bytes()).hexdigest() != copied_digest)
+    if digest != result.metadata["image_sha256"] or (
+        selected_version is not None and selected_version != initial_version
+    ) or output_changed:
+        chosen = checked.metadata.get("final_render")
+        if not isinstance(chosen, dict) or not chosen.get("project_dir"):
+            return ToolResult(output="Selected map retained, but its matching native package "
+                              "could not be verified.", is_error=True, metadata=checked.metadata)
+        metadata = dict(chosen)
+        if project_destination is not None:
+            from uuid import uuid4
+
+            # Keep the first package; a selected repair is a new, independently editable copy.
+            destination = project_destination.with_name(
+                project_destination.name + "-selected-" + uuid4().hex[:8])
+            try:
+                metadata = await asyncio.to_thread(relocate_package, metadata, destination, config)
+            except (OSError, ValueError) as exc:
+                return ToolResult(output=f"Selected map retained; package copy failed: {exc}",
+                                  is_error=True, metadata={**metadata, **checked.metadata})
+        chosen_output = Path(metadata.get("output_path") or selected_image)
+        if desired.suffix.lower() == ".pdf" and chosen_output.suffix.lower() != ".pdf":
+            return ToolResult(output="Selected PNG/project retained; no matching PDF was produced.",
+                              is_error=True, metadata={**metadata, **checked.metadata})
+        copy_source = chosen_output if desired.suffix.lower() == ".pdf" else selected_image
+        try:
+            if (desired.resolve() != desired.absolute() or not desired.is_file()
+                    or hashlib.sha256(desired.read_bytes()).hexdigest() != copied_digest):
+                from uuid import uuid4
+
+                # A user may edit the first preview while review is running.
+                desired = desired.with_stem(desired.stem + "-selected-" + uuid4().hex[:8])
+            await asyncio.to_thread(shutil.copy2, copy_source, desired)
+        except OSError as exc:
+            return ToolResult(output=f"Selected map retained; output copy failed: {exc}",
+                              is_error=True, metadata={**metadata, **checked.metadata})
+    metadata.pop("result", None)
+    primary = desired if desired.suffix.lower() == ".png" else selected_image
+    from geoharness.cartography.jobs import record_map_selection
+
+    try:
+        receipt = await asyncio.to_thread(
+            record_map_selection, args.map_id, context.metadata, cwd=context.cwd, config=config,
+            image_path=primary, project_dir=Path(metadata["project_dir"]),
+            selected_version=selected_version,
+        )
+    except (OSError, ValueError) as exc:
+        return ToolResult(output=f"Selected artifacts retained; selection receipt failed: {exc}",
+                          is_error=True, metadata={**metadata, **checked.metadata})
+    return ToolResult(
         output=(
-            f"QGIS map: {desired}\nEditable project: {result.metadata['project_file']}\n"
-            f"Visual review: {checked.status} — {checked.summary}\nReport: {report}\n"
+            f"QGIS map: {desired}\nEditable project: {metadata['project_file']}\n"
+            f"Visual review: {checked.metadata['review_status']}\n"
+            f"Report: {checked.metadata.get('review_path', 'unverified')}\n"
+            f"Repairs: {checked.metadata.get('repair_count', 0)}; "
+            f"{checked.metadata.get('repair_stop_reason', '')}\n"
             "Use the recorded primary_map PNG with geo_deliver; PDF is an additional export."
         ),
         metadata={
-            **result.metadata,
+            **metadata,
+            **checked.metadata,
             "output_path": str(desired),
-            "primary_map": str(desired) if desired.suffix.lower() == ".png" else str(preview),
+            "primary_map": str(primary),
+            "preview_path": str(primary),
+            "image_path": str(primary),
+            "image_sha256": digest,
+            "backend": "qgis",
+            "project_fidelity": "saved_layout",
+            "project_dir": metadata["project_dir"],
+            "project_file": metadata["project_file"],
+            "project_manifest": metadata["project_manifest"],
             "map_id": args.map_id,
-            "review_status": checked.status,
-            "review_path": str(report),
-            "quality_status": "draft",
-            "repair_count": 0,
-            "preflight": result.metadata.get("preflight") or context.metadata.get("map_preflight"),
-            **budget,
+            "map_receipt": receipt,
+            "preflight": metadata.get("preflight"),
         },
-    )
-    from geoharness.cartography.tracking import track_render_result
-
-    return await asyncio.to_thread(
-        track_render_result,
-        response,
-        context,
-        args.map_id,
-        preflight=response.metadata.get("preflight"),
-        analysis=(result.metadata.get("preflight") or {}).get("analysis"),
     )

@@ -66,6 +66,18 @@ def _restore(backend, tmp_path, metadata, *, config=None):
     return restored
 
 
+def test_repair_attempts_survive_restart_without_runtime_authority(backend, tmp_path):
+    metadata = _metadata()
+    metadata["geoharness_permission_checker"] = object()
+    digest = "a" * 64
+    metadata["map_workflow_state"]["repair_attempts"] = {
+        digest: True, "bad": True, "b" * 64: False, "c" * 64: {"allowed": True},
+    }
+    restored = _restore(backend, tmp_path, metadata)
+    assert restored["map_workflow_state"]["repair_attempts"] == {digest: True}
+    assert "geoharness_permission_checker" not in restored
+
+
 def test_snapshot_keeps_upstream_schema_whitelist_and_public_operations(backend, tmp_path):
     metadata = _metadata()
     metadata.update(task_focus_state={"goal": "Map the data"}, permission_mode="default",

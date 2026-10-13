@@ -281,7 +281,11 @@ geo_cartography 显式读取成图，结合任务、预期图层、参数和源�
 
 QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定优先级、符号大小和详图；这是规划提示，不是视觉通过证明。`label_style` 支持 `placement`、`distance_mm`、`offset_x_mm/offset_y_mm`、`priority`（0最低、10最高）；`around_point` 使用距离，固定 X/Y 偏移应使用 `over_point`。`style.obstacle=true` 可让未标注的重要几何参与 PAL 避让，但不能保证所有标签显示，也不能阻止线符号本身压盖面。疏散线压盖主体应调整实际线宽/透明度/图层顺序，或在本请求内改用详图/分图。
 
-审图通过实际图片与工程清单摘要核实后端。QGIS 返回 `qgis_patch`（布局毫米、字体pt、图层毫米/透明度及标签设置），图层用实际0-based `layer_index`；Matplotlib 才使用英寸 `layout_patch`。不适用的补丁保留诊断而不作为修复依据。`issue_code` 和前两版问题摘要帮助识别重复遮挡，`next_strategy` 可建议当前请求内改布局/详图/分图；模型需要使用真实坐标确定范围。审查不会直接应用补丁，下一次真实渲染后仍须复查。没有可靠后端证据时只给问题与策略。
+审图通过实际图片、登记工程及清单摘要核实后端。QGIS 返回 `qgis_patch`（布局毫米、字体pt、图层毫米/透明度及标签设置），图层用实际0-based `layer_index`；Matplotlib 才使用英寸 `layout_patch`。新建 QGIS 工程记录真实导出中的标注、图层顺序、符号和图例节点；这些工程事实用于排除矛盾建议，不代替视觉检查。审图同时提供整图和有界的原分辨率地图框、图例与底栏区域。可执行问题必须关联 `issue_id`、实际区域、框内图层和当前图片摘要。
+
+`map_review.auto_repair` 默认启用。当前权限允许 QGIS 创建、且工程全部文件摘要和创建参数完整时，`geo_map_review` 自动应用支持的呈现修正，在同一任务和剩余版本预算内重绘，再检查实际新 PNG。同一修正计划只尝试一次；无效建议、旧工程、手工修改后的工程、权限不足或预算耗尽均保留具体原因，不循环重试。`auto_repair=false` 可只检查。自动修正保持数据、分类值及颜色、分析方法和阈值；详图范围由实际问题区域中的原生要素推导，主图保留完整内容。模型建议的框外图层、错误单位或不可靠符号调整不会执行。
+
+自动循环保存每版工程和报告，比较硬检查覆盖、视觉状态及剩余问题，保留较好的可交付候选。返回的 `image_path`、`final_render`、`selected_candidate` 和 `map_receipt` 指向同一候选；`latest_image` 和 `latest_review_status` 单独说明最后一次尝试。图片相同也仍按登记路径和版本关联工程，复制交付不增加成图次数。结构检查、视觉检查和分析正确性分别报告，服务失败不会把草稿改标为通过。
 
 有放大图和密集重点点时，Python 可使用 `geoharness.cartography.layout` 的 create_map_figure、place_point_labels、save_map_figure。它预留主图、放大图、图例、说明的独立区域，按渲染后的文字边界避让；放不下的名字保留省略记录，使用编号对应名单。保存 `.layout.json` 记录分区相交、标签相交/裁切和图例/说明越界，与实际图片 SHA256 绑定。geo_map_review 先检查对应报告；明确的布局缺陷先修正，再调用视觉服务。
 

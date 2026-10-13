@@ -277,12 +277,21 @@ async def test_matplotlib_review_keeps_its_existing_patch_contract(image):
 
 
 async def test_public_review_uses_bound_manifest_over_caller_backend_claim(image):
+    from geoharness.cartography.jobs import ensure_map_job, record_map_version
+
     manifest_path = image.parent / "project.json"
-    manifest_path.write_text(json.dumps(_manifest(image)), encoding="utf-8")
+    manifest = {**_manifest(image), "project_file": "map.qgz",
+                "files": ["project.json", image.name, "map.qgz"]}
+    (image.parent / "map.qgz").write_bytes(b"native fixture")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     reviewer = Reviewer({**ISSUES, "qgis_patch": QGIS_PATCH})
     context = ToolExecutionContext(cwd=image.parent, metadata={
         "geoharness_config": GeoConfig(), "map_review_client": reviewer,
     })
+    identity = ensure_map_job(context.metadata, cwd=image.parent, config=GeoConfig(),
+                              artifact_path=image)
+    record_map_version(identity, context.metadata, cwd=image.parent, config=GeoConfig(),
+                       image_path=image, preflight=None, layout=None, project_dir=image.parent)
     result = await GeoMapReviewTool().execute(GeoMapReviewInput(
         file_path=str(image), task="Inspect", evidence={
             "backend": "matplotlib", "render_metadata": {"layers": [{"name": "Fake"}]},

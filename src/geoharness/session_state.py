@@ -219,6 +219,10 @@ def _workflow(raw: Any, secrets: tuple[str, ...], *, restoring: bool) -> dict[st
         digest, separator, fingerprint = key.partition(":")
         if separator and _digest(digest) and _digest(fingerprint):
             validated_retries[key] = True
+    attempts = raw.get("repair_attempts")
+    attempts = attempts if isinstance(attempts, dict) else {}
+    validated_attempts = {key: True for key, value in list(attempts.items())[-MAX_REVIEW_CACHE:]
+                          if _digest(key) and value is True}
     return {
         "reviews": reviews, "seconds": seconds,
         # Reservation is an in-flight promise, not measured consumption. After
@@ -227,6 +231,7 @@ def _workflow(raw: Any, secrets: tuple[str, ...], *, restoring: bool) -> dict[st
         "reserved_seconds_reset_reason": _RESERVATION_REASON,
         "maps": maps, "cache": cache, "cache_settings": fingerprints,
         "validation_retries": validated_retries,
+        "repair_attempts": validated_attempts,
     }
 
 

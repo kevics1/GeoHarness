@@ -547,16 +547,84 @@ def record_map_version(
         return _receipt(job, index, artifact=image)
 
 
-def _matching_version(job: dict[str, Any], image: Path) -> dict[str, Any] | None:
+def _version_image_paths(version: dict[str, Any]) -> set[Path]:
+    """Keep image identity separate from equal pixels in different saved projects."""
+    stages = version.get("stages")
+    stages = stages if isinstance(stages, dict) else {}
+    rendered = stages.get("rendered")
+    paths = [version.get("image_path"),
+             rendered.get("path") if isinstance(rendered, dict) else None]
+    for stage_name in ("packaged", "delivered"):
+        stage = stages.get(stage_name)
+        files = stage.get("files") if isinstance(stage, dict) else None
+        if isinstance(files, list):
+            paths.extend(item["path"] for item in files if isinstance(item, dict)
+                         and isinstance(item.get("path"), str)
+                         and item.get("sha256") == version.get("image_sha256")
+                         and Path(item["path"]).suffix.lower()
+                         in {".png", ".jpg", ".jpeg", ".webp"})
+    return {Path(path).resolve() for path in paths if isinstance(path, str) and path}
+
+
+def _matching_version(
+    job: dict[str, Any], image: Path, *, selected_version: int | None = None,
+    allow_stale_path: bool = False,
+) -> dict[str, Any] | None:
     digest = _sha(image)
-    return next(
-        (
-            version
-            for version in reversed(job["versions"])
-            if digest and version.get("image_sha256") == digest
-        ),
-        None,
-    )
+    versions = job.get("versions")
+    versions = [v for v in versions if isinstance(v, dict)] if isinstance(versions, list) else []
+    if selected_version is not None:
+        return next((v for v in versions if type(selected_version) is int
+                     and v.get("version") == selected_version
+                     and digest and v.get("image_sha256") == digest), None)
+    exact = [v for v in versions if image.resolve() in _version_image_paths(v)]
+    bound = [v for v in exact if digest and v.get("image_sha256") == digest]
+    if bound:
+        return bound[-1]
+    if exact and allow_stale_path:
+        return exact[-1]
+    matches = [v for v in versions if digest and v.get("image_sha256") == digest]
+    # A copied image alone cannot distinguish equal previews with different QGS files.
+    return matches[0] if len(matches) == 1 else None
+
+
+def record_map_selection(
+    job_id: str, metadata: dict[str, Any], *, cwd: Path, config: GeoConfig,
+    image_path: Path, project_dir: Path | None = None, selected_version: int | None = None,
+) -> dict[str, Any]:
+    """Relocate identical selected artifacts without manufacturing a render version."""
+    with _LOCK:
+        directory = _directory(cwd, config)
+        job, index = _job(directory, job_id), _index(directory)
+        image = _path(image_path, cwd)
+        version = _matching_version(job, image, selected_version=selected_version)
+        if version is None:
+            raise ValueError("Selected image is not an existing map version")
+        previous = version["stages"]["packaged"]
+        if previous.get("status") != "passed" or _stale_files(previous):
+            raise ValueError("Original selected package changed")
+        if project_dir is not None:
+            package, manifest = _package(project_dir, cwd, version["image_sha256"], config)
+
+            def signature(stage: dict) -> list:
+                root = Path(stage["project_dir"]).resolve()
+                return sorted((Path(f["path"]).resolve().relative_to(root).as_posix(), f["sha256"])
+                              for f in stage.get("files", []))
+
+            if package.get("status") != "passed" or signature(package) != signature(previous):
+                raise ValueError("Selected copy must preserve every package file SHA256")
+            version["stages"]["packaged"] = package
+            root = _path(project_dir, cwd)
+            for name in (manifest.get("project_file"), manifest.get("preview")):
+                if isinstance(name, str):
+                    path = (root / name).resolve()
+                    if path.is_relative_to(root) and (digest := _sha(path)):
+                        _register(index, job_id, path, digest)
+        version["image_path"] = str(image)
+        _register(index, job_id, image, version["image_sha256"])
+        _save(directory, job, index)
+        _sync_state(metadata, cwd, directory, index)
+        return _receipt(job, index, artifact=image, selected_version=version["version"])
 
 
 def record_map_review(
@@ -679,7 +747,7 @@ def _stale_files(stage: dict[str, Any]) -> bool:
 
 def _receipt(
     job: dict[str, Any], index: dict[str, Any], *, artifact: Path | None = None,
-    include_candidate: bool = True,
+    include_candidate: bool = True, selected_version: int | None = None,
 ) -> dict[str, Any]:
     result = copy.deepcopy(job)
     aliases = [alias for alias, job_id in index["aliases"].items() if job_id == job["job_id"]]
@@ -694,23 +762,9 @@ def _receipt(
     result["artifact_registered"] = artifact is None
     if artifact is not None:
         actual_digest = _sha(artifact)
-        selected = next(
-            (
-                item
-                for item in reversed(result["versions"])
-                if actual_digest and item.get("image_sha256") == actual_digest
-            ),
-            None,
-        )
-        if selected is None:
-            selected = next(
-                (
-                    item
-                    for item in reversed(result["versions"])
-                    if item.get("image_path") == str(artifact)
-                ),
-                None,
-            )
+        selected = _matching_version(result, artifact, selected_version=selected_version,
+                                     allow_stale_path=True)
+        version = selected
         if selected is not None:
             version = selected
             # A path still identifies stale history after an in-place user edit,
@@ -775,15 +829,25 @@ def _receipt(
 
 
 def _delivery_candidate(job: dict[str, Any], index: dict[str, Any]) -> dict | None:
-    """Prefer verified visuals; otherwise use the last unchanged measured-layout pass."""
-    draft = None
+    """Compare retained content and real quality; unknown visuals are never zero defects."""
+    candidates = []
+    maximum_visible: dict[int, int] = {}
+    for version in job["versions"]:
+        report = version.get("stages", {}).get("data_checked", {}).get("report", {})
+        checks = report.get("frame_checks", {}).get("layers", [])
+        for layer in checks:
+            if layer.get("required") and isinstance(layer.get("visible_feature_count"), int):
+                source = layer.get("source_index")
+                if isinstance(source, int):
+                    maximum_visible[source] = max(maximum_visible.get(source, 0),
+                                                  layer["visible_feature_count"])
     for version in reversed(job["versions"]):
         checked = _receipt({**job, "versions": [version]}, index, include_candidate=False)
         stages = checked["stages"]
         if (stages["rendered"]["status"] != "passed"
                 or stages["layout_checked"]["status"] != "passed"
                 or stages["data_checked"]["status"] in {"issues", "stale", "failed"}
-                or stages["visual_checked"]["status"] in {"issues", "stale"}
+                or stages["visual_checked"]["status"] == "stale"
                 or stages["packaged"].get("project_dir")
                 and stages["packaged"]["status"] != "passed"):
             continue
@@ -791,17 +855,28 @@ def _delivery_candidate(job: dict[str, Any], index: dict[str, Any]) -> dict | No
             "image_path", "image_sha256", "project_dir", "quality_status",
         )}
         reference = stages["visual_checked"].get("report_reference", {})
-        if stages["visual_checked"]["status"] == "passed" and reference.get("path"):
+        if reference.get("path"):
             candidate["review_path"] = reference["path"]
+        report = stages["data_checked"].get("report", {})
+        frame_checks = report.get("frame_checks", {})
+        visible = {layer.get("source_index"): layer.get("visible_feature_count", 0)
+                   for layer in frame_checks.get("layers", []) if layer.get("required")}
+        coverage = min((visible.get(source, 0) / count for source, count in maximum_visible.items()
+                        if count > 0), default=1.0)
+        visual = stages["visual_checked"]
+        issues = visual.get("report", {}).get("issues", [])
+        errors = sum(issue.get("severity") == "error" for issue in issues)
+        warnings = sum(issue.get("severity") == "warning" for issue in issues)
+        tier = {"passed": 3, "issues": 2, "unverified": 1}.get(visual["status"], 0)
+        candidate.update(visual_review_status=visual["status"], retained_coverage=coverage,
+                         coverage_scope=("required_native_frame_union"
+                                         if maximum_visible else "unknown"))
         candidate.update(version=version["version"], reason=(
-            "Unchanged image with a measured layout pass; visual/data checks keep their "
-            "actual statuses. A newer version does not automatically replace this candidate."
+            "Selected unchanged measured-layout candidate by required retained coverage, "
+            "completed visual evidence and defect severity; all stage statuses stay truthful."
         ))
-        if checked["quality_status"] == "passed":
-            return candidate
-        if draft is None:
-            draft = candidate
-    return draft
+        candidates.append(((coverage, tier, -errors, -warnings, version["version"]), candidate))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def map_job_receipt(

@@ -122,6 +122,10 @@ class MapReviewConfig(BaseModel):
     timeout_seconds: float = Field(default=90, gt=0, le=300)
     max_tokens: int = Field(default=8192, ge=256, le=65536)
     max_image_side: int = Field(default=1800, ge=256, le=4096)
+    auto_repair: bool = True
+    max_rois: int = Field(default=5, ge=0, le=8)
+    roi_max_side: int = Field(default=2048, ge=256, le=4096)
+    max_border_fraction: float = Field(default=0.08, gt=0, le=0.25)
     diagnostics_max_chars: int = Field(default=2048, ge=128, le=8192)
     max_validation_errors: int = Field(default=12, ge=1, le=50)
     layout: MapLayout = Field(default_factory=MapLayout)

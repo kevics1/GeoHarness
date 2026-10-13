@@ -20,9 +20,10 @@ from geoharness.config.settings import GeoConfig
 # Runtime synchronization belongs outside JSON-persisted tool metadata. Weak
 # references release locks after active calls finish; cache entries stay in state.
 _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
+_REPAIR_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 # Bump only when the response contract/compatibility changes. Legacy failed
 # cache entries can then recover without repeatedly resending unchanged images.
-REVIEW_CONTRACT_VERSION = 4
+REVIEW_CONTRACT_VERSION = 5
 _BUDGET_LOCK = threading.RLock()
 
 
@@ -39,6 +40,7 @@ def reset_map_workflow(metadata: dict[str, Any]) -> None:
             cache={},
             cache_settings={},
             validation_retries={},
+            repair_attempts={},
         )
         if isinstance(metadata.get("map_job_state"), dict):
             metadata["map_job_state"].pop("budget_job_id", None)
@@ -55,7 +57,27 @@ def _state(metadata: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("cache", {})
     state.setdefault("cache_settings", {})
     state.setdefault("validation_retries", {})
+    state.setdefault("repair_attempts", {})
     return state
+
+
+def repair_loop_lock(metadata: dict[str, Any], map_id: str) -> asyncio.Lock:
+    key = (id(_state(metadata)), map_id)
+    lock = _REPAIR_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _REPAIR_LOCKS[key] = lock
+    return lock
+
+
+def claim_repair_attempt(metadata: dict[str, Any], digest: str) -> bool:
+    """A failed refunded plan must not loop, including after a resumed query."""
+    with _BUDGET_LOCK:
+        attempts = _state(metadata)["repair_attempts"]
+        if digest in attempts:
+            return False
+        attempts[digest] = True
+        return True
 
 
 def map_identity(name: str) -> str:
@@ -274,6 +296,9 @@ async def _review_once(
                 "max_tokens": settings.max_tokens,
                 "timeout_seconds": settings.timeout_seconds,
                 "max_image_side": settings.max_image_side,
+                "max_rois": getattr(settings, "max_rois", 5),
+                "roi_max_side": getattr(settings, "roi_max_side", 2048),
+                "native_evidence": evidence.get("render_metadata", {}),
                 "request_extra_body": settings.request_extra_body,
             },
             sort_keys=True,

@@ -15,6 +15,77 @@ from geoharness.qgis.discovery import discover_qgis
 from geoharness.tools.geo_cartography import GeoCartographyInput, GeoCartographyTool
 
 
+@pytest.mark.parametrize("deny_review", [False, True])
+async def test_bridge_native_repair_keeps_matching_selected_package_without_extra_version(
+    tmp_path, deny_review,
+):
+    from openharness.api.client import ApiMessageCompleteEvent
+    from openharness.api.usage import UsageSnapshot
+    from openharness.engine.messages import ConversationMessage, ToolUseBlock
+
+    from geoharness.runtime import _build_permission_checker
+
+    config = GeoConfig()
+    try:
+        discover_qgis(config.qgis, cwd=tmp_path)
+    except (ValueError, OSError):
+        pytest.skip("QGIS runtime unavailable")
+    source = tmp_path / "areas.geojson"
+    gpd.GeoDataFrame({"risk": ["High", "Low"]},
+        geometry=[box(100, 25, 101, 26), box(101, 25, 102, 26)], crs=4326).to_file(source)
+
+    class ReviewClient:
+        calls = 0
+
+        async def stream_message(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                (tmp_path / "exports/map.png").write_bytes(b"user-edited-preview")
+                roi = next(json.loads(block.text) for block in request.messages[0].content
+                           if getattr(block, "type", "") == "text"
+                           and block.text.startswith('{"roi_ref": "legend"'))
+                payload = {"status": "issues", "summary": "测试图例字号修正", "issues": [{
+                    "issue_id": "legend-size", "severity": "warning",
+                    "issue_code": "legend_mismatch", "description": "测试图例字号不足",
+                    "frame_id": "legend", "roi_ref": roi["roi_ref"],
+                    "bbox": [.1, .1, .9, .9], "source_indices": [0]}],
+                    "qgis_patch": {"issue_ids": ["legend-size"],
+                                   "layout": {"legend_font_size_pt": 12}}}
+            else:
+                payload = {"status": "passed", "summary": "离线测试审查通过", "issues": []}
+            yield ApiMessageCompleteEvent(message=ConversationMessage(role="assistant", content=[
+                ToolUseBlock(id=f"review-{self.calls}", name="record_map_review", input=payload)]),
+                usage=UsageSnapshot(), stop_reason="tool_calls")
+
+    client = ReviewClient()
+    checker = _build_permission_checker(config)
+    if deny_review:
+        checker._settings.denied_tools.append("geo_map_review")
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config,
+        "map_review_client": client, "geoharness_permission_checker": checker})
+    rendered = await GeoCartographyTool().execute(GeoCartographyInput(
+        title="工程配对测试", map_crs="EPSG:4326", output_path="exports/map.png",
+        project_output_dir="exports/editable", layers=json.dumps([{
+            "file_path": str(source), "field_name": "risk", "categories": [
+                {"value": "High", "label": "高", "color": "#ff0000"},
+                {"value": "Low", "label": "低", "color": "#00ff00"}]}])), context)
+    assert not rendered.is_error, rendered.output
+    metadata = rendered.metadata
+    assert client.calls == (0 if deny_review else 2)
+    assert metadata["repair_count"] == (0 if deny_review else 1)
+    assert metadata["review_status"] == ("unverified" if deny_review else "passed")
+    package = Path(metadata["project_dir"])
+    assert package.is_relative_to(tmp_path / "exports")
+    manifest = json.loads((package / "project.json").read_text(encoding="utf-8"))
+    assert hashlib.sha256(Path(metadata["primary_map"]).read_bytes()).hexdigest() == (
+        manifest["preview_sha256"])
+    assert len(metadata["map_receipt"]["versions"]) == (1 if deny_review else 2)
+    if not deny_review:
+        assert manifest["layout"]["effective_parameters"]["legend_font_size_pt"] == 12
+        assert (tmp_path / "exports/map.png").read_bytes() == b"user-edited-preview"
+        assert Path(metadata["primary_map"]) != tmp_path / "exports/map.png"
+
+
 def test_default_static_renderer_is_qgis():
     assert GeoConfig().cartography.static_renderer == "qgis"
 

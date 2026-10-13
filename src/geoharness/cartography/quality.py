@@ -6,9 +6,10 @@ import asyncio
 import base64
 import io
 import json
+import math
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from openharness.api.client import ApiMessageCompleteEvent, ApiMessageRequest
 from openharness.api.openai_client import (
@@ -61,6 +62,8 @@ class QgisSymbolPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     size_mm: float | None = Field(default=None, gt=0, le=50)
     width_mm: float | None = Field(default=None, ge=0, le=20)
+    fill_opacity: float | None = Field(default=None, ge=0, le=1)
+    outline_color: str | None = None
     opacity: float | None = Field(
         default=None, gt=0, le=1, description="Keep the layer visible; never hide required content."
     )
@@ -102,18 +105,20 @@ class QgisLayerPatch(BaseModel):
 
 
 class QgisPresentationPatch(BaseModel):
-    """Executable suggestions for the next create call; this review does not apply them."""
+    """Evidence-bound presentation suggestions consumed by the automatic repair loop."""
 
     model_config = ConfigDict(extra="forbid")
     layout: QgisLayoutPatch | None = None
     dpi: int | None = Field(default=None, ge=36, le=600)
     layers: list[QgisLayerPatch] = Field(default_factory=list, max_length=64)
+    issue_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class ReviewStrategy(BaseModel):
     model_config = ConfigDict(extra="forbid")
     strategy: Literal["adjust_presentation", "detail_map", "split_maps"]
     reason: str = Field(min_length=1, max_length=240)
+    issue_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class MapIssue(BaseModel):
@@ -121,6 +126,19 @@ class MapIssue(BaseModel):
     severity: Literal["error", "warning", "info"]
     description: str
     location: str = ""
+    issue_id: str = Field(default="", max_length=80)
+    frame_id: str = Field(default="", max_length=80)
+    roi_ref: str = Field(default="", max_length=100)
+    bbox: list[Annotated[float, Field(ge=0, le=1)]] | None = Field(
+        default=None, min_length=4, max_length=4,
+        description="[left,top,right,bottom] normalized within the referenced original pixel ROI.",
+    )
+    source_indices: list[Annotated[int, Field(strict=True, ge=0)]] = Field(
+        default_factory=list, max_length=64,
+    )
+    fact_refs: list[str] = Field(default_factory=list, max_length=12)
+    evidence_kind: Literal["pixel", "native", "semantic"] = "pixel"
+    native_assertion: Literal["none", "legend_node_absent", "focus_off_center"] = "none"
     issue_code: Literal[
         "label_overlap", "symbol_overlap", "label_missing", "layer_occlusion",
         "extent_whitespace", "footer_density", "legend_mismatch", "other",
@@ -235,16 +253,18 @@ def _filter_qgis_layer_patches(
 ) -> None:
     """Discard only suggestions that cannot apply to their verified native layer."""
     layers = layers if isinstance(layers, list) else []
+    by_index = {layer.get("source_index", index): layer for index, layer in enumerate(layers)
+                if isinstance(layer, dict)}
     kept = []
     ignored = []
     fields = []
     for suggestion in patch.layers:
         index = suggestion.layer_index
-        if index >= len(layers) or not isinstance(layers[index], dict):
+        if index not in by_index:
             ignored.append({**suggestion.model_dump(exclude_none=True),
                             "reason": "Layer index has no verified rendering metadata."})
             continue
-        layer = layers[index]
+        layer = by_index[index]
         if layer.get("kind") == "raster":
             ignored.append({**suggestion.model_dump(exclude_none=True),
                             "reason": "Vector symbol and label parameters do not apply to raster."})
@@ -320,6 +340,131 @@ def _image_block(path: Path, max_side: int) -> ImageBlock:
     return ImageBlock(media_type="image/png", data=base64.b64encode(buffer.getvalue()).decode())
 
 
+def _review_images(path: Path, evidence: dict[str, Any], settings: Any) -> tuple[list, list]:
+    """Crop measured native regions from the same PNG, without resampling fine text."""
+    from PIL import Image
+
+    blocks, catalog = [], []
+    metadata = evidence.get("render_metadata") or {}
+    layout = metadata.get("layout") or {}
+    regions = dict(layout.get("regions") or {})
+    native_frames = (metadata.get("native_facts") or {}).get("frames") or {}
+    for name, frame in native_frames.items():
+        if isinstance(frame, dict) and isinstance(frame.get("rect_mm"), list):
+            regions[name] = frame["rect_mm"]
+        else:
+            regions.pop(name, None)
+    for name, legend in (layout.get("legends") or {}).items():
+        if isinstance(legend.get("rect_mm"), list):
+            regions[name] = legend["rect_mm"]
+        else:
+            regions.pop(name, None)
+    if metadata.get("creation_spec_available") is False:
+        regions.pop("footer", None)  # Legacy custom-property regions may describe an older layout.
+    page = layout.get("effective_parameters") or layout.get("creation_parameters") or {}
+    max_rois = getattr(settings, "max_rois", 5)
+    max_side = getattr(settings, "roi_max_side", 2048)
+    with Image.open(path) as opened:
+        image = opened.convert("RGB")
+        width, height = image.size
+        catalog.append({"roi_ref": "whole", "frame_id": "whole",
+                        "pixel_bbox": [0, 0, width, height], "original_size": [width, height],
+                        "resampled": max(width, height) > settings.max_image_side})
+        blocks.extend([TextBlock(text=json.dumps(catalog[0])),
+                       _image_block(path, settings.max_image_side)])
+        page_width, page_height = page.get("width_mm"), page.get("height_mm")
+        if not (isinstance(page_width, (int, float)) and page_width > 0
+                and isinstance(page_height, (int, float)) and page_height > 0):
+            return blocks, catalog
+        candidates = []
+        for name in ("main_map", "detail_map", "legend", "footer"):
+            rect = regions.get(name)
+            if not (isinstance(rect, list) and len(rect) == 4
+                    and all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect)):
+                continue
+            x, y, w, h = rect
+            box = [max(0, math.floor(x * width / page_width)),
+                   max(0, math.floor(y * height / page_height)),
+                   min(width, math.ceil((x + w) * width / page_width)),
+                   min(height, math.ceil((y + h) * height / page_height))]
+            if box[0] < box[2] and box[1] < box[3]:
+                candidates.append((name, box))
+        used = 0
+        for position, (name, box) in enumerate(candidates):
+            if used >= max_rois:
+                break
+            left, top, right, bottom = box
+            columns = math.ceil((right - left) / max_side)
+            rows = math.ceil((bottom - top) / max_side)
+            available = max_rois - used - (len(candidates) - position - 1)
+            complete = columns * rows <= max(1, available)
+            if complete:
+                boxes = [[x, y, min(x + max_side, right), min(y + max_side, bottom)]
+                         for y in range(top, bottom, max_side)
+                         for x in range(left, right, max_side)]
+            else:
+                # Keep an original-resolution central ROI, and expose the uncovered edges.
+                x = left + max(0, right - left - max_side) // 2
+                y = top + max(0, bottom - top - max_side) // 2
+                boxes = [[x, y, min(x + max_side, right), min(y + max_side, bottom)]]
+            for index, crop_box in enumerate(boxes):
+                crop = image.crop(crop_box)
+                buffer = io.BytesIO()
+                crop.save(buffer, format="PNG")
+                record = {"roi_ref": name if len(boxes) == 1 else f"{name}:{index + 1}",
+                          "frame_id": name, "pixel_bbox": crop_box, "region_bbox": box,
+                          "original_size": [width, height], "resampled": False,
+                          "region_fully_covered": complete}
+                catalog.append(record)
+                blocks.extend([TextBlock(text=json.dumps(record)), ImageBlock(
+                    media_type="image/png", data=base64.b64encode(buffer.getvalue()).decode())])
+                used += 1
+    return blocks, catalog
+
+
+def _reconcile_native_assertions(result: MapReview, evidence: dict, diagnostics: dict) -> None:
+    """Quarantine contradicted engineering assertions, while retaining pixel issues."""
+    metadata = evidence.get("render_metadata") or {}
+    facts = metadata.get("native_facts") or {}
+    disputed = []
+    for issue in result.issues:
+        if issue.native_assertion == "legend_node_absent":
+            rows = [row for legend in (metadata.get("layout") or {}).get("legends", {}).values()
+                    for row in legend.get("rows", [])]
+            present = any(row.get("layer_index") in issue.source_indices and row.get("text")
+                          for row in rows)
+            if present:
+                disputed.append({"issue_id": issue.issue_id,
+                    "reason": "Native legend has text nodes; pixel legibility remains separate."})
+        elif issue.native_assertion == "focus_off_center":
+            frame = facts.get("frames", {}).get(issue.frame_id, {})
+            center = None
+            box, extent = frame.get("focus_bbox"), frame.get("extent")
+            if box and extent and extent[2] > extent[0] and extent[3] > extent[1]:
+                center = [((box[0] + box[2]) / 2 - extent[0]) / (extent[2] - extent[0]),
+                          ((box[1] + box[3]) / 2 - extent[1]) / (extent[3] - extent[1])]
+            elif metadata.get("creation_spec_available"):
+                center = (metadata.get("layout_plan") or {}).get("frames", {}).get(
+                    issue.frame_id, {}).get("normalized_center")
+            roi = next((r for r in diagnostics.get("review_rois", [])
+                        if r.get("frame_id") == issue.frame_id and r.get("region_bbox")), None)
+            if center and roi:
+                region = roi["region_bbox"]
+                tolerance = [1 / (region[2] - region[0]), 1 / (region[3] - region[1])]
+                if all(abs(c - .5) <= t for c, t in zip(center, tolerance)):
+                    disputed.append({"issue_id": issue.issue_id, "normalized_center": center,
+                        "reason": "Native focus is centred; occupancy remains separate."})
+    if disputed:
+        diagnostics["disputed_native_assertions"] = disputed
+        ids = {item["issue_id"] for item in disputed}
+        if result.qgis_patch and ids.intersection(result.qgis_patch.issue_ids):
+            diagnostics["ignored_qgis_patch"] = result.qgis_patch.model_dump(exclude_none=True)
+            result.qgis_patch = None
+        if result.next_strategy and ids.intersection(result.next_strategy.issue_ids):
+            diagnostics["ignored_next_strategy"] = result.next_strategy.model_dump()
+            result.next_strategy = None
+
+
 async def review_map(
     path: Path,
     *,
@@ -337,7 +482,8 @@ async def review_map(
     if isinstance(render_layers, list):
         evidence["render_metadata"] = {
             **render_metadata,
-            "layers": [{**layer, "layer_index": index} if isinstance(layer, dict) else layer
+            "layers": [{**layer, "layer_index": layer.get("source_index", index)}
+                       if isinstance(layer, dict) else layer
                        for index, layer in enumerate(render_layers)],
         }
     secrets = _review_secrets(config)
@@ -375,6 +521,13 @@ async def review_map(
         "passed仅在没有error或warning且可完成视觉检查时使用；否则issues或unverified。"
         "summary不超过80个汉字，issues最多5条，每条description不超过60个汉字。"
         "不要复述任务/图层列表，语言混用等风格偏好不能独立判为warning。"
+        "每个可修复问题必须给唯一issue_id、frame_id、roi_ref、原图ROI内归一化bbox、"
+        "准确source_indices；patch和next_strategy必须用issue_ids引用对应问题。"
+        "native工程事实与pixel视觉判断分开：legend节点存在不证明文字像素可读，"
+        "renderer颜色不证明叠加后编码可见。native_assertion只描述可直接核验的工程断言；"
+        "focus已居中不能据偏移印象改中心，仍可指出占幅。"
+        "layer_occlusion不能自动增粗描边；核对描边相对实际纸面面宽及同位置点的真实"
+        "绘制顺序/符号fill alpha，保留原分类编码。无坐标或几何证据不改范围/分类。"
         "通过record_map_review提交结构化结论。该工具只记录检查结果，不执行任何动作。"
         + (
             "当前后端为QGIS。仅用qgis_patch建议原生参数，长度用mm、字号用pt；"
@@ -415,7 +568,9 @@ async def review_map(
 
         async def collect() -> str:
             diagnostics["stage"] = "image"
-            block = await asyncio.to_thread(_image_block, path, settings.max_image_side)
+            image_content, catalog = await asyncio.to_thread(
+                _review_images, path, evidence, settings)
+            diagnostics["review_rois"] = catalog
             schema = _review_schema(backend)
             tool = {
                 "name": "record_map_review", "description": "Record the completed visual review.",
@@ -423,7 +578,8 @@ async def review_map(
             }
             request = ApiMessageRequest(
                 model=settings.model or config.model,
-                messages=[ConversationMessage.from_user_content([TextBlock(text=prompt), block])],
+                messages=[ConversationMessage.from_user_content([TextBlock(text=prompt),
+                                                                 *image_content])],
                 max_tokens=settings.max_tokens,
                 tools=[tool],
             )
@@ -433,10 +589,11 @@ async def review_map(
                 params: dict[str, Any] = {
                     "model": request.model,
                     "messages": [{"role": "user", "content": [
-                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": content.text}
+                        if isinstance(content, TextBlock) else
                         {"type": "image_url", "image_url": {
-                            "url": f"data:{block.media_type};base64,{block.data}",
-                        }},
+                            "url": f"data:{content.media_type};base64,{content.data}",
+                        }} for content in [TextBlock(text=prompt), *image_content]
                     ]}],
                     "stream": False,
                     "tools": [{"type": "function", "function": {
@@ -553,6 +710,7 @@ async def review_map(
             issue.severity in {"error", "warning"} for issue in result.issues
         ):
             result.status = "issues"
+        _reconcile_native_assertions(result, evidence, diagnostics)
         return result
     except asyncio.CancelledError:
         raise

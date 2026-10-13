@@ -115,6 +115,7 @@ class GeoQueryEngine(QueryEngine):
         resumes or finalizes the async generator. The state object outlives the
         binding, so tool follow-ups and explicit pending continuations share it.
         """
+        self.tool_metadata["geoharness_permission_checker"] = self._permission_checker
         client = self._api_client
         scope = getattr(client, "query_recovery_scope", None)
         state = getattr(self, "_query_recovery_state", None)
