@@ -484,6 +484,13 @@ def record_map_version(
         package, manifest = _package(project_dir, cwd, digest, config)
         previous = job["versions"][-1] if job["versions"] else None
         same = previous is not None and digest and previous.get("image_sha256") == digest
+        if (same and previous.get("image_path") != str(image) and project_dir is not None
+                and previous["stages"]["packaged"].get("files")
+                and _package_signature(previous["stages"]["packaged"])
+                != _package_signature(package)):
+            # Equal pixels do not prove equal data/project evidence. A new export
+            # package must not overwrite the verified historical candidate.
+            same = False
         if same:
             version = previous
         else:

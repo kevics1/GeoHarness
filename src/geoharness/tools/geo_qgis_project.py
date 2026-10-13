@@ -321,6 +321,9 @@ class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["create", "inspect", "export", "preflight"]
+    plan_ref: str = Field(default="", description=(
+        "Returned preflight plan_ref. create accepts only action+plan_ref and revalidates sources."
+    ))
     layers: list[QgisProjectLayer] = Field(
         default_factory=list,
         max_length=64,
@@ -372,6 +375,11 @@ class GeoQgisProjectInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
+        if self.plan_ref:
+            if self.action != "create" or self.model_fields_set - {"action", "plan_ref"}:
+                raise ValueError("plan_ref create accepts only action and plan_ref; "
+                                 "preflight changes first")
+            return self
         if self.action in {"create", "preflight"}:
             if not self.layers:
                 raise ValueError("create requires at least one local layer")
@@ -444,6 +452,9 @@ class GeoQgisProjectTool(BaseTool):
         "duplicate_error_blocked requires changing the diagnosed arguments or input data. "
         "Network/database layers are unsupported. Outputs are drafts until geo_map_review "
         "checks actual pixels. Keep the same map_id and use geo_deliver for final delivery."
+        " Preflight with layout returns plan_ref and an exact readable report_path; "
+        "create with only action+plan_ref avoids repeating checked layer arrays/layout_plan. "
+        "file_path accepts registered data: references; stale/unknown references are rejected."
     )
     input_model = GeoQgisProjectInput
 
@@ -454,6 +465,25 @@ class GeoQgisProjectTool(BaseTool):
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        if arguments.plan_ref:
+            from geoharness.qgis.prepared import load_preflight
+
+            try:
+                packet = load_preflight(arguments.plan_ref, cwd=context.cwd, settings=config.qgis)
+                arguments = GeoQgisProjectInput.model_validate({**packet["parameters"],
+                                                                "action": "create"})
+            except (OSError, ValueError) as exc:
+                return ToolResult(output=f"Error: prepared preflight failed: {exc}", is_error=True,
+                                  metadata={"deterministic_error": True, "render_executed": False})
+        from geoharness.data.task_context import resolve_registered_path
+
+        try:
+            arguments = arguments.model_copy(update={"layers": [layer.model_copy(update={
+                "file_path": resolve_registered_path(layer.file_path, context.metadata,
+                    cwd=Path(context.cwd), config=config)}) for layer in arguments.layers]})
+        except (OSError, ValueError) as exc:
+            return ToolResult(output=f"Error: data reference failed: {exc}", is_error=True,
+                              metadata={"render_executed": False})
         if not config.qgis.enabled and arguments.action != "preflight":
             return ToolResult(output="Error: QGIS integration is disabled.", is_error=True)
         if arguments.action == "create" or (
@@ -468,6 +498,7 @@ class GeoQgisProjectTool(BaseTool):
     async def _execute(self, arguments, context, snapshot_directory=None,
                        *, source_bindings=None) -> ToolResult:
         config = context.metadata["geoharness_config"]
+        requested = arguments.model_dump(exclude={"action", "plan_ref"}, exclude_unset=True)
         preflight = None
         if arguments.action in {"create", "preflight"}:
             try:
@@ -570,8 +601,28 @@ class GeoQgisProjectTool(BaseTool):
             elif arguments.layout is not None:
                 preflight["layout"] = {"bounds_check": {"checked": False, "valid": None},
                                        "reason": "QGIS is disabled"}
-            return ToolResult(output=json.dumps(preflight, ensure_ascii=False, indent=2),
-                              metadata={"preflight": preflight, "render_executed": False})
+            from geoharness.qgis.prepared import save_preflight, summary
+
+            if arguments.layout is None and len(json.dumps(preflight, ensure_ascii=False)) <= 6000:
+                return ToolResult(output=json.dumps(preflight, ensure_ascii=False, indent=2),
+                                  metadata={"preflight": preflight, "render_executed": False})
+            if preflight.get("layout_plan"):
+                requested.setdefault("layout", {})["layout_plan"] = preflight["layout_plan"]
+            try:
+                reference, report_path = save_preflight(requested, preflight, cwd=context.cwd,
+                                                        settings=config.qgis)
+            except (OSError, ValueError) as exc:
+                return ToolResult(output=f"Error: QGIS preflight report could not be saved: {exc}",
+                    is_error=True, metadata={"render_executed": False,
+                                            "preflight_status": "failed"})
+            # Keep small legacy reports readable inline; large reports use an exact capsule.
+            visible = summary(preflight, reference, report_path)
+            if len(json.dumps(preflight, ensure_ascii=False)) <= 6000:
+                visible = {**preflight, **{key: visible[key] for key in (
+                    "plan_ref", "report_path", "create_call", "note")}}
+            return ToolResult(output=json.dumps(visible, ensure_ascii=False, indent=2),
+                metadata={"preflight": preflight, "render_executed": False,
+                          "plan_ref": reference, "report_path": str(report_path)})
         identity = arguments.map_id or map_identity(
             arguments.title or Path(arguments.project_path).stem or "qgis-map"
         )
@@ -638,8 +689,10 @@ class GeoQgisProjectTool(BaseTool):
                     "render_executed": result.get("status") == "succeeded" and reserved}
         if metadata.get("project_file"):
             metadata["qgis_project"] = metadata["project_file"]
+        from geoharness.qgis.prepared import execution_summary
+
         response = ToolResult(
-            output=json.dumps(result, ensure_ascii=False, indent=2),
+            output=json.dumps(execution_summary(result), ensure_ascii=False, indent=2),
             is_error=result.get("status") != "succeeded",
             metadata=metadata,
         )

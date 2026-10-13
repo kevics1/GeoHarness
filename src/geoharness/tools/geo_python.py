@@ -292,7 +292,11 @@ class GeoPythonTool(BaseTool):
         if qgis_directory:
             qgis_root = Path(qgis_directory).expanduser()
             qgis_root = qgis_root if qgis_root.is_absolute() else context.cwd / qgis_root
-            diagnostic_files = qgis_diagnostic_files(qgis_root) + registered_review_files(
+            from geoharness.qgis.prepared import diagnostic_files as prepared_diagnostics
+
+            diagnostic_files = (qgis_diagnostic_files(qgis_root)
+                                + prepared_diagnostics(cwd=context.cwd, settings=config.qgis))
+            diagnostic_files += registered_review_files(
                 qgis_root, context, config)
         try:
             from geoharness.data.profiles import current_profiles

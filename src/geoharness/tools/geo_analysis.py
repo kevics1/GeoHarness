@@ -125,6 +125,18 @@ class GeoAnalysisTool(BaseTool):
         from geoharness.analysis import analyze_vectors
 
         config = context.metadata.get("geoharness_config")
+        from geoharness.data.task_context import resolve_registered_path
+
+        try:
+            updates = {}
+            for name in ("source", "reference", "zones"):
+                source = getattr(arguments, name)
+                if source and source.file_path:
+                    updates[name] = source.model_copy(update={"file_path": resolve_registered_path(
+                        source.file_path, context.metadata, cwd=Path(context.cwd), config=config)})
+            arguments = arguments.model_copy(update=updates)
+        except (OSError, ValueError) as exc:
+            return ToolResult(output=f"Error: data reference failed: {exc}", is_error=True)
         analysis = getattr(config, "analysis", None)
         outputs_dir = getattr(analysis, "outputs_dir", ".geoharness/analysis")
         metric_crs = getattr(analysis, "metric_crs", "")

@@ -35,7 +35,7 @@ geo_cartography 的 export/full 渲染并生成可编辑 QGIS 工程，symbolize
 {"action":"export","output_format":"png","title":"影响范围分析","review_task":"检查危险区、受影响居民点和行政区是否清楚可见，图例是否对应","layers":"[{\"file_path\":\"行政区.geojson\",\"label\":\"行政区\",\"color\":\"#dbe8f2\"},{\"file_path\":\"危险区.geojson\",\"label\":\"危险区\",\"color\":\"#d7301f\"},{\"file_path\":\"affected.geojson\",\"label\":\"受影响居民点\",\"color\":\"#ff7f00\"}]"}
 ```
 
-`geo_cartography(action="preflight")` 与 `geo_qgis_project(action="preflight")` 只核对实际数据，不绘图、不生成工程、不消耗成图或视觉预算。新建图在预留预算前自动执行同样检查：符号/标签字段、分类/分级与数值类型、几何、CRS、范围、指定总数和主/详图几何相交数量。缺项应修正参数或数据副本，不能跳过检查后宣称通过。
+`geo_cartography(action="preflight")` 与 `geo_qgis_project(action="preflight")` 只核对实际数据，不绘图、不生成工程。新建图在渲染前自动执行同样检查：符号/标签字段、分类/分级与数值类型、几何、CRS、范围、指定总数和主/详图几何相交数量。缺项应修正参数或数据副本，不能跳过检查后宣称通过。
 
 显式 map_extent 使用 GIS 顺序 `[xmin,ymin,xmax,ymax]` 或同名对象，同时声明 map_crs（直接 QGIS 为 crs）；detail_extent 是同显示坐标系的同名对象。imshow.extent 的顺序为 `[xmin,xmax,ymin,ymax]`，不能直接复用 GIS 四元组。未指定显示 CRS 时取栅格或首图层 CRS。计量 CRS 与显示 CRS 分开，显示投影不证明距离单位正确。
 
@@ -74,6 +74,8 @@ PDF/SVG 使用同参数 PNG 预览检查，不能替代导出文件自身的排�
 geo_python 生成图片后调用 geo_map_review(file_path=..., task=..., evidence=..., map_id=...)，使用与 Python 相同的 map_id。合并处理具体错误。保留脚本、产物和报告；未解决问题与地图一起说明，不因布局建议修改分析结果。
 
 密集标注优先使用每框职责：main_frame/detail_frame分别设置focus_layers、render_layers、label_layers。label_layers=[]只关闭本框文字，符号仍保留；不能通过删除必要图层解决压盖。设置detail_minimum_zoom>1并先preflight，确认最终纸面详图确实放大。需要编号时用layer.derivation.number_field生成1..N的地图注记，label_field指向它，layout.label_table绑定该层并列出编号/名称字段及headers；不要把编号名单塞进footer_text。属性表原生测量，放不下时增加表格高度/列数或页面尺寸，不截掉名单。
+
+geo_qgis_project的带布局preflight返回plan_ref、create_call和工作区report_path。直接调用create_call（仅action=create、plan_ref），不重复输出完整图层数组或layout_plan。参数、数据或字体改变时重新preflight；不能改已检查的引用。需要完整指标时读取返回的确切报告，不能猜全局tool_artifacts缓存路径。geo_analysis和geo_qgis_project的file_path可直接使用已登记data:引用，过期/未知引用会拒绝。
 
 一次制图脚本生成多图时，系统只将最后写出的 primary_map 候选登记为一个版本，map_candidates 列出全部图片候选。附件不是连续修订；明确选择需审查/交付的主图。重审已登记旧图只更新该版本检查，不增加成图版本。
 

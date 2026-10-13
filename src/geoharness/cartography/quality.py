@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import io
 import json
 import math
@@ -159,6 +160,31 @@ class MapReview(BaseModel):
 
 class _IncompleteReview(Exception):
     """A known provider completion condition with a safe diagnostic."""
+
+
+def _validate_review(payload: Any) -> tuple[MapReview, list[list]]:
+    """Ignore only empty unknown decorations, never incomplete facts or instructions."""
+    try:
+        return MapReview.model_validate(payload), []
+    except ValidationError as exc:
+        errors = exc.errors(include_context=False, include_url=False)
+        if len(errors) > 20 or any(error["type"] != "extra_forbidden" for error in errors):
+            raise
+        cleaned = copy.deepcopy(payload)
+        ignored = []
+        for error in errors:
+            value = error.get("input")
+            if not (value is None or value == "" or isinstance(value, (dict, list)) and not value):
+                raise exc
+            location = list(error["loc"])
+            parent = cleaned
+            for key in location[:-1]:
+                parent = parent[key]
+            if not isinstance(parent, dict):
+                raise exc
+            parent.pop(location[-1])
+            ignored.append(location)
+        return MapReview.model_validate(cleaned), ignored
 
 
 def _review_secrets(config: GeoConfig) -> tuple[str, ...]:
@@ -680,7 +706,13 @@ async def review_map(
             payload["layout_patch"] = {}
             diagnostics["compatibility_applied"] = ["layout_patch_null_to_empty"]
         diagnostics["stage"] = "schema"
-        result = MapReview.model_validate(payload)
+        result, ignored = _validate_review(payload)
+        if ignored:
+            safe_locations = _redact_review(ignored, secrets)
+            diagnostics["ignored_empty_unknown_fields"] = [
+                [part[:settings.diagnostics_max_chars] if isinstance(part, str) else part
+                 for part in location] for location in safe_locations
+            ]
         diagnostics["outcome"] = "completed"
         result.diagnostics = diagnostics
         diagnostics["raw_review_status"] = result.status

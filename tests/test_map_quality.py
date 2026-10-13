@@ -59,6 +59,37 @@ FIX = {
 }
 
 
+def test_empty_review_decoration_does_not_discard_real_issues():
+    from geoharness.cartography.quality import _validate_review
+
+    payload = {**FIX, "next_strategy": {"strategy": "split_maps", "issue_ids": ["dense"],
+        "reason": "Dense labels", "reason_note": ""}}
+    checked, ignored = _validate_review(payload)
+    assert checked.status == "issues" and checked.issues
+    assert checked.next_strategy.strategy == "split_maps"
+    assert ignored == [["next_strategy", "reason_note"]]
+    assert "reason_note" in payload["next_strategy"]
+    with pytest.raises(ValidationError):
+        _validate_review({**payload, "next_strategy": {**payload["next_strategy"],
+                                                     "reason_note": "change analysis"}})
+    with pytest.raises(ValidationError):
+        _validate_review({"status": "passed", "empty_extra": ""})
+
+
+async def test_empty_unknown_field_names_are_redacted_before_truncation(tmp_path):
+    from PIL import Image
+
+    image = tmp_path / "map.png"
+    Image.new("RGB", (10, 10)).save(image)
+    secret = "synthetic-secret-used-only-in-this-test"
+    config = GeoConfig(api_key=secret, map_review=MapReviewConfig(diagnostics_max_chars=128))
+    result = await review_map(image, config=config, task="Check", evidence={},
+        client=Reviewer([{**PASS, "x" * 120 + secret: ""}]))
+    assert result.status == "passed"
+    locations = result.diagnostics["ignored_empty_unknown_fields"]
+    assert locations == [[("x" * 120 + "[redacted]")[:128]]]
+
+
 @pytest.mark.asyncio
 async def test_known_layout_collision_blocks_visual_call_before_repair(tmp_path):
     from geoharness.cartography.layout import create_map_figure, save_map_figure

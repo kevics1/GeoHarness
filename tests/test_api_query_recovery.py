@@ -110,6 +110,28 @@ async def query_request(client, state, request=None):
     return events
 
 
+async def test_reasoning_mode_recovery_survives_invalid_tool_arguments(monkeypatch):
+    responses = [sse_chunk(reasoning="synthetic", finish="length", usage=(11, 16384)),
+        sse_chunk(text="Prepare map", arguments='{"code":"print(1)", invalid}',
+                  finish="tool_calls", usage=(11, 50)),
+        sse_chunk(arguments='{"code":"print(2)"}', finish="tool_calls", usage=(11, 50)),
+        sse_chunk(text="done", finish="stop", usage=(11, 30))]
+    client, calls = sdk_client(monkeypatch, responses,
+        empty_response_fallback_model="fallback(none)", empty_response_retries=1)
+    state = QueryRecoveryState()
+    try:
+        await query_request(client, state)
+        assert state.fallback_active
+        assert client.last_tool_argument_diagnostics[0]["category"] == "invalid_json"
+        await query_request(client, state)
+        assert not client.last_tool_argument_diagnostics
+        await query_request(client, state)
+        assert [call["model"] for call in calls] == [
+            "primary(max)", "fallback(none)", "fallback(none)", "fallback(none)"]
+    finally:
+        await client._sdk_client.close()
+
+
 @pytest.mark.asyncio
 async def test_sdk_sse_error_preserves_safe_packet_and_exception_metadata(monkeypatch):
     response = "data: " + json.dumps({"error": {

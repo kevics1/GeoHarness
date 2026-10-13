@@ -676,7 +676,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 if (
                     query_state is not None and fingerprint is not None
                     and reasoning_budget_exhausted and attempt > 0
-                    and repair_request is None and not self.last_tool_argument_diagnostics
+                    and repair_request is None
                     and final.stop_reason in {"stop", "tool_calls"}
                 ):
                     query_state.fallback_active = True

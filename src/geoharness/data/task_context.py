@@ -184,6 +184,27 @@ def data_ref_snapshot(metadata: dict, *, cwd: Path, config: Any) -> dict[str, di
     return data_references(current_profiles(metadata), recent_outputs(cwd, config, limit=16))
 
 
+def resolve_registered_path(value: str, metadata: dict, *, cwd: Path, config: Any) -> str:
+    """Native tools accept the same exact model-visible IDs as Python, without guessing."""
+    if not value.startswith("data:"):
+        return value
+    from geoharness.data.profiles import file_signature
+
+    reference = data_ref_snapshot(metadata, cwd=cwd, config=config).get(value)
+    if (not isinstance(reference, dict) or not isinstance(reference.get("path"), str)
+            or file_signature(reference["path"]) != reference.get("signature")):
+        raise ValueError("Unknown or changed data reference; inspect the source again")
+    if reference.get("sha256"):
+        digest = hashlib.sha256()
+        with Path(reference["path"]).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if (digest.hexdigest() != reference["sha256"]
+                or file_signature(reference["path"]) != reference.get("signature")):
+            raise ValueError("Registered analysis output changed; use an actual returned result")
+    return reference["path"]
+
+
 def recent_qgis_results(cwd: Path, config: Any) -> list[dict[str, str]]:
     root = _root(cwd, getattr(config.qgis, "outputs_dir", ".geoharness/qgis"))
     try:

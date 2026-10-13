@@ -13,9 +13,11 @@ from openharness.tools.base import ToolResult
 
 def _fingerprint(tool, arguments, context) -> str | None:
     payload = arguments.model_dump(mode="json")
-    if payload.get("project_path"):
+    if payload.get("project_path") or payload.get("plan_ref"):
         # Saved projects can reference external layers, fonts and images. Their
         # dependency graph is not established at this seam; do not cache failures.
+        # Prepared references are expanded inside execute; recheck their capsule
+        # and current sources on every call instead of caching the opaque token.
         return None
     paths = []
 

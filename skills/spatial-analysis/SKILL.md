@@ -73,7 +73,7 @@ QGIS 分析结果可直接作为 `geo_qgis_project` 的真实图层创建可编�
 
 加载 skill(name="cartography")。将 geo_analysis 返回的 layers 序列化后传给 geo_cartography，突出真正的影响选集，不要把全部资产画成受影响对象。
 
-新建制图会在预算前检查实际字段、数值/类别、几何、CRS、范围与可见数量；独立 action=preflight 不绘图或消耗成图/审查预算。GIS map_extent 是 xmin,ymin,xmax,ymax，与 imshow 顺序不同；显式主/详范围同时声明显示 CRS。required 图层默认至少相交1个要素，空影响选集应明确 required=false，保留零数量与警告。计量 CRS 和显示 CRS 分开；几何相交计数与栅格范围相交不能证明图层实际无遮挡或像素/语义正确。
+新建制图会在渲染前检查实际字段、数值/类别、几何、CRS、范围与可见数量；独立 action=preflight 不绘图。GIS map_extent 是 xmin,ymin,xmax,ymax，与 imshow 顺序不同；显式主/详范围同时声明显示 CRS。required 图层默认至少相交1个要素，空影响选集应明确 required=false，保留零数量与警告。计量 CRS 和显示 CRS 分开；几何相交计数与栅格范围相交不能证明图层实际无遮挡或像素/语义正确。
 
 原生制图会读取实际成图进行视觉检查，并输出可编辑 QGIS 工程。Python PNG 使用 geo_map_review，提供目标、预期图层与真实分析摘要。后续版本、审图和交付沿用工具返回的系统 UUID map_id；“继续/接着做/continue/resume”保留任务和已完成结果。地图版本、修正次数和累积审查时长不限；通过、无有效修正、真实失败或重复方案/图片时停止自动修正。只合并修复具体呈现错误，不为审美反复改图，不根据视觉建议更换数据、方法或阈值。
 

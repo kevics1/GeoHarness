@@ -430,6 +430,29 @@ def test_same_version_preserves_checks_none_and_new_pixels_invalidate_visual(tmp
     assert len(new["versions"]) == 2
 
 
+def test_new_export_package_with_equal_pixels_preserves_old_verified_version(tmp_path):
+    metadata = {}
+    image = tmp_path / "map.png"
+    image.write_bytes(b"same pixels")
+    project = tmp_path / "project"
+    layout = package(project, image)
+    job_id = ensure_map_job(metadata, cwd=tmp_path, config=GeoConfig())
+    record(job_id, metadata, tmp_path, image, preflight=preflight(), layout=layout,
+           project_dir=project)
+    record_map_review(job_id, metadata, cwd=tmp_path, config=GeoConfig(), image_path=image,
+                      review={"status": "passed", "image_sha256": digest(image)})
+    exported = tmp_path / "exported"
+    shutil.copytree(project, exported)
+    (exported / "data.gpkg").write_bytes(b"different package")
+    preview = exported / "preview.png"
+    result = record(job_id, metadata, tmp_path, preview, layout=layout, project_dir=exported)
+    assert result["current_version"] == 2
+    assert result["stages"]["data_checked"]["status"] == "unverified"
+    old = map_job_receipt(metadata, cwd=tmp_path, config=GeoConfig(), artifact_path=image)
+    assert old["current_version"] == 1 and old["quality_status"] == "passed"
+    assert old["delivery_candidate"]["version"] == 1
+
+
 @pytest.mark.parametrize(
     "extra,expected",
     [
