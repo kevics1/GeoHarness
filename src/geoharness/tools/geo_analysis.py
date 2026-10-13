@@ -10,7 +10,7 @@ from threading import Event
 from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +18,19 @@ logger = logging.getLogger(__name__)
 class SpatialSource(BaseModel):
     """Exactly one source locator, with an optional explicit CRS declaration."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     source_type: Literal["", "file", "postgis"] = ""
     file_path: str = ""
     source_name: str = ""
     geojson: str | dict[str, Any] = ""
     crs: str = Field(default="", description="Declare unknown CRS, or inline coordinate CRS.")
+    filters: dict[str, str | int | float | bool | None] = Field(
+        default_factory=dict, max_length=16, description=(
+            "Exact existing attribute selections, e.g. a forecast time. No SQL/expressions. "
+            "An unmatched selection stays empty; it never falls back to all scenarios."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_locator(self) -> SpatialSource:
@@ -49,6 +55,21 @@ class GeoAnalysisInput(BaseModel):
     )
     zones: SpatialSource | None = Field(default=None, description="Optional counting zones.")
     distance_m: float = Field(default=0, ge=0, allow_inf_nan=False)
+    distance_breaks_m: list[float] = Field(default_factory=list, max_length=32, description=(
+        "distance/impact only: positive ascending thresholds for native distance_class. "
+        "Containment/intersection are separate from external distance bands."
+    ))
+
+    @field_validator("distance_breaks_m")
+    @classmethod
+    def validate_breaks(cls, values):
+        import math
+
+        if any(not math.isfinite(v) or v <= 0 for v in values) or any(
+            a >= b for a, b in zip(values, values[1:])
+        ):
+            raise ValueError("distance_breaks_m must be positive, finite and strictly ascending")
+        return values
     group_field: str = Field(default="", max_length=128, description=(
         "area only: optional existing attribute, e.g. a time field. Reports each group's "
         "union and sum separately; cumulative/overlapping time ranges are not additive coverage."
@@ -73,6 +94,8 @@ class GeoAnalysisInput(BaseModel):
             raise ValueError("group_field applies only to area.")
         if self.action not in ("buffer", "impact") and self.distance_m != 0:
             raise ValueError("distance_m only applies to buffer and impact.")
+        if self.distance_breaks_m and self.action not in {"distance", "impact"}:
+            raise ValueError("distance_breaks_m only applies to distance and impact")
         return self
 
 
@@ -89,7 +112,11 @@ class GeoAnalysisTool(BaseTool):
         "area measures polygon area_m2, union coverage, feature-area sum and overlap in a "
         "metre CRS; group_field optionally groups time/category ranges. Overlapping ranges "
         "must not be summed as total coverage. Use its result layer and analysis_manifests "
-        "for automatically verified map notes rather than handwritten area totals."
+        "for automatically verified map notes rather than handwritten area totals. "
+        "source/reference.filters selects exact time/scenario attributes before analysis. "
+        "distance/impact return reference_relation (covered_by/intersects/outside); "
+        "distance_breaks_m adds distance_class with external bands. Never label a positive "
+        "distance threshold as inside; use these fields and their reference_scope."
     )
     input_model: type[BaseModel] = GeoAnalysisInput
 
@@ -132,6 +159,9 @@ class GeoAnalysisTool(BaseTool):
                     f"Suggested layers: {json.dumps(manifest['layers'], ensure_ascii=False)}\n"
                     + ("Empty result persisted successfully.\n" if statistics["feature_count"] == 0
                        else "")
+                    + ("Reference scope: " + json.dumps(manifest["reference_scope"],
+                                                        ensure_ascii=False) + "\n"
+                       if "reference_scope" in manifest else "")
                     + (f"Counting: {manifest['count_semantics']}"
                        if "count_semantics" in manifest else "")
                 ),

@@ -169,7 +169,9 @@ class GeoVectorDataTool(BaseTool):
         if schema:
             lines.append(f"  Columns ({len(schema)}):")
             for col, typ in list(schema.items())[:MAX_SCHEMA_FIELDS]:
-                lines.append(f"    - {col}: {typ}")
+                nulls = detail.get("null_counts", {}).get(col)
+                suffix = f"; nulls={nulls}" if type(nulls) is int else ""
+                lines.append(f"    - {col}: {typ}{suffix}")
             if len(schema) > MAX_SCHEMA_FIELDS:
                 omitted = len(schema) - MAX_SCHEMA_FIELDS
                 lines.append(f"    ... {omitted} additional columns omitted")

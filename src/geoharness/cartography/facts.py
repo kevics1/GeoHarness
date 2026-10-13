@@ -307,6 +307,65 @@ def _statistics(manifest: dict, outputs: dict, distance: float,
         verified["area_statistics"] = actual
     if action in {"distance", "impact"}:
         distances = [_number(item["properties"].get("distance_m")) for item in result]
+        if "relation_counts" in declared:
+            from collections import Counter
+
+            import geopandas as gpd
+            from shapely import union_all
+
+            reference = outputs["reference"]["features"]
+            hazards = gpd.GeoDataFrame.from_features(reference, crs=4326).to_crs(metric_crs)
+            assets = (gpd.GeoDataFrame.from_features(result, crs=4326).to_crs(metric_crs) if result
+                      else gpd.GeoDataFrame(geometry=[], crs=metric_crs))
+            combined = union_all(hazards.geometry.array)
+            relations = ["covered_by" if combined.covers(g) else
+                         "intersects" if combined.intersects(g) else "outside"
+                         for g in assets.geometry]
+            counts = {relation: relations.count(relation)
+                      for relation in ("covered_by", "intersects", "outside")}
+            actual_distances = assets.geometry.distance(combined).tolist()
+            if (counts != declared["relation_counts"] or relations != [
+                item["properties"].get("reference_relation") for item in result
+            ] or any(not math.isclose(a, b, rel_tol=1e-8, abs_tol=1e-4)
+                     for a, b in zip(distances, actual_distances))):
+                raise ValueError("Native reference relation/distance classification "
+                                 "is inconsistent")
+            verified["relation_counts"] = counts
+            scope = manifest.get("reference_scope") or {}
+            filters = scope.get("filters")
+            if (not isinstance(filters, dict) or scope.get("combine") != "union"
+                    or scope.get("feature_count") != len(reference)
+                    or filters != manifest.get("sources", {}).get("reference", {}).get("filters")
+                    or any(field not in feature["properties"]
+                           or feature["properties"][field] != value
+                           for feature in reference for field, value in filters.items())):
+                raise ValueError("Reference classification scope disagrees with selected features")
+            verified["reference_scope"] = {"combine": "union", "filters": filters,
+                                           "feature_count": len(reference),
+                                           "relation_field": "reference_relation"}
+            breaks = manifest["parameters"].get("distance_breaks_m", [])
+            if (not isinstance(breaks, list) or any(type(v) not in {int, float}
+                or not math.isfinite(v) or v <= 0 for v in breaks)
+                or any(a >= b for a, b in zip(breaks, breaks[1:]))):
+                raise ValueError("Invalid distance classification thresholds")
+            if breaks:
+                expected_classes = []
+                for relation, value in zip(relations, distances):
+                    label, lower = relation, 0.0
+                    if relation == "outside":
+                        label = f"outside_gt_{breaks[-1]:g}m"
+                        for upper in breaks:
+                            if value <= upper:
+                                label = f"outside_{lower:g}_{upper:g}m"
+                                break
+                            lower = upper
+                    expected_classes.append(label)
+                if (expected_classes != [f["properties"].get("distance_class") for f in result]
+                        or dict(Counter(expected_classes)) != declared.get(
+                            "distance_class_counts")):
+                    raise ValueError("Native distance classification disagrees "
+                                     "with reference facts")
+                verified["distance_class_counts"] = dict(Counter(expected_classes))
         if action == "impact":
             flags = [item["properties"].get("affected") for item in result]
             if any(type(flag) is not bool for flag in flags):
@@ -593,6 +652,8 @@ def load_analysis_facts(
                     "Persisted output SHA256 integrity and output counts; "
                     + ("polygon areas recomputed from output in metric_crs; "
                        if action == "area" else "")
+                    + ("reference geometry relations, distances and classes recomputed; "
+                       if "relation_counts" in statistics else "")
                     + "original source data have not been reprocessed."
                     if verification == "sha256_verified"
                     else "Legacy persisted output counts only; no original output fingerprints and "

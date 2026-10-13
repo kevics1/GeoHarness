@@ -122,6 +122,7 @@ async def test_impact_multilayer_mixed_crs_and_zone_counts(context):
     assert zones.affected_count.tolist() == [2, 1]
     assert result.metadata["statistics"] == {
         "source_count": 3, "feature_count": 3, "affected_count": 2, "unaffected_count": 1,
+        "relation_counts": {"covered_by": 1, "intersects": 0, "outside": 2},
     }
     manifest = json.loads(Path(result.metadata["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["metric_crs"] == "EPSG:32650"

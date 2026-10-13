@@ -77,6 +77,8 @@ QGIS 分析结果可直接作为 `geo_qgis_project` 的真实图层创建可编�
 
 原生制图会读取实际成图进行视觉检查，并输出可编辑 QGIS 工程。Python PNG 使用 geo_map_review，提供目标、预期图层与真实分析摘要。后续版本、审图和交付沿用工具返回的系统 UUID map_id；“继续/接着做/continue/resume”保留任务和已完成结果。地图版本、修正次数和累积审查时长不限；通过、无有效修正、真实失败或重复方案/图片时停止自动修正。只合并修复具体呈现错误，不为审美反复改图，不根据视觉建议更换数据、方法或阈值。
 
+向量inspect和登记引用包含实际schema/空值信息，不能根据数字外观假设属性是数值。时间/情景用geo_analysis的source/reference.filters选现有字段的精确值；空匹配不回退为全部数据。distance/impact返回reference_relation：covered_by为整个几何被参考范围覆盖，intersects为相交但未完整覆盖，outside为不相交。distance_breaks_m可生成distance_class，外部50米邻近不等于范围内。直接用原生结果字段分类，图例、统计与reference_scope的实际时刻/合并规则一致，不用自由脚本将正距离阈值重命名为内部。
+
 使用 geo_cartography(action="status",map_id=...) 读取当前回执。parameters、data_checked、rendered、layout_checked、visual_checked、packaged、delivered 分别记录实际证据；quality_status=passed 要求同一图的数据、渲染、已测布局和实际视觉均通过。视觉通过或工程打包不能补出缺少的 preflight；自定义 Python 图缺少绑定数据检查仍为 draft。QGIS 标签配置与 bounds_check 也不证明所有标签、位置或业务语义正确。停止无效视觉重试，说明未验证阶段并交付草稿；颜色/非白像素计数不能代替视觉审查。
 
 ## 交付

@@ -195,7 +195,9 @@ def test_impact_facts_use_real_counts_distinct_crs_and_output_fingerprints(tmp_p
     facts = _facts(tmp_path, manifest)
     assert facts["status"] == "verified"
     analysis = facts["analyses"][0]
-    assert analysis["statistics"] == {
+    assert {key: analysis["statistics"][key] for key in (
+        "source_count", "feature_count", "affected_count", "unaffected_count"
+    )} == {
         "source_count": 2,
         "feature_count": 2,
         "affected_count": 1,
@@ -379,7 +381,8 @@ def test_free_text_labels_parameters_sources_and_evidence_never_become_facts(tmp
     manifest["statistics"]["LLM_prediction"] = 999
     manifest["count_semantics"] = marker
     manifest["geometry_semantics"] = marker
-    manifest["sources"] = {"source": {"source_name": marker}}
+    manifest["sources"] = {"source": {"source_name": marker},
+                           "reference": {"filters": manifest["reference_scope"]["filters"]}}
     manifest["evidence"] = marker
     _write_manifest(manifest)
     report = load_analysis_facts(

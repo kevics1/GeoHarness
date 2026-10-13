@@ -175,13 +175,17 @@ class FileLoader:
                 info["note"] = "CSV requires coordinate column specification"
                 return info
 
-            gdf = gpd.read_file(path, rows=1)  # Read 1 row for schema
+            gdf = gpd.read_file(path)
             info["crs"] = str(gdf.crs) if gdf.crs else "unknown"
             info["columns"] = list(gdf.columns)
+            info["schema"] = {str(name): str(dtype) for name, dtype in gdf.dtypes.items()}
+            info["null_counts"] = {str(name): int(series.isna().sum())
+                                   for name, series in gdf.items() if name != gdf.geometry.name}
             info["geometry_type"] = str(gdf.geom_type.iloc[0]) if len(gdf) > 0 else "unknown"
 
             # Get full bounds
-            gdf_full = gpd.read_file(path)
+            gdf_full = gdf
+            info["row_count"] = len(gdf_full)
             if len(gdf_full) > 0:
                 bounds = gdf_full.total_bounds  # [minx, miny, maxx, maxy]
                 info["bbox"] = [float(b) for b in bounds]

@@ -164,10 +164,29 @@ def _resolve_source(spec: Any, catalog: Any, cwd: Path, label: str) -> tuple[Any
                     "reproject explicitly rather than relabelling known coordinates."
                 )
     _validate_frame(frame, label)
+    filters = getattr(spec, "filters", {})
+    applied_filters = {}
+    for field, value in filters.items():
+        if field not in frame.columns or field == frame.geometry.name:
+            raise ValueError(f"{label}: filter field '{field}' is not an existing attribute")
+        series = frame[field]
+        if value is None:
+            selected = series.isna()
+        else:
+            import pandas as pd
+
+            if pd.api.types.is_datetime64_any_dtype(series.dtype):
+                value = pd.Timestamp(value)
+            selected = series.eq(value)
+        frame = frame.loc[selected].copy()
+        applied_filters[field] = (json.loads(frame.iloc[:1].to_json(default=str))["features"][0]
+                                  ["properties"][field] if not frame.empty else value)
     provenance = {
         "source_type": "inline" if raw else (kind or "file"),
         "file_path": str(actual_path) if actual_path else "",
         "source_name": source_name,
+        "filters": applied_filters,
+        "requested_filters": filters,
         "crs": frame.crs.to_string(),
         "feature_count": len(frame),
         "loaded_features_sha256": hashlib.sha256(
@@ -275,10 +294,15 @@ def _run_operation(action: str, source: Any, reference: Any, zones: Any, distanc
         }
     if reference.empty:
         raise ValueError(f"{action}: reference contains no features; distance is undefined.")
-    names = ["distance_m"] + (["affected"] if action == "impact" else [])
+    names = ["distance_m", "reference_relation"] + (["affected"] if action == "impact" else [])
     result = _reserve_columns(source, names)
-    distances = source.geometry.distance(union_all(reference.geometry.array))
+    combined = union_all(reference.geometry.array)
+    distances = source.geometry.distance(combined)
     result["distance_m"] = pd.Series(distances, index=source.index, dtype=float)
+    result["reference_relation"] = [
+        "covered_by" if combined.covers(geometry) else
+        "intersects" if combined.intersects(geometry) else "outside"
+        for geometry in source.geometry]
     artifacts = {"result": result}
     if action == "impact":
         result["affected"] = distances <= distance
@@ -343,6 +367,34 @@ def analyze_vectors(
         args.distance_m,
     )
     statistics = {"source_count": len(metric["source"]), "feature_count": len(artifacts["result"])}
+    if args.action in {"distance", "impact"}:
+        from collections import Counter
+
+        result = artifacts["result"]
+        statistics["relation_counts"] = {
+            relation: int((result.reference_relation == relation).sum())
+            for relation in ("covered_by", "intersects", "outside")}
+        breaks = getattr(args, "distance_breaks_m", [])
+        if breaks:
+            result = _reserve_columns(result, ["distance_class"])
+            categories = []
+            for relation, distance in zip(result.reference_relation, result.distance_m):
+                if relation != "outside":
+                    categories.append(relation)
+                    continue
+                lower = 0.0
+                for upper in breaks:
+                    if distance <= upper:
+                        categories.append(f"outside_{lower:g}_{upper:g}m")
+                        break
+                    lower = upper
+                else:
+                    categories.append(f"outside_gt_{breaks[-1]:g}m")
+            result["distance_class"] = categories
+            statistics["distance_class_counts"] = dict(Counter(categories))
+            artifacts["result"] = result
+            if args.action == "impact":
+                artifacts["affected"] = result.loc[result.affected].reset_index(drop=True)
     if args.action == "area":
         # Use exact serialized attributes; datetime/NumPy values may change type on export.
         features = json.loads(artifacts["result"].to_json(default=str))["features"]
@@ -395,6 +447,7 @@ def analyze_vectors(
                     (stage / geojson_path.name).read_bytes()
                 ).hexdigest(),
                 "csv_sha256": hashlib.sha256((stage / csv_path.name).read_bytes()).hexdigest(),
+                "schema": {str(field): str(dtype) for field, dtype in exported.dtypes.items()},
             }
             if not frame.empty and label != "affected":
                 layers.append({
@@ -420,6 +473,16 @@ def analyze_vectors(
         if args.action == "area":
             manifest["parameters"]["group_field"] = args.group_field
             manifest["geometry_semantics"] = _AREA_SEMANTICS
+        if args.action in {"distance", "impact"}:
+            manifest["parameters"]["distance_breaks_m"] = getattr(args, "distance_breaks_m", [])
+            manifest["reference_scope"] = {"combine": "union",
+                "filters": provenance["reference"]["filters"],
+                "feature_count": len(metric["reference"]),
+                "relation_field": "reference_relation",
+                "class_field": "distance_class" if getattr(args, "distance_breaks_m", []) else "",
+                "covered_by": "The entire geometry is covered by the selected reference union.",
+                "intersects": "Intersects the union but is not entirely covered.",
+                "outside": "Disjoint; a positive distance band never means inside."}
         if args.action in ("count", "impact"):
             manifest["count_semantics"] = _COUNT_SEMANTICS
         (stage / "manifest.json").write_text(

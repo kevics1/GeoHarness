@@ -297,6 +297,8 @@ QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定�
 
 不会因图片建议自动更换数据、统计方法、字段或影响阈值。视觉检查不能证明数值正确，必须同时核验分析结果。
 
+向量检查返回实际字段类型和空值数量；登记的原生分析输出也带schema。`geo_analysis` 的 `source.filters` / `reference.filters` 可按现有属性精确选择时间或情景，匹配为空不会自动使用全部时段。distance/impact返回 `reference_relation`（covered_by、intersects、outside）；可用 `distance_breaks_m: [50, 1000]` 生成 `distance_class`，范围内部与外部距离分级分开。`reference_scope` 记录所选参考集合和合并方式。成图事实会从落盘几何复算关系、距离及分类；图例名称应表达这一实际口径，不能把外部邻近点称为范围内。
+
 下面是视觉审查状态，与最终 quality_status 分开：
 
 | 视觉状态 | 含义 |

@@ -131,6 +131,10 @@ def make_profile(detail: dict[str, Any], *, kind: str) -> dict[str, Any] | None:
             if len(schema) > MAX_SCHEMA_FIELDS:
                 profile["schema_omitted"] = len(schema) - MAX_SCHEMA_FIELDS
         columns = detail.get("columns")
+        if isinstance(detail.get("null_counts"), dict):
+            profile["null_counts"] = {str(name)[:_MAX_TEXT]: count
+                for name, count in list(detail["null_counts"].items())[:MAX_SCHEMA_FIELDS]
+                if type(count) is int and count >= 0}
         if isinstance(columns, (list, tuple)):
             profile["columns"] = [str(col)[:_MAX_TEXT] for col in columns[:MAX_SCHEMA_FIELDS]]
             if len(columns) > MAX_SCHEMA_FIELDS:
