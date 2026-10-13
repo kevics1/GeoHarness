@@ -202,6 +202,8 @@ class GeoPythonTool(BaseTool):
         "files must use their returned actual paths, never a guessed dated directory. "
         "mask_raster(path, GeoSeries/GeoDataFrame, crop=True) checks and transforms geometry "
         "to the actual raster CRS before masking; bare Shapely lists are rejected. "
+        "It returns (array, transform), like rasterio.mask: unpack both values; array has "
+        "shape (bands, rows, columns), not a raster dataset with .crs/.profile. "
         "Reproject a GeoDataFrame/GeoSeries before iterrows(); a pandas Series row has no "
         "to_crs(). Use geo_vector_data/geo_raster_data list and inspect to establish refs. "
         "Configured analysis, map and previous Python run outputs "
@@ -347,7 +349,8 @@ class GeoPythonTool(BaseTool):
             "read_vector": "ref, target_crs=None -> GeoDataFrame; no guessed source CRS",
             "projection": "Reproject GeoDataFrame/GeoSeries, not iterrows() pandas Series rows",
             "native_layer": "ref, derivation=None -> layer retaining original source/provenance",
-            "mask_raster": "CRS-aware masking of GeoSeries/GeoDataFrame; source data unchanged",
+            "mask_raster": "CRS-aware GeoSeries/GeoDataFrame masking -> (array, Affine transform); "
+                           "array shape=(bands, rows, columns); source data unchanged",
         }
         if status != "succeeded":
             if reserved:
