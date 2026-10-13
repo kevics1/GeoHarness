@@ -323,6 +323,7 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
     # protection and explicit denied_tools still outrank this allow-list.
     perm_settings.allowed_tools.extend([
         "geo_cartography", "geo_analysis", "geo_map_review", "geo_deliver",
+        "todo_write",
     ])
     if config.execution.enabled:
         perm_settings.allowed_tools.append("geo_python")

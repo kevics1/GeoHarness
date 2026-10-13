@@ -441,50 +441,49 @@ def _area_note(stats: dict) -> str:
 
 
 def _footer(analyses: list[dict]) -> str:
-    lines = []
-    for analysis in analyses:
+    """At most three logical lines; detailed facts belong to the project report."""
+    if not analyses:
+        return ""
+    if len(analyses) == 1:
+        analysis = analyses[0]
         action, stats = analysis["action"], analysis["statistics"]
         line = f"{_METHODS[action]}：结果 {stats['feature_count']}"
         if action == "impact":
             line += f"，受影响 {stats['affected_count']}，未影响 {stats['unaffected_count']}"
         if action == "area":
-            areas = stats["area_statistics"]
             line += _area_note(stats) + "（重叠范围不可相加为覆盖）"
-            groups = areas["groups"]
-            if groups:
-                line += "；各组去重面积：" + "，".join(
-                    f"{str(group['value'])[:80]} {group['union_area_m2'] / 1e6:.2f} km²"
-                    for group in groups[:6])
-                if len(groups) > 6:
-                    line += f"（共{len(groups)}组，完整结果见事实报告）"
         if action in {"buffer", "impact"}:
             label = "缓冲距离" if action == "buffer" else "距离阈值 ≤"
             line += f"；{label} {analysis['parameters']['distance_m']:g} m"
-        line += f"；计量CRS {analysis['metric_crs']}；显示CRS {analysis['display_crs']}"
-        for match in analysis["mapped_outputs"]:
-            if match["match"] == "derivation":
-                line += (f"；制图子集 {match['mapped_feature_count']}/"
-                         f"{match['source_feature_count']}（统计仍为完整分析输出）")
-        if action == "count" or "zones" in analysis["output_fingerprints"]:
-            line += "；按相交（含边界）逐分区计数，可重复计入，不可相加为全局去重总数"
-        if analysis["verification"] == "legacy_count_verified":
-            line += "；旧清单仅核对输出计数"
-        lines.append(line)
-    # Eight analyses cannot fit a small footer: retain each method/count summary.
-    if len("\n".join(lines)) > 600:
-        lines = [
-            f"{_METHODS[item['action']]}：结果 {item['statistics']['feature_count']}"
-            + (
-                f"，受影响 {item['statistics']['affected_count']}，"
-                f"未影响 {item['statistics']['unaffected_count']}"
-                if item["action"] == "impact"
-                else ""
-            )
-            + (_area_note(item["statistics"])
-               if item["action"] == "area" else "")
-            for item in analyses
-        ]
-        lines.append("完整参数、计量CRS、显示CRS及验证范围见分析事实报告。")
+        # Omit a whole oversized statistic rather than slicing its numeric value.
+        lines = [line if len(line) <= 160 else
+                 f"{_METHODS[action]}：完整统计与参数见工程事实报告"]
+    else:
+        methods = list(dict.fromkeys(item["action"] for item in analyses))
+        labels = "、".join(_METHODS[action] for action in methods)
+        lines = [f"分析 {len(analyses)} 项（{labels}）；完整统计与参数见工程事实报告"]
+
+    def crs_note(key: str, label: str) -> str:
+        values = list(dict.fromkeys(item[key] for item in analyses))
+        text = "、".join(values)
+        return f"{label} {text}" if len(text) <= 48 else f"{label}详见工程事实报告"
+
+    lines.append(crs_note("metric_crs", "计量CRS") + "；"
+                 + crs_note("display_crs", "显示CRS"))
+    notes = []
+    if any(item["action"] == "count" or "zones" in item["output_fingerprints"]
+           for item in analyses):
+        notes.append("按相交（含边界）逐分区计数，可重复计入，不可相加为全局去重总数")
+    subsets = [match for item in analyses for match in item["mapped_outputs"]
+               if match["match"] == "derivation"]
+    if subsets:
+        count = (f" {subsets[0]['mapped_feature_count']}/{subsets[0]['source_feature_count']}"
+                 if len(subsets) == 1 else "")
+        notes.append(f"制图子集{count}（统计仍为完整分析输出）")
+    if any(item["verification"] == "legacy_count_verified" for item in analyses):
+        notes.append("旧清单仅核对输出计数")
+    if notes:
+        lines.append("；".join(notes))
     return "\n".join(lines)
 
 

@@ -112,6 +112,10 @@ def _register_whitelist_tools(registry: ToolRegistry) -> None:
                 from geoharness.tools.geo_skill import GeoSkillTool
 
                 tool = GeoSkillTool()
+            elif tool.name == "todo_write":
+                from geoharness.tools.geo_todo import GeoTodoWriteTool
+
+                tool = GeoTodoWriteTool()
             registry.register(tool)
             registered += 1
 

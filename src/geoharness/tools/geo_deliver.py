@@ -17,6 +17,7 @@ from geoharness.cartography.project import MapProject
 from geoharness.cartography.quality import MapReview
 
 _MAP_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".pdf", ".svg", ".html"}
+_RESERVED_NAMES = {"delivery.json", "map-receipt.json", "summary.json", "summary.md", "project"}
 
 
 class _QgisDeliveryProject(BaseModel):
@@ -193,6 +194,7 @@ class GeoDeliverTool(BaseTool):
             if report_file is not None and report_file not in files:
                 files.append(report_file)
             project_files: list[tuple[Path, Path]] = []
+            project_snapshots: dict[Path, str] = {}
             project_digest = None
             project_file = "map.qgs"
             project_fidelity = "unverified"
@@ -202,7 +204,9 @@ class GeoDeliverTool(BaseTool):
                     project_root if project_root.is_absolute() else workspace / project_root
                 ).resolve()
                 manifest = resolve(str(project_root / "project.json"))
-                recorded_project = json.loads(manifest.read_text(encoding="utf-8"))
+                manifest_bytes = manifest.read_bytes()
+                project_snapshots[manifest] = hashlib.sha256(manifest_bytes).hexdigest()
+                recorded_project = json.loads(manifest_bytes.decode("utf-8"))
                 project_fidelity = (recorded_project.get("project_fidelity", "unverified")
                                     if isinstance(recorded_project, dict) else "unverified")
                 if isinstance(recorded_project, dict) and recorded_project.get("backend") == "qgis":
@@ -265,9 +269,12 @@ class GeoDeliverTool(BaseTool):
                     target = (project_root / relative_path).resolve()
                     if not target.is_relative_to(project_root):
                         raise ValueError("Project references must stay inside its folder.")
+                    source = resolve(str(target))
+                    if source not in project_snapshots:
+                        project_snapshots[source] = hashlib.sha256(source.read_bytes()).hexdigest()
                     project_files.append(
                         (
-                            resolve(str(target)),
+                            source,
                             Path("project") / target.relative_to(project_root),
                         )
                     )
@@ -352,10 +359,11 @@ class GeoDeliverTool(BaseTool):
             copied = []
             delivered_primary = None
             snapshot_changed = False
+            copied_package_hashes = {}
             for index, source in enumerate(files):
                 target = destination / source.name
                 suffix = index
-                while target.exists() or target.name.casefold() in {"delivery.json", "project"}:
+                while target.exists() or target.name.casefold() in _RESERVED_NAMES:
                     target = destination / f"{source.stem}-{suffix}{source.suffix}"
                     suffix += 1
                 shutil.copy2(source, target)
@@ -374,9 +382,11 @@ class GeoDeliverTool(BaseTool):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 copied.append(str(target))
-                expected = expected_package.get(str(source))
+                expected = expected_package.get(str(source), project_snapshots.get(source))
                 if expected and hashlib.sha256(target.read_bytes()).hexdigest() != expected:
                     snapshot_changed = True
+                if expected:
+                    copied_package_hashes[str(target)] = expected
             if (
                 delivered_primary
                 and hashlib.sha256(Path(delivered_primary).read_bytes()).hexdigest() != digest
@@ -450,6 +460,13 @@ class GeoDeliverTool(BaseTool):
                 )
                 payload["map_receipt"] = receipt_summary(receipt)
                 payload["receipt_path"] = str(receipt_file)
+            from geoharness.cartography.delivery_summary import write_delivery_summary
+
+            payload.update(write_delivery_summary(
+                destination, payload, receipt,
+                manifest_path=destination / "project/project.json" if project_files else None,
+                package_hashes=copied_package_hashes,
+            ))
             manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             return {**payload, "manifest_path": str(manifest)}
 

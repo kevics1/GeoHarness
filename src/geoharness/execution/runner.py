@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import hashlib
 import inspect
 import json
 import os
@@ -83,6 +84,7 @@ async def execute_python(
     read_dirs: tuple[Path, ...] = (),
     read_files: tuple[Path, ...] = (),
     data_profiles: dict[str, Any] | None = None,
+    data_refs: dict[str, Any] | None = None,
     previous_outputs: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     """Save and execute a script, returning and persisting its reproducibility record."""
@@ -121,6 +123,7 @@ async def execute_python(
         json.dumps(
             {"run_dir": str(run_dir), "read_roots": read_roots, "source_cwd": str(cwd),
              "read_files": exact_files, "data_profiles": data_profiles or {},
+             "data_refs": data_refs or {},
              "previous_outputs": [str(path) for path in previous_outputs]},
             ensure_ascii=False,
         ),
@@ -581,6 +584,115 @@ def mask_raster(raster_path: Any, geometries: Any, **options: Any) -> Any:
         return mask(dataset, shapes, **options)
 
 
+def _reference_signature(path: Path) -> dict[str, Any] | None:
+    """Match the parent snapshot, including shapefile schema/CRS sidecars."""
+    try:
+        if path.absolute() != path.resolve() or not path.is_file():
+            return None
+        parts = [path]
+        if path.suffix.lower() == ".shp":
+            parts.extend(path.with_suffix(ext) for ext in (".shx", ".dbf", ".prj", ".cpg"))
+        signature = {}
+        for part in parts:
+            try:
+                stat = part.stat()
+            except FileNotFoundError:
+                signature[part.name] = None
+                continue
+            signature[part.name] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                                    "ctime_ns": stat.st_ctime_ns}
+        return signature
+    except (OSError, ValueError):
+        return None
+
+
+def _data_helpers(references: dict[str, Any]) -> dict[str, Any]:
+    """Resolve only frozen records; never enumerate folders or reconstruct job paths."""
+    import geopandas as gpd
+
+    # Scripts can inspect DATA_REFS without changing the helpers' frozen identities.
+    records = json.loads(json.dumps(references))
+
+    def record_for(ref: Any) -> dict:
+        if not isinstance(ref, (str, os.PathLike)):
+            raise ValueError("Use a DATA_REFS ID, unique registered name, or registered path")
+        value = os.fspath(ref)
+        matches = ([records[value]] if value in records else [
+            record for record in records.values() if isinstance(record, dict) and (
+                value in {record.get("name"), record.get("output_label")}
+                or os.path.normcase(value) == os.path.normcase(record.get("path", ""))
+            )
+        ])
+        if not matches:
+            raise ValueError("Unknown data ref; use geo_vector_data list/inspect or "
+                             "geo_raster_data list/inspect to populate DATA_REFS")
+        if len(matches) != 1:
+            raise ValueError("Ambiguous data ref; use the stable DATA_REFS ID")
+        record = matches[0]
+        path = Path(record["path"])
+        if not isinstance(record.get("signature"), dict) or (
+            _reference_signature(path) != record["signature"]
+        ):
+            raise ValueError("Data ref is stale or missing; inspect the source again")
+        expected = record.get("sha256")
+        if expected is not None:
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if (not isinstance(expected, str) or digest.hexdigest() != expected
+                    or _reference_signature(path) != record["signature"]):
+                raise ValueError("Data ref fingerprint changed; inspect the source again")
+        if record.get("manifest") and (
+            not isinstance(record.get("manifest_signature"), dict)
+            or _reference_signature(Path(record["manifest"])) != record["manifest_signature"]
+        ):
+            raise ValueError("Data producer manifest is stale or missing; refresh DATA_REFS")
+        return record
+
+    def resolve_data(ref: Any) -> Path:
+        return Path(record_for(ref)["path"])
+
+    def read_vector(ref: Any, target_crs: Any = None) -> Any:
+        record = record_for(ref)
+        if record.get("kind") != "vector":
+            raise ValueError("read_vector requires a registered vector data ref")
+        frame = gpd.read_file(record["path"])
+        record_for(ref)  # A read must not attach old metadata to a changed file.
+        if target_crs is not None:
+            if frame.crs is None:
+                raise ValueError("read_vector source CRS is unknown; "
+                                 "inspect it before transforming")
+            frame = frame.to_crs(target_crs)
+        return frame
+
+    def native_layer(ref: Any, derivation: dict | None = None, *, name: str | None = None,
+                     style: dict | None = None, label_field: str | None = None,
+                     label_style: dict | None = None, layer_name: str | None = None) -> dict:
+        record = record_for(ref)
+        if record.get("kind") != "vector":
+            raise ValueError("native_layer requires a registered vector data ref")
+        layer = {"file_path": record["path"], "kind": "vector"}
+        for key, value in (("name", name), ("style", style), ("label_field", label_field),
+                           ("label_style", label_style), ("layer_name", layer_name)):
+            if value is not None:
+                expected_type = dict if key in {"style", "label_style"} else str
+                if not isinstance(value, expected_type):
+                    raise ValueError(f"native_layer {key} must be {expected_type.__name__}")
+                layer[key] = value
+        if derivation is not None:
+            if not isinstance(derivation, dict) or set(derivation) - {
+                "feature_indices", "keep_fields", "annotations",
+            }:
+                raise ValueError("native_layer derivation supports selections and annotations only")
+            layer["derivation"] = derivation
+        # The native tool validates style and derivation against the original
+        # source. Keeping its path lets adjacent producer evidence still bind.
+        return json.loads(json.dumps(layer, allow_nan=False))
+
+    return {"resolve_data": resolve_data, "read_vector": read_vector, "native_layer": native_layer}
+
+
 def _child_main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", newline="\n")
@@ -611,6 +723,7 @@ def _child_main() -> None:
     import matplotlib.pyplot  # noqa: F401
 
     _install_guards(spec)
+    data_refs = spec.get("data_refs", {})
     namespace = {
         "__name__": "__main__",
         "__file__": str(script),
@@ -618,8 +731,10 @@ def _child_main() -> None:
         "SOURCE_CWD": source_cwd,
         "DATA_DIRS": data_dirs,
         "GEO_DATA": spec.get("data_profiles", {}),
+        "DATA_REFS": data_refs,
         "PREVIOUS_OUTPUTS": [Path(value) for value in spec.get("previous_outputs", [])],
         "mask_raster": mask_raster,
+        **_data_helpers(data_refs),
     }
     exec(code, namespace)
 

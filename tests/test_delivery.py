@@ -142,7 +142,9 @@ async def test_project_source_names_resolve_against_workspace_not_process_cwd(
 @pytest.mark.asyncio
 async def test_delivery_filename_collisions_do_not_overwrite_selected_artifacts(tmp_path):
     paths = []
-    for index, name in enumerate(("map-2.png", "map.png", "map.png", "DELIVERY.JSON", "PROJECT")):
+    names = ("map-2.png", "map.png", "map.png", "DELIVERY.JSON", "PROJECT",
+             "SUMMARY.JSON", "summary.md", "MAP-RECEIPT.JSON")
+    for index, name in enumerate(names):
         directory = tmp_path / str(index)
         directory.mkdir()
         path = directory / name
@@ -152,8 +154,12 @@ async def test_delivery_filename_collisions_do_not_overwrite_selected_artifacts(
     result = await GeoDeliverTool().execute(GeoDeliverInput(files=paths), ctx)
     assert not result.is_error, result.output
     copied = result.metadata["files"]
-    assert len(set(copied)) == 5
-    assert [Path(path).read_text(encoding="utf-8") for path in copied] == ["0", "1", "2", "3", "4"]
+    assert len(set(copied)) == len(names)
+    assert [Path(path).read_text(encoding="utf-8") for path in copied] == [
+        str(index) for index in range(len(names))]
+    assert Path(result.metadata["summary_json"]).name == "summary.json"
+    assert json.loads(Path(result.metadata["summary_json"]).read_text(encoding="utf-8"))[
+        "primary_map_sha256"] == result.metadata["primary_map_sha256"]
 
 
 @pytest.mark.asyncio

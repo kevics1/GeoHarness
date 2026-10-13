@@ -171,6 +171,7 @@ base_url: ${GEOH_BASE_URL}
 
 agent:
   max_tokens: 16384
+  internal_todo_path: .geoharness/tasks/TODO.md
 
 # 可选 MCP 扩展：安装服务后按其实际入口填写 command、args、cwd 和 env。
 # 默认使用原生空间分析与数据库工具，避免启动未安装的模块。

@@ -72,7 +72,17 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
     if "DATA_DIRS" in code and "'list' object has no attribute 'split'" in stderr:
         hints.append("DATA_DIRS is list[Path]: iterate it directly. Only "
                      "os.environ['DATA_DIRS'].split(os.pathsep) returns environment paths.")
-    if "object has no attribute 'to_crs'" in stderr:
+    if "DATA_DIRS[0]" in code and any(text in stderr for text in (
+        "No such file", "does not exist", "not found", "系统找不到",
+    )):
+        hints.append("DATA_DIRS[0] is SOURCE_CWD, a workspace read root, not necessarily a "
+                     "dataset subfolder. Use DATA_REFS and resolve_data(ref) or read_vector(ref).")
+    if "'Series' object has no attribute 'to_crs'" in stderr:
+        hints.append("A pandas Series (for example gdf.loc[index]) is an attribute row, not a "
+                     "CRS-bearing geometry collection. Transform the GeoDataFrame or "
+                     "gdf.geometry GeoSeries with to_crs(), or wrap the selected geometry in "
+                     "gpd.GeoSeries([geometry], crs=gdf.crs) after verifying gdf.crs.")
+    elif "object has no attribute 'to_crs'" in stderr:
         hints.append("Shapely geometry has no CRS: use "
                      "gpd.GeoSeries([geometry], crs=verified_source_crs)"
                      ".to_crs(target_crs).iloc[0]. "
@@ -146,12 +156,22 @@ class GeoPythonTool(BaseTool):
         "SOURCE_CWD and DATA_DIRS identify read-only source folders; RUN_DIR is the only "
         "allowed output folder and is also the working directory. "
         "Injected: SOURCE_CWD: Path, RUN_DIR: Path, DATA_DIRS: list[Path] (iterate directly). "
+        "DATA_DIRS[0] is SOURCE_CWD, a workspace read root; do not assume a dataset subfolder. "
         "Only os.environ['DATA_DIRS'] is an os.pathsep-separated string. "
+        "DATA_REFS contains stable IDs bound to measured sources and actual producer outputs; "
+        "resolve_data(ref) returns their original Path and read_vector(ref, target_crs=None) "
+        "reads vectors with optional CRS transformation. Unique registered names/paths work; "
+        "unknown, ambiguous, changed or deleted refs are rejected. native_layer(ref, "
+        "derivation=None, name=None, style=None, label_field=None, label_style=None, "
+        "layer_name=None) creates a native layer specification retaining its original source "
+        "path; use derivation for subsets so analysis provenance can still bind. "
         "GEO_DATA: dict[path, verified metadata]; PREVIOUS_OUTPUTS: list[Path] contains "
         "existing artifacts, newest jobs first. Each call creates a NEW RUN_DIR; earlier "
         "files must use their returned actual paths, never a guessed dated directory. "
         "mask_raster(path, GeoSeries/GeoDataFrame, crop=True) checks and transforms geometry "
         "to the actual raster CRS before masking; bare Shapely lists are rejected. "
+        "Reproject a GeoDataFrame/GeoSeries before iterrows(); a pandas Series row has no "
+        "to_crs(). Use geo_vector_data/geo_raster_data list and inspect to establish refs. "
         "Configured analysis, map and previous Python run outputs "
         "are read-only. Returned QGIS diagnostics, previews and project.json are readable; "
         "QGIS directory listing/profile access is not allowed. Shapely geometries have no CRS; "
@@ -247,10 +267,11 @@ class GeoPythonTool(BaseTool):
             diagnostic_files = qgis_diagnostic_files(qgis_root)
         try:
             from geoharness.data.profiles import current_profiles
-            from geoharness.data.task_context import recent_outputs
+            from geoharness.data.task_context import data_ref_snapshot, recent_outputs
 
             profiles = current_profiles(context.metadata)
             outputs = recent_outputs(context.cwd, config)
+            references = data_ref_snapshot(context.metadata, cwd=context.cwd, config=config)
             result = await execute_python(
                 code=arguments.code,
                 name=arguments.name,
@@ -262,6 +283,7 @@ class GeoPythonTool(BaseTool):
                 read_dirs=read_dirs,
                 read_files=diagnostic_files,
                 data_profiles=profiles,
+                data_refs=references,
                 previous_outputs=tuple(Path(item["path"]) for item in outputs),
             )
         except (OSError, ValueError) as exc:
@@ -281,9 +303,17 @@ class GeoPythonTool(BaseTool):
         result["execution_contract"] = {
             "SOURCE_CWD": "Path", "RUN_DIR": "Path", "DATA_DIRS": "list[Path]",
             "DATA_DIRS_environment": "str separated by os.pathsep",
+            "DATA_DIRS_first": "SOURCE_CWD workspace read root; not necessarily a dataset folder",
+            "data_root": str((Path(file_dir).expanduser() if Path(file_dir).expanduser()
+                              .is_absolute() else context.cwd / (file_dir or ".")).resolve()),
             "output_directory": result.get("run_dir"),
             "qgis_diagnostics": "Exact returned diagnostics, preview images and project.json",
             "GEO_DATA": "dict[path, verified metadata]", "PREVIOUS_OUTPUTS": "list[Path]",
+            "DATA_REFS": "Same frozen ref records provided to the model; stale refs rejected",
+            "resolve_data": "ref -> original Path; stable ID or unique registered name/path",
+            "read_vector": "ref, target_crs=None -> GeoDataFrame; no guessed source CRS",
+            "projection": "Reproject GeoDataFrame/GeoSeries, not iterrows() pandas Series rows",
+            "native_layer": "ref, derivation=None -> layer retaining original source/provenance",
             "mask_raster": "CRS-aware masking of GeoSeries/GeoDataFrame; source data unchanged",
         }
         if status != "succeeded":

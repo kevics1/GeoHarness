@@ -114,6 +114,10 @@ agent:
 
 `geo_python` 注入 `SOURCE_CWD: Path`、`RUN_DIR: Path` 和 `DATA_DIRS: list[Path]`，直接迭代 `DATA_DIRS`；环境变量 `os.environ['DATA_DIRS']` 才是按 `os.pathsep` 分隔的字符串。所有输出写到 `RUN_DIR / filename` 或相对文件名，由 `geo_deliver` 负责工作区交付。工具返回 `execution_contract`，对已知的类型、投影或路径错误返回 `recovery_hints`，保留真实退出状态，不自动重试脚本。
 
+`DATA_DIRS[0]` 是工作区读取根，不能假定它就是某个数据子目录。每次模型请求会收到实际 `data_root`、已测数据和真实产物的 `data_refs`；尚无引用时先用 `geo_vector_data`/`geo_raster_data` 的 `list` 和 `inspect` 建立档案。Python 中的 `DATA_REFS` 使用同一快照：`resolve_data(ref)` 返回原路径，`read_vector(ref, target_crs=None)` 读取并可投影向量，`native_layer(ref, derivation=None, ...)` 保留原生来源和制图子集依据。未知、歧义或已变化的引用会拒绝；原生分析输出还核对生产者记录的 SHA256。应先投影整个 GeoDataFrame/GeoSeries，再遍历行；`iterrows()` 的 pandas Series 没有 `to_crs()`。
+
+`todo_write` 维护 Agent 内部清单，默认写入 `.geoharness/tasks/TODO.md`，可通过 `agent.internal_todo_path` 配置工作区内的子目录文件。省略路径或传 `TODO.md` 均重定向到该位置，项目根 `TODO.md` 留给项目长期待办。工具拒绝其它目的地、敏感路径、符号/硬链接和已配置的拒绝路径；显式禁止工具仍有效。
+
 配置 QGIS 输出目录中最近64个有清单的任务，仅其 `request.json`、`result.json`、`manifest.json`、`stdout.txt`、`stderr.txt` 可由 Python 精确只读访问；使用 QGIS 工具返回的文件路径。不会授予整个目录、`.profile` 或父配置目录，也不能写这些文件；链接转移和敏感文件名仍受保护。Shapely 几何本身没有 CRS，投影转换用 `gpd.GeoSeries([geometry], crs=已核实的源CRS).to_crs(目标CRS).iloc[0]`。缓冲、裁剪、相交、距离、分区计数和影响分析优先用 `geo_analysis`，其他算法用 `geo_qgis` 的 search→help→run 获得实际参数，避免读取工具源码猜 API。
 
 React TUI 中，停止、关闭或回收模型流会及时释放网络连接。模型重试流可由不同任务
@@ -275,7 +279,7 @@ Python 可只读读取已核验 QGIS 任务返回的诊断文件、预览图和 
 
 新建 QGIS 地图时，系统先将受控读取的图层保存为临时 GPKG/GeoTIFF，再对该数据副本预检并交给 QGIS 渲染；检查与成图使用同一份数据。冻结输入、预检失败不占成图次数，临时副本在读取线程和 QGIS 进程结束后清理。已有用户工程的 inspect/export 保留原数据、样式和布局，导出不覆盖输入工程。
 
-geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，默认最多4轮修正，`map_review.max_repairs` 可配置为0–4。Matplotlib 路径可自动应用支持的呈现补丁并重绘；默认 QGIS 路径检查实际布局 PNG，由 Agent 根据具体问题调整支持的样式/布局参数后重绘，当前工具不自动应用审图补丁。不会因为 info 提示或单纯审美建议再画一版。报告由工具返回实际路径；Matplotlib 自动修正前地图和预览保存在成图旁独立 `.review-*` 目录。
+geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，默认最多4轮修正，即5个成功版本，`map_review.max_repairs` 可配置为0–4。Matplotlib 和默认 QGIS 路径均可自动应用支持的呈现补丁并重绘；QGIS 使用下文的实际工程、区域和问题证据约束。不会因为 info 提示或单纯审美建议再画一版。报告由工具返回实际路径；Matplotlib 自动修正前地图和预览保存在成图旁独立 `.review-*` 目录。
 
 原生工具、Python 制图及独立审查共享一次用户请求的预算。当前请求默认最多5次成功成图（初版加4轮修正）；执行失败会释放该次成图预留。所有地图合计默认最多5次模型审查、120秒实际调用耗时；不计空间分析、渲染、生成工程和写报告的间隔，并发调用预留可用时间，完成后按实际耗时结算。预算与持久任务身份分开，改文件名、别名或切换已存在的历史 map_id 都不会补充当前请求额度。相同图片和审图配置的结果会缓存，失败也不会盲目重试；明确修正模型/token/provider参数后允许再次检查。真实用户新输入重置预算，历史地图与回执仍保留。
 
@@ -314,6 +318,8 @@ map_review 可单独配置 model、base_url、api_key；留空时复用主配置
 已有 Python 地图打包使用 geo_cartography(action="project", map_path="已有地图.png", project_output_dir="exports/工程目录", layers=...)。旧 output_path 作为已有地图输入继续兼容。工程目录必须留在工作区，且必须是尚不存在的新目录；已有空目录也不删除。QGIS 工程检查除图层有效外，也验证项目/地图框 CRS、范围和比例尺；打包成功不表示视觉审查通过。
 
 默认地图和最终交付保存到当前工作目录的 `exports/`。geo_deliver 把明确选定的地图、结果数据、检查报告、脚本和工程复制到独立交付子目录，返回实际路径并保留之前的交付。delivery.outputs_dir 必须是工作目录的子目录；Python 脚本不负责跨目录复制，输出仍限于 RUN_DIR。
+
+交付同时生成 `summary.md` 和 `summary.json`：从复制后通过摘要核验的最终选中工程读取实际 CRS 官方名称、分类/分级数量、图例节点、分析事实和检查状态；文件未通过核验时这些事实保持未验证。底栏最多保留三条逻辑说明，实际字体换行仍由 QGIS 测量；完整统计、参数、输出指纹及自由备注保存在工程事实报告和摘要里，手写统计不混入已验证底栏。
 
 默认 QGIS 制图的 PNG 与可编辑工程来自同一打印布局。Python/Matplotlib 自定义地图可用 geo_cartography 的 project 动作，以已存在的原成图和实际图层创建工程，不重新绘图；生成的 QGIS 布局不保证重现所有自定义注记。分类层明确 column（兼容 field_name）、categories 和 colors，原生绘图与 QGIS 使用对应的分类颜色；map_extent 锁定主图范围。不能为创建工程而另画简化图或丢弃分类字段。工程包含：
 

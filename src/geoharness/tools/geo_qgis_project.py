@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Annotated, Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from geoharness.cartography.derivation import MapDerivation, derive_frame
 from geoharness.cartography.retry_guard import guard_map_errors
@@ -313,6 +313,30 @@ class GeoQgisProjectInput(BaseModel):
         description="Native analysis manifests used to derive verified statistics and methods.",
     )
 
+    @field_validator("layers", mode="before")
+    @classmethod
+    def normalize_complete_layers(cls, value):
+        if isinstance(value, str):
+            def unique_object(pairs):
+                result = {}
+                for key, item in pairs:
+                    if key in result:
+                        raise ValueError(f"layers JSON contains duplicate key: {key}")
+                    result[key] = item
+                return result
+
+            def reject_constant(constant):
+                raise ValueError(f"layers JSON cannot contain {constant}")
+
+            try:
+                value = json.loads(value, object_pairs_hook=unique_object,
+                                   parse_constant=reject_constant)
+            except (json.JSONDecodeError, RecursionError) as exc:
+                raise ValueError("layers requires a complete JSON array of layer objects") from exc
+            if not isinstance(value, list):
+                raise ValueError("layers JSON must contain an array of layer objects")
+        return value
+
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
         if self.action in {"create", "preflight"}:
@@ -455,8 +479,9 @@ class GeoQgisProjectTool(BaseTool):
                 key: getattr(config.cartography, key) for key in (
                     "minimum_span_geographic", "minimum_span_projected", "extent_padding")
             }
-            facts = preflight.get("analysis")
-            if facts and facts.get("status") == "verified":
+            facts = preflight.get("analysis") or {
+                "status": "none", "analyses": [], "footer_text": ""}
+            if facts.get("status") in {"verified", "none"}:
                 from geoharness.cartography.provenance import apply_analysis_footer
 
                 try:

@@ -433,6 +433,9 @@ def test_multiple_analysis_footer_is_bounded_and_summary_is_complete(tmp_path):
         mapped_sources=[{"file_path": item["paths"]["result"]["geojson"]} for item in manifests],
         display_crs="EPSG:3857",
     )
-    assert len(report["footer_text"]) <= 600
+    assert len(report["footer_text"]) <= 400
+    assert len(report["footer_text"].splitlines()) <= 3
     assert len(report["analyses"]) == 8
-    assert report["footer_text"].count("受影响 1，未影响 1") == 8
+    assert "分析 8 项" in report["footer_text"]
+    assert all(item["statistics"]["affected_count"] == 1 for item in report["analyses"])
+    assert all(item["output_fingerprints"] for item in report["analyses"])

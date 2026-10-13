@@ -60,6 +60,7 @@ class AgentConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     max_tokens: int = Field(default=16384, ge=1024, le=65536)
+    internal_todo_path: str = ".geoharness/tasks/TODO.md"
     include_stream_usage: bool = True
     request_extra_body: dict[str, Any] = Field(default_factory=dict)
     empty_response_retries: int = Field(default=1, ge=0, le=1)
