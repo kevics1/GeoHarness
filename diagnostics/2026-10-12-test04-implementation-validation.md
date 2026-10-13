@@ -77,3 +77,21 @@ QGIS 原生导出保存图片摘要、每框实际图层顺序、PAL 已放置/�
 该流程另暴露确定内部缺陷：QGIS3.44.7 QgsLineSymbol没有widthUnit，事实/图例读取因此失败，模型移除公路线绕过。现从实际QgsLineSymbolLayer读取线宽单位；混合单位明确Unknown，不生成猜测width_mm。真实新回归修补前1 failed（7.02秒），修补后同例1 passed（13.42秒）；线图层创建/保存重导出、图例和不同单位边界3 passed（18.38秒）。另外，已登记审图报告在QGIS目录内却被Python读取拒绝，现只允许当前任务账本中摘要匹配的准确report.json；新增实际子进程读取、相邻文件/目录/写入拒绝、摘要变化和目录外拒绝用例1 passed（11.77秒）。
 
 模型两次路径误用属于已有契约的错误使用；现在显式说明DATA_REFS记录结构及唯一名称直接读取。桥接工具说明准确样式键，并将QGIS毫米/renderer参数指向现有类型化原生工具，避免模型反复删参数或删图层。增量独立审查clear，数据引用和真实原生渲染事实23项通过（78.96秒），无跳过；完整回归及真实模型复验正在执行，尚未更新安装。
+
+## 最终源码、安装与产物核验（2026-10-13）
+
+- 最终功能完整回归1211 passed（1077.55秒），无失败、无跳过；完整src/tests Ruff与差异检查通过。随后只补充mask_raster返回(array, transform)的描述与使用指南，安装版数据契约/运行时32 passed（75.69秒）。各次回归有重叠，不相加。
+- 新wheel已安装到D:/Python312/Lib/site-packages/geoharness。77个Python模块及6份技能的34个配套文件与源码、wheel逐字节一致。没有升级或修改上游依赖。
+- 去除PYTHONPATH，在项目之外新建的临时目录以终端PATH中的geoh启动：version、dry-run、qgis-doctor均返回0；组装15个工具。原生QGIS3.44.7与440个Processing算法可用，没有.openharness副作用。这里没有把dry-run当作MCP连接或模型质量通过。
+
+### 最新真实模型结果及边界
+
+使用原test04数据和新工作区 `.scratch/test04-live-20261013-160557`，主模型仍为用户原配置，审图模型仍使用既有配置。真实模型67次工具执行中7次错误：5次Python生成脚本错误，2次参数拒绝（provider JSON不完整、符号化字段不存在）。原生空间分析及QGIS实际创建成功；5个成功版本接受了真实视觉审查，状态依次为issues，问题数为4/3/4/5/5。没有再次出现线宽单位故障，地图预算阻止了第6次实际成图。
+
+此受控探针故意每8回合暂停，并允许5次续跑；总48回合后仍有pending工具结果，不能称为一次连续无人干预的完整模型交付验收。仅出现一次max推理耗尽恢复，后续续跑保留原任务。原始数据摘要保持一致。剩余脚本问题包括字符串数值运算、mask_raster解包、Shapely与GeoDataFrame边界接口混淆、全局工具产物读取拒绝，以及生成脚本解包错误。已明确裁剪返回格式；其余仍属真实模型准确性/准备回合的改进项。
+
+安装版geo_deliver随后单独核验交付，遵循持久回执选中第2版，保留实际11层及公路/铁路。没有重做分析、增加成功地图版本或再次调用视觉服务。已从交付的map.qgz按相同200DPI重导出PNG：主图、复制工程preview及重导出PNG的SHA256完全一致；分析事实按其verification_scope核验为verified，CRS名称为WGS 84 / UTM zone 48N。此验证证明同保存布局交付一致性，不证明视觉合格或原始空间分析已独立重算。
+
+最终交付仍为draft：真实视觉审查保留主图右侧留白、主图重点居民点标注拥挤、详图标注拥挤三项warning。第5版的模型口头结论不能覆盖实际五项问题回执；选择较好的第2版保留证据。
+
+本地证据：`.scratch/test04-final-pytest3.log`、`test04-release-parity.json`、`test04-installed-cli.json`、`test04-installed-contract.log`、`test04-final-artifact-verification.json`。验收交付位于 `.scratch/test04-live-20261013-160557/exports/test04-验收交付-hxqgswvw/`，含PNG、可编辑工程、数据/样式、summary.md/summary.json与回执。源码与安装检查完成；低错误率、无人干预结束及复杂标注的业务质量验收仍待后续完善。
