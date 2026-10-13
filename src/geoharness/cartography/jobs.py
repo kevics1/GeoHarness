@@ -828,19 +828,101 @@ def _receipt(
     return result
 
 
+def _layer_key(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() and len(value) <= 128 else None
+
+
+def _layer_metadata(report: dict, name: str, source_index: int) -> dict:
+    """Array positions may bind evidence inside one version, never between versions."""
+    values = report.get(name)
+    if not isinstance(values, list) or not 0 <= source_index < len(values):
+        return {}
+    value = values[source_index]
+    return value if isinstance(value, dict) else {}
+
+
+def _retention_layer_key(layer: dict, report: dict) -> str | None:
+    if key := _layer_key(layer.get("layer_key")):
+        return key
+    source_index = layer.get("source_index")
+    if type(source_index) is not int or source_index < 0:
+        return None
+    binding = _layer_metadata(report, "source_bindings", source_index)
+    metadata = _layer_metadata(report, "layers", source_index)
+    source = _layer_metadata(report, "layout_sources", source_index)
+    if key := _layer_key(binding.get("layer_key")):
+        return key
+    # A label, packaged data path, or feature count alone cannot establish identity.
+    path, label = binding.get("file_path"), binding.get("label")
+    kind = metadata.get("kind") or source.get("kind")
+    if (not isinstance(path, str) or not Path(path).is_absolute()
+            or "[redacted]" in path or not isinstance(label, str) or not label
+            or kind not in {"vector", "raster"}
+            or metadata.get("label", label) != label
+            or source.get("kind", kind) != kind):
+        return None
+    if "source_layer" in binding:
+        selector = binding["source_layer"]
+    elif "source_layer" in source:
+        selector = source["source_layer"]
+    elif kind == "raster" or Path(path).suffix.lower() in {".shp", ".geojson", ".json"}:
+        selector = ""
+    else:
+        # Legacy GeoPackages may hold several layers; the chosen one must be known.
+        return None
+    if type(selector) not in {str, int}:
+        return None
+    from geoharness.cartography.layer_identity import stable_layer_key
+
+    return stable_layer_key(kind, label, path, selector)
+
+
+def _retention_evidence(report: dict) -> tuple[dict[str, int], set[str], bool, bool]:
+    frame_checks = report.get("frame_checks")
+    checks = frame_checks.get("layers") if isinstance(frame_checks, dict) else None
+    if not isinstance(checks, list) or not checks:
+        return {}, set(), True, False
+    rows = []
+    seen: set[str] = set()
+    duplicated: set[str] = set()
+    for layer in checks:
+        if not isinstance(layer, dict):
+            rows.append((None, None, True))
+            continue
+        key = _retention_layer_key(layer, report)
+        if key in seen:
+            duplicated.add(key)
+        if key is not None:
+            seen.add(key)
+        count = layer.get("visible_feature_count")
+        count = count if type(count) is int and count >= 0 else None
+        rows.append((key, count, bool(layer.get("required"))))
+    visible, required = {}, set()
+    unknown_required, complete = False, True
+    for key, count, is_required in rows:
+        if key is None or count is None or key in duplicated:
+            unknown_required |= is_required
+            complete = False
+            continue
+        visible[key] = count
+        if is_required:
+            required.add(key)
+    return visible, required, unknown_required, complete
+
+
 def _delivery_candidate(job: dict[str, Any], index: dict[str, Any]) -> dict | None:
-    """Compare retained content and real quality; unknown visuals are never zero defects."""
+    """Compare stable retained identities; unknown coverage is never a verified full score."""
     candidates = []
-    maximum_visible: dict[int, int] = {}
+    maximum_visible: dict[str, int] = {}
+    evidence = {}
+    unknown_requirements = False
     for version in job["versions"]:
         report = version.get("stages", {}).get("data_checked", {}).get("report", {})
-        checks = report.get("frame_checks", {}).get("layers", [])
-        for layer in checks:
-            if layer.get("required") and isinstance(layer.get("visible_feature_count"), int):
-                source = layer.get("source_index")
-                if isinstance(source, int):
-                    maximum_visible[source] = max(maximum_visible.get(source, 0),
-                                                  layer["visible_feature_count"])
+        visible, required, unknown, complete = _retention_evidence(report)
+        evidence[version["version"]] = visible, complete
+        unknown_requirements |= unknown
+        for key in required:
+            maximum_visible[key] = max(maximum_visible.get(key, 0), visible[key])
     for version in reversed(job["versions"]):
         checked = _receipt({**job, "versions": [version]}, index, include_candidate=False)
         stages = checked["stages"]
@@ -857,25 +939,33 @@ def _delivery_candidate(job: dict[str, Any], index: dict[str, Any]) -> dict | No
         reference = stages["visual_checked"].get("report_reference", {})
         if reference.get("path"):
             candidate["review_path"] = reference["path"]
-        report = stages["data_checked"].get("report", {})
-        frame_checks = report.get("frame_checks", {})
-        visible = {layer.get("source_index"): layer.get("visible_feature_count", 0)
-                   for layer in frame_checks.get("layers", []) if layer.get("required")}
-        coverage = min((visible.get(source, 0) / count for source, count in maximum_visible.items()
-                        if count > 0), default=1.0)
+        visible, complete = evidence[version["version"]]
+        measured = [min(1.0, visible.get(key, 0) / count)
+                    for key, count in maximum_visible.items()
+                    if count > 0]
+        known_coverage = min(measured, default=0.0)
+        coverage_known = bool(measured) and complete and not unknown_requirements
+        coverage = known_coverage if coverage_known else None
+        # An unidentified historical requirement can hide missing content. Keep its
+        # lower bound at zero, and prefer complete identities over ambiguous records.
+        coverage_lower_bound = known_coverage if coverage_known else 0.0
         visual = stages["visual_checked"]
         issues = visual.get("report", {}).get("issues", [])
         errors = sum(issue.get("severity") == "error" for issue in issues)
         warnings = sum(issue.get("severity") == "warning" for issue in issues)
         tier = {"passed": 3, "issues": 2, "unverified": 1}.get(visual["status"], 0)
         candidate.update(visual_review_status=visual["status"], retained_coverage=coverage,
+                         coverage_status="verified" if coverage_known else "unknown",
+                         known_identity_coverage=known_coverage if measured else None,
+                         coverage_lower_bound=coverage_lower_bound,
                          coverage_scope=("required_native_frame_union"
-                                         if maximum_visible else "unknown"))
+                                         if coverage_known else "unknown"))
         candidate.update(version=version["version"], reason=(
             "Selected unchanged measured-layout candidate by required retained coverage, "
             "completed visual evidence and defect severity; all stage statuses stay truthful."
         ))
-        candidates.append(((coverage, tier, -errors, -warnings, version["version"]), candidate))
+        candidates.append(((coverage_lower_bound, int(complete), tier, -errors, -warnings,
+                            version["version"]), candidate))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 

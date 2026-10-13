@@ -177,7 +177,7 @@ _TOOL_CATALOG = """\
 - **geo_map_review**: Inspect an actual PNG/JPEG map produced by a Python script.
   - Provide file_path, task and evidence (expected layers, analysis/source summary).
   - Use the same map_id as geo_python. Consolidate concrete errors/warnings into
-    one repair. Stop on passed, unverified, info-only suggestions or budget exhaustion.
+    one repair. Stop on passed, unverified, info-only suggestions or no actionable change.
     Unchanged image checks are cached; never repeat a failed check blindly.
 - **geo_deliver**: Copy selected files and a project_dir into workspace exports.
   - Use the returned delivery_dir and qgis_project paths in the final answer.
@@ -193,8 +193,8 @@ _TOOL_CATALOG = """\
 - **geo_cartography**: Default PNG/PDF uses a structured QGIS layout and editable project
   - Actions: preflight, status, symbolize, compose, export, full, project
   - Follows bridge rules for analysis→symbolization mapping
-  - Rendered maps are visually reviewed and presentation repairs are bounded by
-    config.map_review.max_repairs. Pass review_task to preserve the user's map goal.
+  - Rendered maps are visually reviewed; generation and repair counts are unlimited.
+    Pass review_task to preserve the user's map goal.
     PNG is preferred for the first workflow. PDF/SVG are checked via PNG previews;
     interactive HTML requires its own screenshot and stays unverified without one.
     Prefer qgis_layout for main map, detail_extent, legend and footer_text. Declare map_crs
@@ -269,11 +269,10 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"Python enabled: {config.execution.enabled}. "
         f"QGIS enabled: {config.qgis.enabled}; check doctor for actual availability. "
         f"Visual review enabled: {config.map_review.enabled}. "
-        f"Maximum presentation repair rounds: {config.map_review.max_repairs}.\n"
-        f"All tools share a maximum of {config.map_review.max_reviews_per_request} "
-        f"image reviews and {config.map_review.total_timeout_seconds:g} seconds per user "
-        f"request; the active map workflow allows {1 + config.map_review.max_repairs} "
-        "successful render attempts. Changing aliases cannot replenish this budget.\n"
+        "Map generation, presentation repairs and image review counts are unlimited; "
+        "there is no cumulative review-time budget. Each individual execution/API call "
+        "still has its configured timeout. Stop on passed, no actionable repair, unchanged "
+        "or previously reviewed pixels, a concrete failure, or cancellation.\n"
         "Prepare title, legend, layers, extent and readable labels before the first render. "
         "Run QGIS preflight before the first create and read composition warnings. Dense "
         "key labels need PAL priority/distance/offset, smaller symbols or a detail_extent "
@@ -281,7 +280,7 @@ def _build_execution_section(config: GeoConfig) -> str:
         "style.obstacle. Route lines crossing the thematic focus need thinner width, lower "
         "opacity or a separate route/detail map; preserve all required layers and methods. "
         "When the same overlap persists after one consolidated repair, change composition "
-        "in the current request while versions remain; do not postpone known fixes until "
+        "in the current request; do not postpone known fixes until "
         "a new user request. Use qgis_patch only for QGIS mm/pt parameters, never Matplotlib "
         "width/height in inches or point_size in square points. "
         "Use native cartography only when it preserves every required symbol class, "
@@ -303,12 +302,12 @@ def _build_execution_section(config: GeoConfig) -> str:
         "separately. Never mark original-source correctness passed from a visual review. "
         "Fix a consolidated list of concrete errors/warnings; aesthetic preferences and "
         "info-only suggestions do not justify another version. After passed stop refining. "
-        "On an unavailable visual service or exhausted budget stop repeated model calls; "
+        "On an unavailable visual service stop repeated unchanged model calls; "
         "a successful visual result with issues requires fixing its concrete warnings "
-        "while versions remain. At exhaustion retain remaining "
-        "issues and label the delivery an unreviewed draft. A failed visual service is "
+        "when an actionable presentation repair exists. If no supported repair remains, "
+        "retain remaining issues and label the delivery a draft. A failed visual service is "
         "not evidence that the map is correct. Known measured layout defects still "
-        "need a consolidated presentation repair if a render version remains; do not "
+        "need a consolidated presentation repair; do not "
         "change data or analysis to fix them. A failed review is not a request to retry. "
         "Pixel/color counts (including colors inside a legend) and non-white ratios "
         "cannot prove layer visibility, feature counts, correct colors or absence of "

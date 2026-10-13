@@ -512,9 +512,9 @@ async def review_map(
         "不要把制图风格偏好当作错误。不能判断的部分说明未知。"
         "需要修正时只建议可确认的呈现参数；禁止换数据、改统计方法/字段/阈值。"
         "集中解决标签/符号与线路、主体面压盖、过大空白和底栏密集；不要只放大所有符号。"
-        "密集区已有可见遮挡时可立即建议下一版加详图或分图，不必耗尽版本预算。"
+        "密集区已有可见遮挡时可立即建议下一版加详图或分图；制图版本不设数量限制。"
         "使用issue_code标识具体问题；若previous_visual_reviews有同类问题仍未解决且"
-        "remaining_render_versions>0，next_strategy应明确提出当前请求内下一版的策略。"
+        "next_strategy应明确提出当前请求内下一版的可实施策略。"
         "详图/分图必须保留必要图层、分类与分析口径，范围须由实际坐标证据确定；"
         "不要从图片编造坐标或静默删层。"
         "无法靠呈现参数修复的问题保留在issues。"
@@ -607,7 +607,7 @@ async def review_map(
                 }
                 if settings.request_extra_body:
                     params["extra_body"] = settings.request_extra_body
-                # Internal SDK retries would consume calls outside our shared budget.
+                # Recovery is explicit; internal SDK retries would hide duplicate requests.
                 transport = client._client.with_options(max_retries=0)
                 diagnostics.update(stage="network", request_sent=True)
                 response = await transport.chat.completions.create(**params)

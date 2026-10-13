@@ -230,9 +230,6 @@ qgis:
 # 实际成图视觉检查；空 model/base_url/api_key 复用主模型
 map_review:
   enabled: true
-  max_repairs: 4
-  max_reviews_per_request: 5
-  total_timeout_seconds: 120
   timeout_seconds: 90
   max_tokens: 8192
   layout:

@@ -49,13 +49,13 @@ QGIS 使用 qgis_layout 的主图、可选 detail_extent、图例与 footer_text
 
 工具显式把图片和任务/图层/参数摘要送入视觉模型，检查空白、图层可见性、图例对应、文字乱码/遮挡、范围与布局。文件落盘不代表检查通过。
 
-将具体错误/警告合并为一份呈现修正清单，最多 map_review.max_repairs 轮（默认4，总计5次成功成图）。Matplotlib 路径可应用支持的呈现补丁自动重绘；默认 QGIS 路径会检查导出的图片，Agent 按实际问题修改支持的布局/样式参数并重绘，不能声称工具已经自动应用补丁。保留修正前地图与报告；不要因审美偏好、info 提示或无法确认的问题重绘，不自动改动源数据、分析口径或阈值。
+将具体错误/警告合并为一份呈现修正清单，不限制地图版本、修正次数和累积审查时长。Matplotlib 和默认 QGIS 路径可应用受支持且有证据的呈现补丁自动重绘。以工具回执说明实际执行了哪些修正；保留修正前地图与报告。不要因审美偏好、info 提示或无法确认的问题重绘，不自动改动源数据、分析口径或阈值。
 
-工具返回系统 UUID 作为 map_id；后续文件名、格式、Python/原生版本、审图与交付沿用它，不另造别名绕过预算。持久回执默认在工作区 .geoharness/maps/，cartography.jobs_dir 必须为工作区子目录。用户“继续/接着做/continue/resume”关联当前或最近持久任务；每次真实用户输入重置请求预算，内部恢复与自动续跑不重置。
+工具返回系统 UUID 作为 map_id；后续文件名、格式、Python/原生版本、审图与交付沿用它。持久回执默认在工作区 .geoharness/maps/，cartography.jobs_dir 必须为工作区子目录。用户“继续/接着做/continue/resume”关联当前或最近持久任务；保留已经完成的分析、版本和工具结果。
 
-同一用户请求的所有工具共享审查次数及时间预算，默认最多5次、120秒实际服务调用时间，不计中间分析、渲染和写报告耗时；当前请求最多初版加4轮成功成图，失败释放成图预留。预算与持久 UUID 分开，切换历史 map_id 也不补充额度。相同图片/审图配置使用缓存，失败也不盲目重试。实际检查完成后停止无依据的完善；视觉 unverified 或预算耗尽时停止视觉重试，有版本额度时仍可统一修复已测明确布局问题，随后草稿交付。
+地图生成和审查没有版数或次数预算。旧 max_repairs/max_reviews_per_request/total_timeout_seconds 配置被忽略；单次请求/脚本超时和用户取消仍有效。相同图片/审图配置使用缓存，失败不盲目重试。通过、没有有效修正、真实执行失败或重复计划/图片时结束自动修正，不声称额度耗尽。视觉 unverified 时保留原因，已测明确布局问题仍可修复，交付保持真实草稿状态。
 
-首版先用 QGIS preflight 查看 composition 密度提示；密集重点点使用 PAL priority/distance 或实际坐标 detail_extent，不等耗尽预算再建议分图。label_style 的 around_point 用 distance_mm；精确 offset_x_mm/offset_y_mm 选择 over_point，priority 为整数0–10。未标注的重要面/线可显式 style.obstacle=true。疏散线压盖主体用实际 width_mm/opacity/顺序修正，不能把 PAL 标签设置当成线符号避让。
+首版先用 QGIS preflight 查看 composition 密度提示；密集重点点使用 PAL priority/distance 或实际坐标 detail_extent，及时选择详图或分图。label_style 的 around_point 用 distance_mm；精确 offset_x_mm/offset_y_mm 选择 over_point，priority 为整数0–10。未标注的重要面/线可显式 style.obstacle=true。疏散线压盖主体用实际 width_mm/opacity/顺序修正，不能把 PAL 标签设置当成线符号避让。
 
 审图 QGIS 使用 qgis_patch（毫米/pt），Matplotlib 使用 layout_patch（英寸/平方pt），不混用。图层修改只用已核实的0-based layer_index；issues/issue_code、前两版摘要、实际剩余额度与 next_strategy 用来合并修正。同类遮挡修正后仍出现时，在当前请求还有额度时使用详图或分图，保留所需图层和分析口径；详图范围来自实际坐标，不能从图片猜。返回建议尚未执行，下一版仍检查实际图片。data/layout/package passed 不会覆盖 visual issues。
 
@@ -71,7 +71,7 @@ PDF/SVG 使用同参数 PNG 预览检查，不能替代导出文件自身的排�
 
 ## Python 自定义制图
 
-geo_python 生成图片后调用 geo_map_review(file_path=..., task=..., evidence=..., map_id=...)，使用与 Python 相同的 map_id。一次合并处理具体错误，遵守共享预算。保留脚本、产物和报告；未解决问题与地图一起说明，不因布局建议修改分析结果。
+geo_python 生成图片后调用 geo_map_review(file_path=..., task=..., evidence=..., map_id=...)，使用与 Python 相同的 map_id。合并处理具体错误。保留脚本、产物和报告；未解决问题与地图一起说明，不因布局建议修改分析结果。
 
 一次制图脚本生成多图时，系统只将最后写出的 primary_map 候选登记为一个版本，map_candidates 列出全部图片候选。附件不是连续修订；明确选择需审查/交付的主图。重审已登记旧图只更新该版本检查，不增加成图版本。
 

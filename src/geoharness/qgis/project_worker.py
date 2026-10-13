@@ -345,7 +345,8 @@ def _frame_evidence(
         required = source.get("required", True)
         minimum = source.get("minimum_visible_features", 1 if required else 0)
         valid = len(visible[index]) >= minimum and (bool(counts[index]) or not required)
-        checks.append({"source_index": index, "required": required,
+        checks.append({"source_index": index,
+            "layer_key": layer.customProperty("geoharness/layer_key", ""), "required": required,
             "visible_feature_count": len(visible[index]), "minimum_visible_features": minimum,
             "frames": counts[index], "valid": valid})
     frame_checks = {"scope": "union_of_rendered_map_frames", "layers": checks,
@@ -917,6 +918,15 @@ def _snapshot_layer(layer: Any, index: int, project: Any, context: Any) -> dict[
         options.driverName = "GPKG"
         options.layerName = f"layer_{index}"
         options.fileEncoding = "UTF-8"
+        primary_key = layer.customProperty("geoharness/snapshot_primary_key", "")
+        business_fields = layer.customProperty("geoharness/business_fields", [])
+        if primary_key:
+            if primary_key in business_fields:
+                raise ValueError("Internal snapshot key collides with a business field")
+            options.attributes = [field_index for field_index, field in enumerate(layer.fields())
+                                  if field.name() != primary_key]
+            options.skipAttributeCreation = not options.attributes
+            options.layerOptions = ["FID=" + primary_key]
         result = QgsVectorFileWriter.writeAsVectorFormatV3(
             layer,
             target,
@@ -1225,6 +1235,9 @@ def _layer_metadata(layer: Any) -> dict[str, Any]:
     source_index = layer.customProperty("geoharness/source_index", None)
     if source_index is not None:
         metadata["source_index"] = int(source_index)
+    layer_key = layer.customProperty("geoharness/layer_key", "")
+    if layer_key:
+        metadata["layer_key"] = layer_key
     if isinstance(layer, QgsVectorLayer):
         renderer = layer.renderer()
         metadata.update(
@@ -2018,6 +2031,21 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             project.setTitle(payload.get("title", ""))
             for index, layer in enumerate(layers):
                 layer.setCustomProperty("geoharness/source_index", index)
+                layer_key = payload["layers"][index].get("layer_key", "")
+                if not layer_key:
+                    from geoharness.cartography.layer_identity import stable_layer_key
+
+                    source = payload["layers"][index]
+                    path, _ = _local_source(source["file_path"], context)
+                    layer_key = stable_layer_key(source.get("kind", "vector"), layer.name(),
+                                                 str(path), source.get("layer_name", ""))
+                layer.setCustomProperty("geoharness/layer_key", layer_key)
+                bindings = (payload.get("_creation_spec") or {}).get("source_bindings", [])
+                if index < len(bindings) and bindings[index].get("snapshot_primary_key"):
+                    layer.setCustomProperty("geoharness/snapshot_primary_key",
+                                            bindings[index]["snapshot_primary_key"])
+                    layer.setCustomProperty("geoharness/business_fields",
+                                            bindings[index]["business_fields"])
                 project.addMapLayer(layer)
             project.layerTreeRoot().setHasCustomLayerOrder(True)
             project.layerTreeRoot().setCustomLayerOrder(list(reversed(layers)))

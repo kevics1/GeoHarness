@@ -883,9 +883,7 @@ class GeoCartographyTool(BaseTool):
             from geoharness.cartography.qgis_bridge import render_qgis_map
 
             return await render_qgis_map(self, args, rule, context)
-        stopped = reserve_map_render(identity, context.metadata, config)
-        if stopped:
-            return ToolResult(output=stopped, metadata={"render_budget_exhausted": True})
+        reserve_map_render(identity, context.metadata, config)
         try:
             result = await self._run_off_loop(
                 lambda: self._render_blocking(args, rule, outputs_dir, context),
@@ -1051,7 +1049,9 @@ class GeoCartographyTool(BaseTool):
         client = context.metadata.get("map_review_client")
         key = config.map_review.api_key or config.api_key
         can_review = config.map_review.enabled and (client is not None or (key and "${" not in key))
-        for attempt in range(config.map_review.max_repairs + 1):
+        attempt = 0
+        seen_layouts = {current.layout.model_dump_json()}
+        while True:
             if not can_review:
                 checked = MapReview(
                     status="unverified",
@@ -1104,16 +1104,15 @@ class GeoCartographyTool(BaseTool):
                     **budget,
                 }
             )
-            if checked.status != "issues" or attempt >= config.map_review.max_repairs:
+            if checked.status != "issues":
                 break
             if not any(issue.severity in {"error", "warning"} for issue in checked.issues):
                 break
             patched = apply_layout_patch(current.layout, checked.layout_patch)
-            if patched == current.layout:
+            if patched.model_dump_json() in seen_layouts:
                 break
-            stopped = reserve_map_render(args.map_id, context.metadata, config)
-            if stopped:
-                break
+            seen_layouts.add(patched.model_dump_json())
+            reserve_map_render(args.map_id, context.metadata, config)
             snapshot = artifacts / f"attempt-{attempt}{written.suffix}"
             previous = current
             try:
@@ -1139,6 +1138,7 @@ class GeoCartographyTool(BaseTool):
                 history.append({"attempt": attempt + 1, **checked.model_dump()})
                 break
             result = next_result
+            attempt += 1
         report_payload = {
             "output_path": str(written),
             "preview_path": str(preview) if preview else None,

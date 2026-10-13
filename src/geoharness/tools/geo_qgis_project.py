@@ -134,6 +134,10 @@ class QgisProjectLayer(BaseModel):
     file_path: str = Field(min_length=1, description="Existing local vector/raster source.")
     kind: Literal["vector", "raster"] = "vector"
     name: str = ""
+    layer_key: str = Field(default="", max_length=128, description=(
+        "Stable business layer identity across versions. Keep when replacing a derived file; "
+        "otherwise generated from original source, layer selector, kind and name."
+    ))
     layer_name: str = Field(default="", description="Optional source GeoPackage layer name.")
     style: QgisVectorStyle | None = None
     raster_style: QgisRasterStyle | None = None
@@ -556,9 +560,7 @@ class GeoQgisProjectTool(BaseTool):
                                         project_path)
             except (OSError, ValueError) as exc:
                 return ToolResult(output=f"Error: map task could not start: {exc}", is_error=True)
-            stop = reserve_map_render(identity, context.metadata, config)
-            if stop is not None:
-                return ToolResult(output=stop, metadata={"render_budget_exhausted": True})
+            reserve_map_render(identity, context.metadata, config)
         payload["map_id"] = identity
         try:
             execution = execute_qgis(
@@ -628,16 +630,23 @@ class GeoQgisProjectTool(BaseTool):
             if len(source_bindings) != len(snapshot.original_sources):
                 raise ValueError("Map bridge source bindings must match actual layers")
             for original, binding in zip(snapshot.original_sources, source_bindings):
+                primary_key = original.get("snapshot_primary_key")
+                business_fields = original.get("business_fields")
                 original.update(binding)
+                if primary_key is not None:
+                    original.update(snapshot_primary_key=primary_key,
+                                    business_fields=business_fields)
             for source, binding in zip(snapshot.layout_sources, source_bindings):
                 source.update(source=binding.get("file_path", source["source"]),
-                              derivation=binding.get("derivation"))
+                              derivation=binding.get("derivation"),
+                              layer_key=binding.get("layer_key", source["layer_key"]))
         for original, layer in zip(snapshot.original_sources, arguments.layers):
             if "derivation" not in original and layer.derivation is not None:
                 original["derivation"] = layer.derivation.model_dump(exclude_none=True)
         frozen = arguments.model_copy(update={
-            "layers": [layer.model_copy(update=updates)
-                       for layer, updates in zip(arguments.layers, snapshot.layers)],
+            "layers": [layer.model_copy(update={**updates, "layer_key": original["layer_key"]})
+                       for layer, updates, original in zip(arguments.layers, snapshot.layers,
+                                                          snapshot.original_sources)],
         })
         from geoharness.cartography.values import TEMPORAL_FIELDS, normalize_style
 

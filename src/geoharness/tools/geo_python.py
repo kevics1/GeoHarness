@@ -264,19 +264,13 @@ class GeoPythonTool(BaseTool):
         identity = arguments.map_id or map_identity(arguments.name)
         state = context.metadata.get("map_workflow_state", {})
         previous_renders = state.get("maps", {}).get(identity, {}).get("renders", 0)
-        budget_stop = reserve_python_render(
+        reserve_python_render(
             code=arguments.code,
             name=arguments.name,
             map_id=arguments.map_id,
             metadata=context.metadata,
             config=config,
         )
-        if budget_stop is not None:
-            return ToolResult(
-                output=budget_stop,
-                is_error=False,
-                metadata={"render_budget_exhausted": True},
-            )
         reserved = (
             context.metadata.get("map_workflow_state", {})
             .get("maps", {})

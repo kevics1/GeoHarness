@@ -164,7 +164,7 @@ async def test_non_json_text_is_not_persisted_as_a_reasoning_transcript(image):
 
 
 @pytest.mark.asyncio
-async def test_explicit_recovery_cannot_bypass_review_budget(image):
+async def test_explicit_recovery_is_not_stopped_by_legacy_review_count(image):
     metadata = {}
     config = GeoConfig(map_review=MapReviewConfig(max_reviews_per_request=1))
     reviewer = Reviewer([{**PASS, "status": "pass"}, PASS])
@@ -175,10 +175,10 @@ async def test_explicit_recovery_cannot_bypass_review_budget(image):
         image, config=config, task="Inspect", evidence={}, metadata=metadata, client=reviewer,
         retry_invalid_response=True,
     )
-    assert reviewer.calls == 1
-    assert flags["review_budget_exhausted"] is True
-    assert flags["request_sent"] is False
-    assert result.diagnostics["failure_stage"] == "budget"
+    assert reviewer.calls == 2
+    assert flags["review_budget_exhausted"] is False
+    assert flags["request_sent"] is True
+    assert result.status == "passed"
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ class GeoMapReviewInput(BaseModel):
     )
     retry_invalid_response: bool = Field(
         default=False,
-        description="Allow one budgeted retry of a cached JSON/schema failure; never loops.",
+        description="Allow one explicit retry of a cached JSON/schema failure; never loops.",
     )
     auto_repair: bool | None = Field(
         default=None, description="False disables evidence-bound automatic presentation repair.",
@@ -114,7 +114,7 @@ class GeoMapReviewTool(BaseTool):
         "Use after a Python or QGIS workflow produces a PNG map. Returns issues and "
         "suggestions using the verified backend's units; QGIS suggestions use qgis_patch "
         "and explicit zero-based layer_index. Automatic mode applies only image/ROI-bound "
-        "native presentation plans, re-renders in the same job budget and reviews the "
+        "native presentation plans, re-renders in the same map job and reviews the "
         "actual new PNG. Returns the selected candidate, final_render and repair_stop_reason; "
         "use these returned artifacts and do not repeat an already applied repair plan. "
         "Unsupported suggestions remain issues. Review-only mode does not apply patches; "
@@ -153,9 +153,13 @@ class GeoMapReviewTool(BaseTool):
             latest_render = None
             repaired = 0
             stop = "review_complete"
+            repair_failure = None
+            first_image = Path(first.metadata["image_path"])
+            first_digest = hashlib.sha256(first_image.read_bytes()).hexdigest()
+            seen_images = {first_digest}
             enabled = (arguments.auto_repair if arguments.auto_repair is not None
                        else config.map_review.auto_repair)
-            for _ in range(1 + config.map_review.max_repairs):
+            while True:
                 if current.metadata.get("review_status") != "issues" or not enabled:
                     stop = "review_complete" if enabled else "review_only"
                     break
@@ -190,10 +194,11 @@ class GeoMapReviewTool(BaseTool):
                     rendered = await GeoQgisProjectTool().execute(
                         plan.parameters, context, _source_bindings=plan.source_bindings)
                     if rendered.is_error:
-                        stop = "Native presentation create failed; prior candidate retained."
-                        break
-                    if rendered.metadata.get("render_budget_exhausted"):
-                        stop = "Successful map-version limit reached; remaining issues retained."
+                        repair_failure = {"stage": "native_presentation_create",
+                                          "output": rendered.output,
+                                          "metadata": rendered.metadata}
+                        stop = ("Native presentation create failed; prior candidate retained. "
+                                + rendered.output)
                         break
                     preview = (rendered.metadata.get("preview_path")
                                or rendered.metadata.get("primary_map"))
@@ -203,12 +208,14 @@ class GeoMapReviewTool(BaseTool):
                     repaired += 1
                     latest_render = rendered.metadata
                     new_digest = hashlib.sha256(Path(preview).read_bytes()).hexdigest()
-                    if new_digest == hashlib.sha256(image.read_bytes()).hexdigest():
+                    if new_digest in seen_images:
                         current = ToolResult(output=current.output, metadata={
                             **current.metadata, "image_path": str(preview),
                         })
-                        stop = "Presentation repair produced unchanged pixels; no repeat review."
+                        stop = ("Presentation repair produced previously reviewed pixels; "
+                                "no repeat review.")
                         break
+                    seen_images.add(new_digest)
                     current = await self._review_one(arguments.model_copy(update={
                         "file_path": str(preview), "map_id": identity,
                         "retry_invalid_response": False,
@@ -217,11 +224,10 @@ class GeoMapReviewTool(BaseTool):
                         stop = "Review of the new PNG failed; visual quality is unverified."
                         break
                 except (OSError, ValueError, RuntimeError) as exc:
+                    repair_failure = {"stage": "presentation_validation", "error": str(exc)}
                     stop = (str(exc) if isinstance(exc, RepairUnavailable)
-                            else "Presentation validation failed; issues retained.")
+                            else f"Presentation validation failed; issues retained. {exc}")
                     break
-            else:
-                stop = "Successful map-version limit reached; remaining issues retained."
             latest_image = current.metadata.get("image_path", first.metadata["image_path"])
             receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
                                       map_id=identity, artifact_path=Path(latest_image))
@@ -257,6 +263,7 @@ class GeoMapReviewTool(BaseTool):
                 "latest_review_path": current.metadata.get("review_path"),
                 "latest_render": latest_render, "repair_count": repaired,
                 "repair_stop_reason": stop,
+                "repair_failure": repair_failure,
                 "selected_candidate": candidate, "final_render": final_render,
                 "image_path": selected_image, "review_status": selected_review,
                 "image_sha256": selected.get("image_sha256"), "review_path": selected_review_path,

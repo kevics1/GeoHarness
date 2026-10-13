@@ -332,15 +332,22 @@ async def test_failed_native_render_refunds_only_its_reservation(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_render_budget_denial_does_not_refund_prior_successes(tmp_path, monkeypatch):
+async def test_legacy_limit_allows_render_and_preserves_prior_success_accounting(
+    tmp_path, monkeypatch,
+):
     tool = GeoCartographyTool()
     original = tool._run_off_loop
 
-    async def preflight_only(work, *, what):
+    async def preflight_and_render(work, *, what):
+        if what == "map rendering":
+            from openharness.tools.base import ToolResult
+
+            return ToolResult(output="Rendered",
+                              metadata={"output_path": str(tmp_path / "map.png")})
         assert what == "map preflight"
         return await original(work, what=what)
 
-    monkeypatch.setattr(tool, "_run_off_loop", preflight_only)
+    monkeypatch.setattr(tool, "_run_off_loop", preflight_and_render)
     context = ToolExecutionContext(cwd=tmp_path, metadata={
         "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=0)),
         "map_workflow_state": {"maps": {"risk": {"renders": 1, "reviews": 0}}},
@@ -349,8 +356,8 @@ async def test_render_budget_denial_does_not_refund_prior_successes(tmp_path, mo
     result = await tool.execute(GeoCartographyInput(
         geojson=points.to_json(), map_id="risk", output_format="png",
     ), context)
-    assert result.metadata["render_budget_exhausted"] is True
-    assert context.metadata["map_workflow_state"]["maps"]["risk"]["renders"] == 1
+    assert not result.metadata.get("render_budget_exhausted", False)
+    assert context.metadata["map_workflow_state"]["maps"]["risk"]["renders"] == 2
 
 
 @pytest.mark.asyncio

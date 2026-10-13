@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from geoharness.cartography.layer_identity import stable_layer_key
 from geoharness.cartography.values import TEMPORAL_FIELDS, frame_content, normalize_frame
 
 
@@ -72,7 +73,8 @@ def freeze_qgis_inputs(
                 ):
                     snapshot.remember_source(guard.read_path(str(companion)))
         name = spec.get("name") or path.stem
-        snapshot.original_sources.append({"file_path": str(path), "label": name})
+        snapshot.original_sources.append({"file_path": str(path), "label": name,
+                                          "kind": spec.get("kind", "vector")})
         if spec.get("kind", "vector") == "raster":
             if options or path.suffix.lower() not in _RASTER_SUFFIXES:
                 raise ValueError("Raster sources require one local raster file")
@@ -95,9 +97,12 @@ def freeze_qgis_inputs(
                     ),
                 }
             data = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
+            key = spec.get("layer_key") or stable_layer_key("raster", name, str(path))
+            snapshot.original_sources[-1]["layer_key"] = key
             snapshot.layout_sources.append({"source": str(path), "kind": "raster",
+                "layer_key": key,
                 "data_sha256": hashlib.sha256(data.encode()).hexdigest()})
-            snapshot.layers.append({"file_path": str(target), "name": name})
+            snapshot.layers.append({"file_path": str(target), "name": name, "layer_key": key})
         else:
             if path.suffix.lower() not in _VECTOR_SUFFIXES:
                 raise ValueError("Vector sources require GPKG, SHP, GeoJSON or FlatGeobuf")
@@ -105,6 +110,8 @@ def freeze_qgis_inputs(
             if not selected and options:
                 selector, value = options.split("=", 1)
                 selected = int(value) if selector == "layerid" else value
+            key = spec.get("layer_key") or stable_layer_key("vector", name, str(path), selected)
+            snapshot.original_sources[-1].update(layer_key=key, source_layer=selected)
             frame = gpd.read_file(path, **({"layer": selected} if selected != "" else {}))
             frame = normalize_frame(frame)
             if frame.crs is None:
@@ -121,6 +128,7 @@ def freeze_qgis_inputs(
                 "features": frame_content(frame)}, sort_keys=True, separators=(",", ":"),
                 ensure_ascii=False)
             snapshot.layout_sources.append({"source": str(path), "kind": "vector",
+                "layer_key": key,
                 "source_layer": selected, "derivation": spec.get("derivation"),
                 "data_sha256": hashlib.sha256(data.encode()).hexdigest()})
             target = snapshot.directory / f"layer_{index}.gpkg"
@@ -132,9 +140,12 @@ def freeze_qgis_inputs(
                 fid += "_"
             while geometry.casefold() in columns or geometry.casefold() == fid.casefold():
                 geometry += "_"
+            snapshot.original_sources[-1]["snapshot_primary_key"] = fid
+            snapshot.original_sources[-1]["business_fields"] = [
+                str(column) for column in frame.columns if column != frame.geometry.name]
             frame.to_file(target, driver="GPKG", layer=layer_name, index=False,
                           FID=fid, GEOMETRY_NAME=geometry)
             snapshot.layers.append({"file_path": str(target), "layer_name": layer_name,
-                                    "name": name})
+                                    "name": name, "layer_key": key})
     snapshot.verify_sources()
     return snapshot

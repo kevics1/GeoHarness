@@ -241,7 +241,7 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
             "data_refs": references,
             "data_root": str(_root(cwd, config.data.file_dir or "."))}
     state = metadata.get("map_workflow_state", {})
-    data["render_budget"] = {"successful_versions_per_request": 1 + config.map_review.max_repairs,
+    data["render_budget"] = {"successful_versions_per_request": None, "generation_unlimited": True,
         "used": {key: entry.get("renders", 0) for key, entry in
                  list(state.get("maps", {}).items())[-8:]
                  if isinstance(key, str) and len(key) <= 128 and isinstance(entry, dict)}}

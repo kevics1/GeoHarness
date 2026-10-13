@@ -1,4 +1,4 @@
-"""Shared budgets for map versions and image reviews within one user request."""
+"""Shared map accounting, review caching and repair deduplication per request."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDic
 _REPAIR_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 # Bump only when the response contract/compatibility changes. Legacy failed
 # cache entries can then recover without repeatedly resending unchanged images.
-REVIEW_CONTRACT_VERSION = 5
+REVIEW_CONTRACT_VERSION = 6
 _BUDGET_LOCK = threading.RLock()
 
 
@@ -120,15 +120,9 @@ def reserve_map_render(
     metadata: dict[str, Any],
     config: GeoConfig,
 ) -> str | None:
+    """Record a render attempt; legacy callers never receive a budget stop."""
     with _BUDGET_LOCK:
         _, entry = _budget_entry(name, metadata, config)
-        limit = 1 + config.map_review.max_repairs
-        if entry["renders"] >= limit:
-            return (
-                f"Map '{name}' reached its {limit}-version budget for this request. "
-                "Stop automatic refinements and deliver the latest map, editable project and "
-                "remaining issues. A new user request can authorize further edits."
-            )
         entry["renders"] += 1
         return None
 
@@ -242,14 +236,11 @@ async def review_with_budget(
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     from geoharness.cartography.review_context import build_review_iteration_context
 
-    # A request shares one budget even when reviewing another persisted map.
-    # History belongs to the actual artifact, not to that shared budget UUID.
+    # History belongs to the actual artifact, not to the shared accounting UUID.
     iteration = build_review_iteration_context(
         metadata, map_id or image_map_identity(path), config, image_sha256=digest,
     )
-    budget = build_review_iteration_context(metadata, identity, config, receipt={})
-    evidence = {**evidence, **iteration,
-                "remaining_render_versions": budget["remaining_render_versions"]}
+    evidence = {**evidence, **iteration}
     lock_key = (id(state), digest)
     lock = _REVIEW_LOCKS.get(lock_key)
     if lock is None:
@@ -337,34 +328,13 @@ async def _review_once(
             }
     identity = map_id or image_map_identity(path)
     entry = state["maps"].setdefault(identity, {"renders": 0, "reviews": 0})
-    remaining_seconds = (
-        settings.total_timeout_seconds - state["seconds"] - state["reserved_seconds"]
-    )
-    if (
-        state["reviews"] >= settings.max_reviews_per_request
-        or entry["reviews"] >= settings.max_repairs + 1
-        or remaining_seconds <= 0
-    ):
-        return MapReview(
-            status="unverified",
-            summary=(
-                "Visual review budget reached. Do not retry or create more previews; "
-                "deliver the current map and editable project with this limitation."
-            ),
-            diagnostics={
-                "stage": "budget",
-                "outcome": "failed",
-                "failure_stage": "budget",
-                "request_sent": False,
-            },
-        ), {**flags, "review_budget_exhausted": True, "review_failure_stage": "budget"}
     if recovery:
         state["validation_retries"][retry_key] = True
         flags["invalid_response_retry"] = True
-    # Reserve before yielding, so parallel tool calls cannot overspend the count.
+    # Keep usage accounting without stopping later images or shortening requests.
     state["reviews"] += 1
     entry["reviews"] += 1
-    timeout = min(settings.timeout_seconds, remaining_seconds)
+    timeout = settings.timeout_seconds
     state["reserved_seconds"] += timeout
     bounded = settings.model_copy(
         update={

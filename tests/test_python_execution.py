@@ -713,7 +713,7 @@ async def test_tool_error_status_uses_child_exit_not_stderr(
 
 
 @pytest.mark.parametrize("map_id", ["", "fire-map"])
-async def test_python_map_version_budget_stops_before_execution_and_keeps_analysis_available(
+async def test_legacy_budget_does_not_stop_python_maps_or_analysis(
     tmp_path: Path, monkeypatch, map_id: str
 ):
     executed = []
@@ -740,15 +740,14 @@ async def test_python_map_version_budget_stops_before_execution_and_keeps_analys
         GeoPythonInput(code="plt.savefig('map.png')", name=names[1], map_id=map_id), context
     )
     assert not stopped.is_error
-    assert stopped.metadata["render_budget_exhausted"]
-    assert "Stop automatic refinements" in stopped.output
-    assert len(executed) == 1
+    assert not stopped.metadata.get("render_budget_exhausted", False)
+    assert len(executed) == 2
     analysis = await tool.execute(
         GeoPythonInput(code="print('plt.savefig is only text')", name=names[1], map_id=map_id),
         context,
     )
     assert not analysis.is_error
-    assert len(executed) == 2
+    assert len(executed) == 3
 
 
 async def test_tool_can_read_analysis_maps_and_prior_runs_without_granting_source_writes(

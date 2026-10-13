@@ -387,7 +387,9 @@ def test_iteration_context_keeps_two_earlier_reviews_and_real_remaining_versions
     context = build_review_iteration_context(
         metadata, "map", config, receipt={"versions": versions}, image_sha256="4",
     )
-    assert context["remaining_render_versions"] == 1 + config.map_review.max_repairs - 2
+    assert context["remaining_render_versions"] is None
+    assert context["version_limit"] is None
+    assert context["generation_unlimited"] is True
     assert [item["version"] for item in context["previous_visual_reviews"]] == [2, 3]
     assert context["previous_visual_reviews"][0]["issues"][0]["issue_code"] == "other"
     assert context["previous_visual_reviews"][1]["issues"][0]["issue_code"] == "label_overlap"

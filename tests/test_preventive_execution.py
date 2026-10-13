@@ -64,13 +64,12 @@ def test_dynamic_context_bounds_whole_records_including_long_artifact_paths(tmp_
     assert all(item["path"].endswith("/result.geojson") for item in document["existing_outputs"])
 
 
-def test_default_budget_permits_five_versions_and_refuses_sixth():
+def test_map_generation_remains_unlimited_after_many_versions():
     config = GeoConfig()
     metadata = {}
-    assert config.map_review.max_reviews_per_request >= 5
-    for _ in range(5):
+    for _ in range(100):
         assert reserve_map_render("test02", metadata, config) is None
-    assert reserve_map_render("test02", metadata, config) is not None
+    assert metadata["map_workflow_state"]["maps"]["test02"]["renders"] == 100
 
 
 def test_reversed_graduated_ranges_are_canonicalized_without_changing_colors():

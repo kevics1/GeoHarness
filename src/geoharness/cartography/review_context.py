@@ -1,4 +1,4 @@
-"""Bounded review history and remaining versions, read without changing receipts."""
+"""Bounded review history and unlimited generation, without changing receipts."""
 
 from __future__ import annotations
 
@@ -42,16 +42,10 @@ def build_review_iteration_context(
     receipt: dict[str, Any] | None = None, image_sha256: str = "",
 ) -> dict[str, Any]:
     """Read at most two earlier visual summaries; expose no raw provider diagnostics."""
-    workflow = metadata.get("map_workflow_state", {})
-    maps = workflow.get("maps", {}) if isinstance(workflow, dict) else {}
-    entry = maps.get(map_id, {}) if isinstance(maps, dict) else {}
-    renders = entry.get("renders", 0) if isinstance(entry, dict) else 0
-    if not isinstance(renders, int) or isinstance(renders, bool):
-        renders = 0
-    limit = 1 + config.map_review.max_repairs
     result = {
-        "version_limit": limit,
-        "remaining_render_versions": max(0, limit - max(0, renders)),
+        "version_limit": None,
+        "remaining_render_versions": None,
+        "generation_unlimited": True,
         "previous_visual_reviews": [],
     }
     receipt = receipt if isinstance(receipt, dict) else _existing_receipt(metadata, map_id, config)

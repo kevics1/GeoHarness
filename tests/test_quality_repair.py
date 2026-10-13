@@ -271,6 +271,68 @@ async def test_automatic_review_creates_once_in_same_job_and_reviews_new_png(tmp
     assert result.metadata["latest_review_status"] == "passed"
 
 
+@pytest.mark.parametrize("outcome", ["passed_after_eight", "create_failed", "pixel_cycle"])
+async def test_unlimited_repairs_stop_on_outcome_and_expose_create_failure(
+    tmp_path, monkeypatch, outcome,
+):
+    from types import SimpleNamespace
+
+    from openharness.config.settings import PermissionSettings
+    from openharness.permissions.checker import PermissionChecker
+    from openharness.tools.base import ToolExecutionContext, ToolResult
+    from test_map_review_evidence import Reviewer
+
+    from geoharness.config.settings import MapReviewConfig
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+    from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
+
+    image, receipt, metadata, _ = package(tmp_path)
+    reviewer = Reviewer(overlapping_review().model_dump(exclude={"diagnostics"}))
+    metadata.update(geoharness_config=GeoConfig(map_review=MapReviewConfig(
+        max_repairs=0, max_reviews_per_request=1, total_timeout_seconds=0.001)),
+        map_review_client=reviewer,
+        geoharness_permission_checker=PermissionChecker(
+            PermissionSettings(allowed_tools=["geo_qgis_project"])))
+    calls = []
+
+    def plan(*args, **kwargs):
+        return SimpleNamespace(digest=f"plan-{len(calls)}", source_bindings=[],
+                               parameters=SimpleNamespace(map_id=receipt["job_id"]))
+
+    async def create(self, arguments, context, **kwargs):
+        calls.append(arguments)
+        if outcome == "create_failed":
+            return ToolResult(output="Error: data fingerprint mismatch for layer 4",
+                              is_error=True, metadata={"failure_stage": "preflight"})
+        color = "white" if outcome == "pixel_cycle" and len(calls) == 2 else (
+            10 * len(calls), 20, 40)
+        rendered, _, _, _ = package(tmp_path, metadata, name=f"repair-{len(calls)}",
+                                    color=color, map_id=arguments.map_id)
+        if outcome == "passed_after_eight" and len(calls) == 8:
+            reviewer.response = {"status": "passed", "summary": "Readable", "issues": []}
+        return ToolResult(output="Created", metadata={"preview_path": str(rendered),
+                          "project_dir": str(rendered.parent)})
+
+    monkeypatch.setattr("geoharness.cartography.quality_repair.build_repair_plan", plan)
+    monkeypatch.setattr(GeoQgisProjectTool, "execute", create)
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(image), task="Preserve capacity"),
+        ToolExecutionContext(cwd=tmp_path, metadata=metadata))
+    if outcome == "create_failed":
+        assert len(calls) == 1
+        assert "data fingerprint mismatch" in result.output
+        assert result.metadata["repair_failure"]["metadata"]["failure_stage"] == "preflight"
+        assert result.metadata["repair_failure"]["output"].endswith("layer 4")
+    elif outcome == "pixel_cycle":
+        assert len(calls) == 2
+        assert len(reviewer.requests) == 2
+        assert "previously reviewed pixels" in result.metadata["repair_stop_reason"]
+    else:
+        assert len(calls) == result.metadata["repair_count"] == 8
+        assert len(reviewer.requests) == 9
+        assert result.metadata["latest_review_status"] == "passed"
+
+
 def test_copying_an_older_selected_package_does_not_create_a_render_version(tmp_path):
     from geoharness.cartography.jobs import map_job_receipt, record_map_selection
 

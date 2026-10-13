@@ -117,9 +117,14 @@ class MapReviewConfig(BaseModel):
         default_factory=dict,
         description="Optional provider request extensions; empty inherits provider defaults.",
     )
-    max_repairs: int = Field(default=4, ge=0, le=4)
-    max_reviews_per_request: int = Field(default=5, ge=0, le=20)
-    total_timeout_seconds: float = Field(default=120, gt=0, le=900)
+    # Accepted for existing configuration files; generation has no count or
+    # cumulative review-time limit. timeout_seconds still bounds each request.
+    max_repairs: int = Field(default=4, ge=0, deprecated=True,
+                            description="Legacy setting; ignored for map generation.")
+    max_reviews_per_request: int = Field(default=5, ge=0, deprecated=True,
+                                        description="Legacy setting; review count is unlimited.")
+    total_timeout_seconds: float = Field(default=120, gt=0, deprecated=True,
+                                        description="Legacy setting; cumulative time is unlimited.")
     timeout_seconds: float = Field(default=90, gt=0, le=300)
     max_tokens: int = Field(default=8192, ge=256, le=65536)
     max_image_side: int = Field(default=1800, ge=256, le=4096)

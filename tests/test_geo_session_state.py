@@ -196,8 +196,8 @@ def test_alias_identity_counts_seconds_and_current_lower_limits_survive(backend,
     assert restored["map_job_state"]["budget_job_id"] == job
     assert restored["map_job_state"]["request_id"] == metadata["map_job_state"]["request_id"]
     assert restored["map_job_state"]["jobs_dir"] == str(tmp_path / config.cartography.jobs_dir)
-    assert reserve_map_render("risk-v3", restored, smaller) is not None
-    assert maps[job]["renders"] == 2  # A failed reservation must not double charge old aliases.
+    assert reserve_map_render("risk-v3", restored, smaller) is None
+    assert maps[job]["renders"] == 3  # Restored legacy limits cannot stop new renders.
 
 
 def test_equal_distinct_entries_are_not_accidentally_deduplicated(backend, tmp_path, monkeypatch):

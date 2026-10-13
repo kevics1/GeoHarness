@@ -249,8 +249,8 @@ async def test_create_and_export_share_budget_and_keep_saved_layout(tmp_path, mo
         map_id="stable-map",
     )
     result = await GeoQgisProjectTool().execute(exported, context)
-    assert result.metadata["render_budget_exhausted"]
-    assert len(calls) == 1
+    assert not result.metadata.get("render_budget_exhausted", False)
+    assert len(calls) == 2
     context = _context(tmp_path)
     result = await GeoQgisProjectTool().execute(exported, context)
     assert not result.is_error

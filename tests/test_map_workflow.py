@@ -70,7 +70,8 @@ async def test_shared_budget_keeps_history_of_actual_historical_map(tmp_path, mo
     monkeypatch.setattr(workflow, "review_map", review)
     await review_with_budget(image, config=config, task="Check", evidence={}, metadata=metadata,
                              map_id=actual)
-    assert captured[0]["remaining_render_versions"] == 3
+    assert captured[0]["remaining_render_versions"] is None
+    assert captured[0]["generation_unlimited"] is True
     assert captured[0]["previous_visual_reviews"][0]["issues"][0]["issue_code"] == "label_overlap"
 
 
@@ -99,7 +100,7 @@ async def test_unchanged_map_is_not_sent_to_model_repeatedly(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_changed_names_cannot_reset_request_review_budget(tmp_path):
+async def test_legacy_review_count_does_not_stop_distinct_images(tmp_path):
     reviewer = Reviewer()
     context = ToolExecutionContext(
         cwd=tmp_path,
@@ -119,8 +120,8 @@ async def test_changed_names_cannot_reset_request_review_budget(tmp_path):
                 context,
             )
         )
-    assert reviewer.calls == 1
-    assert results[-1].metadata["review_budget_exhausted"] is True
+    assert reviewer.calls == 2
+    assert results[-1].metadata["review_budget_exhausted"] is False
     assert not results[-1].is_error
 
 
@@ -129,7 +130,7 @@ def test_request_reset_preserves_shared_dict_and_starts_new_budget():
     shallow_copy = dict(metadata)
     config = GeoConfig(map_review=MapReviewConfig(max_repairs=0))
     assert reserve_map_render("fire", shallow_copy, config) is None
-    assert reserve_map_render("fire", metadata, config) is not None
+    assert reserve_map_render("fire", metadata, config) is None
     reset_map_workflow(metadata)
     assert shallow_copy["map_workflow_state"] is metadata["map_workflow_state"]
     assert reserve_map_render("fire", shallow_copy, config) is None
@@ -142,7 +143,7 @@ def test_failed_render_refund_preserves_the_next_valid_attempt():
     assert refund_map_render("fire", metadata)
     assert not refund_map_render("fire", metadata)
     assert reserve_map_render("fire", metadata, config) is None
-    assert reserve_map_render("fire", metadata, config) is not None
+    assert reserve_map_render("fire", metadata, config) is None
 
 
 @pytest.mark.asyncio
@@ -236,8 +237,8 @@ async def test_parallel_distinct_images_reserve_and_release_only_available_revie
     ]
     try:
         await asyncio.wait_for(entered.wait(), 1)
-        assert sorted(timeouts) == [30, 90]
-        assert metadata["map_workflow_state"]["reserved_seconds"] == 120
+        assert sorted(timeouts) == [90, 90]
+        assert metadata["map_workflow_state"]["reserved_seconds"] == 180
     finally:
         release.set()
         await asyncio.gather(*tasks)
@@ -246,7 +247,7 @@ async def test_parallel_distinct_images_reserve_and_release_only_available_revie
 
 
 @pytest.mark.asyncio
-async def test_review_time_budget_stops_new_images_without_calling_provider(tmp_path):
+async def test_legacy_total_review_time_does_not_stop_new_images(tmp_path):
     image = tmp_path / "map.png"
     Image.new("RGB", (32, 32), "white").save(image)
     metadata = {"map_workflow_state": {"seconds": 121}}
@@ -254,9 +255,9 @@ async def test_review_time_budget_stops_new_images_without_calling_provider(tmp_
     review, flags = await review_with_budget(
         image, config=GeoConfig(), task="Check", evidence={}, metadata=metadata, client=reviewer
     )
-    assert flags["review_budget_exhausted"]
+    assert not flags["review_budget_exhausted"]
     assert review.status == "unverified"
-    assert reviewer.calls == 0
+    assert reviewer.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -285,7 +286,7 @@ def test_imported_drawing_aliases_share_python_version_budget(code):
         "config": config,
     }
     assert reserve_python_render(**kwargs) is None
-    assert reserve_python_render(**kwargs) is not None
+    assert reserve_python_render(**kwargs) is None
 
 
 @pytest.mark.asyncio
@@ -325,10 +326,10 @@ def test_request_job_aliases_share_render_budget_and_legacy_entry_identity(tmp_p
     begin_map_request(metadata, cwd=tmp_path, config=config)
     job_id = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="risk")
     assert reserve_map_render(job_id, metadata, config) is None
-    assert reserve_map_render("different-name-v9", dict(metadata), config) is not None
+    assert reserve_map_render("different-name-v9", dict(metadata), config) is None
     maps = metadata["map_workflow_state"]["maps"]
     assert maps["risk"] is maps[job_id] is maps["different-name-v9"]
-    assert maps["risk"]["renders"] == 1
+    assert maps["risk"]["renders"] == 2
     assert refund_map_render("risk", metadata)
     assert reserve_map_render("another-alias", metadata, config) is None
     assert maps["another-alias"] is maps[job_id]
@@ -340,7 +341,7 @@ def test_continuation_keeps_job_and_real_new_input_resets_budget(tmp_path):
     begin_map_request(metadata, cwd=tmp_path, config=config)
     first = ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="risk")
     assert reserve_map_render(first, metadata, config) is None
-    assert reserve_map_render("new-name", metadata, config) is not None
+    assert reserve_map_render("new-name", metadata, config) is None
     reset_map_workflow(metadata)
     begin_map_request(metadata, cwd=tmp_path, config=config, continuation=True)
     assert ensure_map_job(metadata, cwd=tmp_path, config=config, map_id="continue") == first
@@ -370,7 +371,7 @@ def test_historical_alias_cannot_replenish_current_request_budget(tmp_path):
     reset_map_workflow(metadata)
     begin_map_request(metadata, cwd=tmp_path, config=config)
     assert reserve_map_render("old-A", metadata, config) is None
-    assert reserve_map_render("old-B", metadata, config) is not None
+    assert reserve_map_render("old-B", metadata, config) is None
     assert refund_map_render("old-A", metadata)
     assert reserve_map_render("old-B", metadata, config) is None
 
@@ -396,7 +397,7 @@ async def test_changed_aliases_share_per_job_review_limit(tmp_path):
                 client=reviewer,
             )
         )
-    assert reviewer.calls == 1
-    assert results[-1][1]["review_budget_exhausted"]
+    assert reviewer.calls == 2
+    assert not results[-1][1]["review_budget_exhausted"]
     maps = metadata["map_workflow_state"]["maps"]
     assert maps["first"] is maps["second"]

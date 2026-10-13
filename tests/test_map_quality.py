@@ -151,15 +151,15 @@ async def test_pixels_and_evidence_reach_review_and_real_map_is_repaired(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_repairs_stop_at_configured_limit_with_remaining_issues(tmp_path):
-    reviewer = Reviewer([FIX, {**FIX, "layout_patch": {"height": 10}}])
+async def test_legacy_limit_does_not_stop_actionable_repairs_before_pass(tmp_path):
+    reviewer = Reviewer([FIX, {**FIX, "layout_patch": {"height": 10}}, PASS])
     result = await GeoCartographyTool().execute(GeoCartographyInput(
         action="full", layers=json.dumps([{"geojson": data(), "label": "居民点"}]),
         output_format="png", output_path=str(tmp_path / "map.png"),
     ), context(tmp_path, reviewer, repairs=1))
-    assert result.metadata["review_status"] == "issues"
-    assert result.metadata["repair_count"] == 1
-    assert len(reviewer.requests) == 2
+    assert result.metadata["review_status"] == "passed"
+    assert result.metadata["repair_count"] == 2
+    assert len(reviewer.requests) == 3
 
 
 @pytest.mark.asyncio
@@ -418,8 +418,7 @@ def test_new_config_validates_limits_and_expands_vision_fields(tmp_path, monkeyp
     path.write_text('map_review:\n  max_repairs: -1\n', encoding="utf-8")
     with pytest.raises(ValidationError):
         load_geo_config(path)
-    with pytest.raises(ValidationError):
-        MapReviewConfig(max_repairs=5)
+    assert MapReviewConfig(max_repairs=100).max_repairs == 100
 
 
 @pytest.mark.asyncio

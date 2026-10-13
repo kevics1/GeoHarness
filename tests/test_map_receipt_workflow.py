@@ -126,7 +126,8 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
     )[1])["evidence"]
     assert "versions" not in review_payload
     assert review_payload["previous_visual_reviews"] == []
-    assert review_payload["remaining_render_versions"] == 0
+    assert review_payload["remaining_render_versions"] is None
+    assert review_payload["generation_unlimited"] is True
     receipt = mapped.metadata["map_receipt"]
     assert receipt["quality_status"] == "passed"
     assert receipt["analysis_correctness"] == "unverified"
@@ -148,7 +149,7 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
         ),
         context,
     )
-    assert denied.metadata["render_budget_exhausted"]
+    assert not denied.metadata.get("render_budget_exhausted", False)
     delivered = await GeoDeliverTool().execute(
         GeoDeliverInput(
             primary_map=mapped.metadata["primary_map"],
