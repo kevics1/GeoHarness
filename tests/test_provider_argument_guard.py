@@ -49,12 +49,15 @@ async def test_real_tool_boundary_rejects_marker_without_disrupting_valid_calls(
         "_geoharness_argument_error": {
             "category": "invalid_json", "argument_chars": 12,
             "json_error_position": 11, "finish_reason": "length",
+            "json_error_message": "Expecting ',' delimiter",
             "unexpected_secret": "must-not-be-echoed",
         },
     })
     assert result.is_error
     assert "no tool was executed" in result.content
     assert '"json_error_position": 11' in result.content
+    assert "Expecting ',' delimiter" in result.content
+    assert "action+returned plan_ref" in result.content
     assert "must-not-be-echoed" not in result.content
     assert tool.executions == 0
     valid = await _execute_tool_call(context, tool.name, "good", {"value": "complete"})

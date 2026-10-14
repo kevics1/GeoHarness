@@ -21,7 +21,7 @@ async def test_detail_zoom_failure_exposes_measured_frames_and_suggestions(tmp_p
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
     result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
         action="preflight", crs="EPSG:3857", layers=[{"file_path": str(source)}],
-        layout={"legend": False,
+        layout={"legend": False, "legend_auto_fit": False,
                 "detail_extent": {"xmin": 2000, "ymin": 2000, "xmax": 8000, "ymax": 8000},
                 "detail_minimum_zoom": 10}), context)
     assert result.is_error, result.output

@@ -130,12 +130,25 @@ def guard_map_errors(execute):
         cache = context.metadata.setdefault("map_deterministic_errors", {})
         previous = cache.get(key) if key else None
         if previous is not None:
+            metadata = previous["metadata"]
+            reason = metadata.get("error_summary")
+            if not reason:
+                try:
+                    packet = json.loads(previous["output"])
+                    reason = packet.get("error_summary") if isinstance(packet, dict) else None
+                except (ValueError, TypeError):
+                    pass
+            reason = str(reason or previous["output"]).splitlines()[0][:500]
+            paths = {key: metadata[key] for key in (
+                "manifest_path", "result_path", "report_path") if metadata.get(key)}
             return ToolResult(
-                output=previous["output"] + "\nIdentical deterministic failure already recorded; "
-                "no tool was executed and no map version was consumed. Change the diagnosed "
-                "arguments or input data before trying again; retain successful analysis outputs.",
+                output=("未执行：相关参数、配置和已核验的本地文件内容未变，先前确定性失败仍适用。\n"
+                        "按已有诊断修改对应输入后再预检；保留已成功的分析结果。\n"
+                        f"Previous failure: {reason}"
+                        + ("\nDiagnostic files: " + json.dumps(paths, ensure_ascii=False)
+                           if paths else "")),
                 is_error=True,
-                metadata={**previous["metadata"], "duplicate_error_blocked": True,
+                metadata={**metadata, "duplicate_error_blocked": True,
                           "render_executed": False},
             )
         result = await execute(self, arguments, context, **kwargs)

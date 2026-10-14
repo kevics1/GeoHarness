@@ -122,7 +122,8 @@ skill tool returns the actual available names; choose from that list.
 - QGIS 可用时先用 geo_qgis 搜索算法、help 查参数，再执行；工程出图用
   geo_qgis_project。已有影响分析接口 geo_analysis 和自主 geo_python 保留。不要为简单影响分析
   强制执行空间自相关、热点或因果流程。
-- 制图前加载 skill(name="cartography")，成图后检查实际图片，按结果有限重绘。
+- 制图前加载 skill(name="cartography")，成图后检查实际图片，按证据修正并重绘；
+  无版数上限，按实际停止条件结束。
 - `analysis_type` 只决定符号化，不执行统计。只有实际可用且输入符合要求的
   工具才能用于热点等后续能力；不猜测工具名称或从摘要重建几何。
 
@@ -274,7 +275,18 @@ def _build_execution_section(config: GeoConfig) -> str:
         "still has its configured timeout. Stop on passed, no actionable repair, unchanged "
         "or previously reviewed pixels, a concrete failure, or cancellation.\n"
         "Prepare title, legend, layers, extent and readable labels before the first render. "
-        "Run QGIS preflight before the first create and read composition warnings. Dense "
+        "For every new or changed QGIS composition, run action=preflight with the layout "
+        "and read its measured warnings. After success send only the returned create_call "
+        "(action=create plus plan_ref); do not regenerate layers, coordinates or layout_plan. "
+        "Changing height_mm, sidebar_width_mm, detail_height_ratio, label_table dimensions "
+        "or detail_extent invalidates old scale suggestions: preflight the whole changed "
+        "composition again. Preserve computed precision; never round candidate coordinates "
+        "by hand or combine an old candidate extent with a different page/table. "
+        "For legend overflow change the measured space; for insufficient detail zoom change "
+        "paper-frame geometry or verified coverage. Removing resident/road layers, changing "
+        "colors or labels cannot increase zoom when frames/extents stay the same. "
+        "Do not remove required subjects, lower detail_minimum_zoom or shrink coverage merely "
+        "to pass a check; use a larger frame/page or separate map if needed. Dense "
         "key labels need PAL priority/distance/offset, smaller symbols or a detail_extent "
         "from verified source coordinates. Unlabeled important geometry may be an explicit "
         "style.obstacle. Route lines crossing the thematic focus need thinner width, lower "
@@ -293,8 +305,19 @@ def _build_execution_section(config: GeoConfig) -> str:
         "table for omitted labels. Inspect the saved layout report before visual review. "
         "Use the returned server map_id across filenames, formats, Python and native tools. "
         "Prefer structured QGIS layouts and native analysis; do not repeatedly inspect "
-        "Python rendering internals for a standard map. Supply analysis_manifests for verified "
-        "output counts and methods, keeping metric/display CRS distinct. Use action=status "
+        "Python rendering internals for a standard map. When mapping native analysis, merge "
+        "its returned qgis_inputs and keep its actual output file_path; attach styling directly "
+        "and use layer.derivation for subsets/annotations. Do not replace native outputs with "
+        "similarly named original shapefiles. Before preflight verify that EACH supplied "
+        "analysis_manifests entry has an actual mapped output or verified derivation. "
+        "Statistics delivered only as a table do not establish mapped-layer evidence; do not "
+        "bind their manifests to unrelated background layers. Keep metric/display CRS distinct. "
+        "On failure use the exact parameter, required/available measurements and recovery "
+        "suggestion; do not repeat unchanged calls or change unrelated style parameters. "
+        "Invalid JSON means that tool did not run: resend only that complete failed call, "
+        "retain successful results, and prefer plan_ref short creation after preflight. "
+        "Claim full coverage, achieved zoom or passed layout only from a successful measured "
+        "receipt; a candidate or a verbal calculation is not verified. Use action=status "
         "to report actual data/layout/visual/package/delivery stages; analysis_correctness "
         "remains unverified because those checks do not recompute the spatial analysis. "
         "This means business/analysis semantics were not independently verified, not that "

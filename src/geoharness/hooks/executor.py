@@ -64,12 +64,21 @@ class GeoHookExecutor(HookExecutor):
                         "json_error_column",
                     ) if isinstance(diagnostic.get(key), int)},
                 }
+                parse_message = diagnostic.get("json_error_message")
+                if isinstance(parse_message, str) and parse_message in {
+                    "Expecting ',' delimiter", "Expecting ':' delimiter", "Expecting value",
+                    "Expecting property name enclosed in double quotes", "Extra data",
+                    "Unterminated string starting at", "Invalid \\escape",
+                }:
+                    safe["json_error_message"] = parse_message
                 return AggregatedHookResult(results=[HookResult(
                     hook_type="geoharness_argument_guard", success=False, blocked=True,
                     reason=(
                         "Invalid provider tool arguments; no tool was executed. "
                         + json.dumps(safe, ensure_ascii=False)
-                        + ". Send a complete valid tool call; prior successful tools are retained."
+                        + ". Send only the failed complete valid call; prior successful tools "
+                        "are retained. Do not guess-repair coordinates/fields. For QGIS, "
+                        "preflight changes then create with only action+returned plan_ref."
                     ),
                     metadata={"argument_diagnostic": safe},
                 )])

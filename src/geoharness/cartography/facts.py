@@ -44,6 +44,7 @@ class AnalysisBindingError(ValueError):
     """A native result was supplied but none of its actual outputs is mapped."""
 
     def __init__(self, outputs: dict, mapped_sources: list[dict]) -> None:
+        self.summary = "No native analysis output is an actual mapped layer."
         self.diagnostics = {
             "code": "analysis_output_not_mapped",
             "native_outputs": [{"name": label, "file_path": str(output["path"])}
@@ -57,6 +58,57 @@ class AnalysisBindingError(ValueError):
         }
         super().__init__("No native analysis output is an actual mapped layer. "
                          + json.dumps(self.diagnostics, ensure_ascii=False))
+
+
+def _binding_candidates(manifest: dict, outputs: dict, mapped_sources: list[dict],
+                        reader: _EvidenceReader) -> list[dict]:
+    """Suggest explicit replacements from persisted provenance, never layer names.
+
+    These are user/model choices, not proof of equivalence. The ordinary output
+    integrity and mapped-content checks still run on the next preflight.
+    """
+    provenance = manifest.get("sources")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    candidates = []
+    for label, output in outputs.items():
+        origin = label if label in {"reference", "source", "zones"} else "source"
+        if label == "result" and manifest.get("action") == "count":
+            origin = "zones" if "zones" in provenance else "reference"
+        original_source = provenance.get(origin)
+        source_path = (original_source.get("file_path")
+                       if isinstance(original_source, dict) else None)
+        matches = []
+        if source_path:
+            try:
+                original = reader.path(source_path)
+                for index, source in enumerate(mapped_sources):
+                    try:
+                        if source.get("file_path") and reader.path(source["file_path"]) == original:
+                            matches.append({"layer_index": source.get("layer_index", index),
+                                            "file_path": source["file_path"]})
+                    except ValueError:
+                        continue
+            except ValueError:
+                pass
+        suggestion = {"output": label, "file_path": str(output["path"]),
+                      "provenance_role": origin, "candidate_layers": matches,
+                      "match_basis": "manifest_source_path" if matches else "unresolved",
+                      "automatic_application": False}
+        if len(matches) == 1:
+            suggestion["suggested_change"] = {
+                "field": f"layers[{matches[0]['layer_index']}].file_path",
+                "current": matches[0]["file_path"], "proposed": str(output["path"]),
+            }
+        suggestion["note"] = (
+            "Choose the native output only if this layer should express that analysis; "
+            "preserve its style and recheck fields/geometry. This is not an equivalence claim."
+            if matches else "No unique source-path binding is available; add the native output "
+            "explicitly or omit a manifest used only for a separate statistics table."
+        )
+        candidates.append(suggestion)
+    return candidates
+
+
 _GEOMETRY_SEMANTICS = {
     "buffer": "Planar buffers around source geometries in the metric CRS.",
     "clip": "Source geometries intersected with the union of reference geometries.",
@@ -627,6 +679,8 @@ def load_analysis_facts(
             matches = _mapped_outputs(outputs, mapped_sources, reader)
         except AnalysisBindingError as exc:
             exc.diagnostics.update(manifest_path=str(path), action=action)
+            exc.diagnostics["replacement_suggestions"] = _binding_candidates(
+                manifest, outputs, mapped_sources, reader)
             exc.args = ("No native analysis output is an actual mapped layer. "
                         + json.dumps(exc.diagnostics, ensure_ascii=False),)
             raise

@@ -101,4 +101,7 @@ def test_large_execution_keeps_paths_without_repeating_the_frozen_plan():
     assert compact["result"]["project_manifest"] == "workspace/project.json"
     assert "layout_plan" not in compact["result"]
     failed = {**result, "status": "failed", "error_summary": "specific failure"}
-    assert execution_summary(failed) is failed
+    compact_failure = execution_summary(failed)
+    assert compact_failure["status"] == "failed"
+    assert compact_failure["error_summary"] == "specific failure"
+    assert len(json.dumps(compact_failure)) < 1000

@@ -237,3 +237,11 @@
 - 阶段2新增原生参考属性筛选、reference_relation和可选距离分级，并将实际参考集合/时刻筛选与结果清单绑定；制图事实独立从落盘几何复算关系与距离。向量inspect返回实际dtype和空值，原生派生输出登记schema。当前环境字符串dtype可为str而非object，测试不把一种Pandas版本的dtype名字写死。
 - QGIS3.44官方API确认布局属性表可绑定向量层、字段及筛选，布局多框支持内容跨框；后续编号名单优先复用这些原生组件，保持工程可编辑：https://qgis.org/pyqgis/3.44/core/QgsLayoutItemAttributeTable.html 。
 - QGIS实际表格宽度包括每列两侧cellMargin和所有gridStrokeWidth，不能只按列文本宽度分配；已按原生参数计入边框。createRenderContextForLayout需显式painter=None及DPI。QGS毫米序列化有约0.0005mm变化，已有几何容差可接受；比例尺单独记在实际布局中，不把其派生微差添加到冻结几何摘要。空业务属性列表在QGIS customProperty可读为None，按空列表处理。独立QGIS命名空间避免主Python dotenv/ABI依赖泄漏。
+
+## 2026-10-14 提示词与布局联合修复依据
+
+- 用户最新真实会话已收到qgis_inputs但仍把分析manifest绑定原始shp；需提示词强调关联且错误指明替换建议，不自动替换。
+- 195mm页面图例需求118.77mm/可用70.98mm；legend_auto_fit无minimum_zoom时仅试压缩详图，失败不增页高。主图/详图/名单联动需在原生量测内统一求解。
+- 模型照用旧candidate_extent又改340→310→330mm页高及名单2列→1列，改变建议前提。最终坐标舍入到0.1m造成actual_zoom=1.9999953108881092，绝对容差拒绝但错误3位小数显示2.000；需微小相对容差、足够诊断精度和安全余量。
+- 非法JSON提示Expecting ',' delimiter(position2699/3245chars)，无完整原始串不能猜具体引号；finish_reason=tool_calls不证明max_tokens不足。优先预检+plan_ref减少长参数生成，失败不猜修业务参数。
+- 规划首次补丁因findings尾行上下文不全被拒，未产生修改；读取精确行后重新追加。

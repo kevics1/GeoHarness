@@ -99,10 +99,79 @@ def summary(report: dict, reference: str, path: Path) -> dict:
     return result
 
 
+def _bounded(value, *, depth=0):
+    """Bound exceptional worker prose/arrays; diagnostic files retain exact values."""
+    if isinstance(value, str):
+        return value if len(value) <= 1200 else value[:1200] + "… [see diagnostic file]"
+    if depth >= 7 and isinstance(value, (dict, list)):
+        return "[see diagnostic file]"
+    if isinstance(value, dict):
+        values = list(value.items())
+        compact = {key: _bounded(item, depth=depth + 1) for key, item in values[:24]}
+        if len(values) > 24:
+            compact["fields_omitted"] = len(values) - 24
+        return compact
+    if isinstance(value, list):
+        compact = [_bounded(item, depth=depth + 1) for item in value[:12]]
+        if len(value) > 12:
+            compact.append({"items_omitted": len(value) - 12})
+        return compact
+    return value
+
+
+def failure_summary(result: dict) -> dict:
+    """Measured failure facts for inline display; never mutate full tool metadata."""
+    compact = {key: result[key] for key in (
+        "status", "error_summary", "run_dir", "manifest_path", "request_path", "result_path",
+        "stdout_path", "stderr_path", "exit_code", "timeout_seconds",
+    ) if key in result}
+    if "error_summary" in compact:
+        compact["error_summary"] = _bounded(compact["error_summary"])
+    diagnostics = result.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        if "bounds_check" in diagnostics:
+            # A layout includes legends, full labels and frozen plans. The failure
+            # needs actual rectangles and text measurements, not all source prose.
+            selected = {key: diagnostics[key] for key in (
+                "code", "font", "effective_parameters", "creation_parameters", "adaptations",
+            ) if key in diagnostics}
+            bounds = diagnostics.get("bounds_check") or {}
+            problems = bounds.get("problems") or []
+            relevant = {str(problem).split(":", 1)[0].split("/", 1)[0] for problem in problems}
+            selected["bounds_check"] = {key: bounds[key] for key in (
+                "checked", "valid", "problems", "reason") if key in bounds}
+            for key in ("content_metrics", "items"):
+                values = bounds.get(key) or {}
+                selected["bounds_check"][key] = {
+                    name: value for name, value in values.items() if name in relevant}
+            selected["map_frames"] = [{key: frame[key] for key in (
+                "id", "crs", "scale", "extent") if key in frame}
+                for frame in diagnostics.get("map_frames", [])]
+            compact["diagnostics"] = _bounded(selected)
+        else:
+            compact["diagnostics"] = _bounded(diagnostics)
+    elif diagnostics is not None:
+        compact["diagnostics"] = _bounded(diagnostics)
+    # Some runners attach the failure details as result instead of diagnostics.
+    if result.get("result") is not None and not diagnostics:
+        details = result["result"]
+        if isinstance(details, dict):
+            compact["result"] = _bounded({key: details[key] for key in (
+                "error", "error_summary", "diagnostics", "issues", "warnings") if key in details})
+        else:
+            compact["result"] = _bounded(details)
+    compact["note"] = ("Failed; inspect these measured diagnostics before changing inputs. "
+                       "Full unabridged evidence remains in manifest_path/result_path "
+                       "when present.")
+    return compact
+
+
 def execution_summary(result: dict) -> dict:
     """Keep artifact paths and measured facts inline; full facts stay in project.json."""
     details = result.get("result") or {}
-    if result.get("status") != "succeeded" or not details.get("project_manifest"):
+    if result.get("status") != "succeeded":
+        return failure_summary(result)
+    if not details.get("project_manifest"):
         return result
     if len(json.dumps(result, ensure_ascii=False)) <= 6000:
         return result

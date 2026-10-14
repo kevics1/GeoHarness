@@ -296,8 +296,9 @@ class QgisProjectLayout(BaseModel):
     body_font_size_pt: float = Field(default=9, ge=5, le=20)
     legend_font_size_pt: float | None = Field(default=None, ge=5, le=20)
     legend_auto_fit: bool = Field(default=True, description=(
-        "Measure native legend content and expand the sidebar or shorten the detail map "
-        "within the requested page; never remove entries or shrink text."
+        "Jointly measure legend/table/footer and detail zoom, enlarging paper frames/page "
+        "as needed without cropping geographic subjects or removing entries/shrinking text. "
+        "False keeps legend/detail frame fitting fixed; use measured diagnostics."
     ))
     detail_height_ratio: float = Field(default=0.4, ge=0.1, le=0.8)
     sidebar_width_mm: float = Field(default=60, ge=20, le=500)
@@ -451,13 +452,16 @@ class GeoQgisProjectTool(BaseTool):
         "Use layer.derivation for verified subsets/fields/annotations of native output files. "
         "Native analysis manifests are shared with geo_cartography and may be inferred; "
         "previous map facts are never inherited. Datetime categories normalize automatically. "
-        "preflight measures actual fonts/footer/legend without exporting. Legend auto-fit "
-        "widens the sidebar or shortens the detail map within the requested page. "
+        "Preflight every new/changed layout before create, then use only returned create_call "
+        "(action+plan_ref). Native fitting measures fonts/legend/table/zoom without exporting "
+        "and may grow paper dimensions while preserving geographic coverage and symbols. "
         "Use main_frame/detail_frame focus_layers, render_layers and label_layers to separate "
         "overview and detail duties without removing required features. label_table retains "
         "number/name attributes in an editable table separate from footer notes. "
         "detail_minimum_zoom checks actual paper magnification after native fitting. "
         "Use effective_parameters, adaptations and content_metrics for layout diagnosis. "
+        "Changed page/sidebar/table/detail geometry invalidates old zoom suggestions. "
+        "Do not round calculated coordinates or remove subjects to satisfy zoom. "
         "legend_font_size_pt controls the legend; body_font_size_pt controls footer text. "
         "duplicate_error_blocked requires changing the diagnosed arguments or input data. "
         "Network/database layers are unsupported. Outputs are drafts until geo_map_review "
@@ -534,11 +538,17 @@ class GeoQgisProjectTool(BaseTool):
                         timeout=config.qgis.timeout_seconds,
                     )
             except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
-                return ToolResult(output=f"Error: QGIS map preflight failed: {exc}", is_error=True,
+                from geoharness.qgis.prepared import failure_summary
+
+                failed = {"status": "failed", "error_summary": getattr(exc, "summary", str(exc)),
+                          **({"diagnostics": exc.diagnostics}
+                             if hasattr(exc, "diagnostics") else {})}
+                return ToolResult(output="Error: QGIS map preflight failed: "
+                                  + json.dumps(failure_summary(failed), ensure_ascii=False),
+                                  is_error=True,
                                   metadata={"preflight_status": "failed", "render_executed": False,
                                             "deterministic_error": isinstance(exc, ValueError),
-                                            **({"diagnostics": exc.diagnostics}
-                                               if hasattr(exc, "diagnostics") else {})})
+                                            **failed})
         from geoharness.qgis.runner import execute_qgis
 
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
@@ -601,12 +611,11 @@ class GeoQgisProjectTool(BaseTool):
                     return ToolResult(output=f"Error: QGIS layout preflight failed: {exc}",
                                       is_error=True, metadata={"render_executed": False})
                 if result.get("status") != "succeeded":
+                    from geoharness.qgis.prepared import failure_summary
+
                     return ToolResult(output="Error: QGIS layout preflight failed: "
-                                      + (result.get("error_summary") or "unknown layout error")
-                                      + "\n" + json.dumps(result.get("diagnostics"),
-                                                            ensure_ascii=False),
-                                      is_error=True, metadata={"render_executed": False,
-                                      "diagnostics": result.get("diagnostics"),
+                                      + json.dumps(failure_summary(result), ensure_ascii=False),
+                                      is_error=True, metadata={**result, "render_executed": False,
                                       "deterministic_error": (result.get("error_summary") or "")
                                       .startswith("ValueError:")})
                 _apply_native_frame_evidence(preflight, result["result"])

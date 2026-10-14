@@ -1051,10 +1051,12 @@ def _place_item(layout: Any, item: Any, name: str, rect: list[float]) -> None:
 def _create_layout(
     project: Any, layers: list[Any], extent: Any, payload: dict[str, Any], context: Any,
     *, _fit_attempt: int = 0, _adaptations: list[dict[str, Any]] | None = None,
+    _fit_states: frozenset[str] = frozenset(),
 ) -> Any:
     from qgis.core import (
         Qgis,
         QgsBasicNumericFormat,
+        QgsLayoutItemAttributeTable,
         QgsLayoutItemLabel,
         QgsLayoutItemLegend,
         QgsLayoutItemMap,
@@ -1068,6 +1070,11 @@ def _create_layout(
 
     spec = {key: value for key, value in (payload.get("layout") or {}).items()
             if key != "layout_plan"}
+    state = _json_digest(spec)
+    if state in _fit_states or _fit_attempt > 12:
+        raise ValueError("Native layout sizing did not converge; retain subject coverage and "
+                         "use a larger or separate detail map")
+    fit_states = _fit_states | {state}
     width, height = spec.get("width_mm", 297), spec.get("height_mm", 210)
     title = payload.get("title", "")
     regions = _layout_regions(spec, title)
@@ -1190,13 +1197,16 @@ def _create_layout(
     if required_height > footer[3]:
         if payload.get("_consume_plan"):
             raise ValueError("layout_plan is stale: measured footer changed; run preflight again")
-        if _fit_attempt >= 3 or required_height > 100:
+        if (_fit_attempt >= 12 or required_height > 100
+                or not spec.get("legend_auto_fit", True)
+                or height + required_height - footer[3] > 2000):
             raise ValueError("footer_text exceeds its reserved rectangle; "
                              "shorten notes or increase page size")
-        resized = {**spec, "footer_height_mm": required_height}
+        resized = {**spec, "footer_height_mm": required_height,
+                   "height_mm": height + required_height - footer[3]}
         _layout_regions(resized, title)  # Fail before exporting or packaging any map.
         return _create_layout(project, layers, extent, {**payload, "layout": resized},
-                              context, _fit_attempt=_fit_attempt + 1,
+                              context, _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
                               _adaptations=[*adaptations, {
                                   "parameter": "footer_height_mm", "before": footer[3],
                                   "after": required_height, "reason": "measured footer text",
@@ -1207,19 +1217,16 @@ def _create_layout(
         resized = dict(spec)
         if minimum.width() > available[2] + 0.05 and minimum.width() + 0.5 <= 500:
             resized["sidebar_width_mm"] = minimum.width() + 0.5
-        if minimum.height() > available[3] + 0.05 and "detail_map" in regions:
-            height = regions["main_map"][3]
-            detail_height = height - spec.get("gap_mm", 5) - minimum.height() - 0.5
-            if spec.get("detail_minimum_zoom") is not None:
-                extra = (minimum.height() + 0.5 - available[3]) / (
-                    1 - spec.get("detail_height_ratio", 0.4))
-                if spec.get("height_mm", 210) + extra <= 2000:
-                    resized["height_mm"] = spec.get("height_mm", 210) + extra
-            elif detail_height >= max(20, height * 0.1):
-                resized["detail_height_ratio"] = detail_height / height
+            # Keep the main map's width: widening the sidebar must not steal its paper area.
+            resized["width_mm"] = width + resized["sidebar_width_mm"] - available[2]
+        if minimum.height() > available[3] + 0.05:
+            ratio = spec.get("detail_height_ratio", 0.4) if "detail_map" in regions else 0
+            extra = (minimum.height() + 0.5 - available[3]) / (1 - ratio)
+            if height + extra <= 2000:
+                resized["height_mm"] = height + extra
         if resized != spec and payload.get("_consume_plan"):
             raise ValueError("layout_plan is stale: measured legend changed; run preflight again")
-        if resized != spec and _fit_attempt < 3:
+        if resized != spec and _fit_attempt < 12 and resized.get("width_mm", width) <= 2000:
             try:
                 _layout_regions(resized, title)
             except ValueError:
@@ -1229,26 +1236,48 @@ def _create_layout(
                             "reason": "measured legend content"}
                            for key, value in resized.items() if spec.get(key) != value]
                 return _create_layout(project, layers, extent, {**payload, "layout": resized},
-                    context, _fit_attempt=_fit_attempt + 1, _adaptations=[*adaptations, *changes])
+                    context, _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
+                    _adaptations=[*adaptations, *changes])
     from geoharness.qgis.layout_table import label_table_facts
 
     tables = label_table_facts(layout)
     if any(table["visible_rows"] < table["rows"] for table in tables):
-        if _fit_attempt >= 3 or payload.get("_consume_plan"):
+        if (_fit_attempt >= 12 or payload.get("_consume_plan")
+                or not spec.get("legend_auto_fit", True)):
             raise ValueError("label_table does not fit: increase height_mm, columns or page size")
-        required = max(table["rows"] / max(1, table["visible_rows"]) for table in tables)
+        required = max(table.totalSize().height() for table in layout.multiFrames()
+                       if isinstance(table, QgsLayoutItemAttributeTable)) + 0.5
         resized = {**spec, "label_table": {**spec["label_table"],
-                   "height_mm": spec["label_table"].get("height_mm", 50) * required + 5}}
+                   "height_mm": max(spec["label_table"].get("height_mm", 50) + 1, required)}}
+        extra = resized["label_table"]["height_mm"] - spec["label_table"].get("height_mm", 50)
+        resized["height_mm"] = height + extra
+        if resized["label_table"]["height_mm"] > 400 or resized["height_mm"] > 2000:
+            raise ValueError("label_table exceeds supported page/table dimensions; "
+                             "use more columns or a separate roster page")
         return _create_layout(project, layers, extent, {**payload, "layout": resized},
-            context, _fit_attempt=_fit_attempt + 1, _adaptations=[*adaptations, {
+            context, _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
+            _adaptations=[*adaptations, {
                 "parameter": "label_table.height_mm", "reason": "measured table rows",
                 "after": resized["label_table"]["height_mm"]}])
     minimum_zoom = spec.get("detail_minimum_zoom")
     detail = layout.itemById("detail_map")
     if minimum_zoom is not None and detail is not None:
         zoom = map_item.scale() / detail.scale()
-        if zoom + 1e-6 < minimum_zoom:
-            error = ValueError(f"detail frame is not magnified enough (zoom={zoom:.3f}, "
+        if not _detail_zoom_satisfied(zoom, minimum_zoom):
+            requested = _frame_extent(project, layers, "detail_map", payload, extent)
+            measured = detail.extent()
+            fractions = (requested.width() / measured.width(),
+                         requested.height() / measured.height())
+            resized = _fit_detail_paper(spec, regions, zoom, minimum_zoom, fractions)
+            if (resized is not None and not payload.get("_consume_plan")
+                    and spec.get("legend_auto_fit", True) and _fit_attempt < 12):
+                changes = [{"parameter": key, "before": spec.get(key), "after": value,
+                            "reason": "joint measured detail zoom/legend sizing; coverage retained"}
+                           for key, value in resized.items() if spec.get(key) != value]
+                return _create_layout(project, layers, extent, {**payload, "layout": resized},
+                    context, _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
+                    _adaptations=[*adaptations, *changes])
+            error = ValueError(f"detail frame is not magnified enough (zoom={zoom:.8f}, "
                                f"required={minimum_zoom}); use the measured frame/scale "
                                "diagnostics; preserve all required subjects")
             error.diagnostics = _detail_zoom_diagnostics(map_item, detail, minimum_zoom)
@@ -1256,6 +1285,39 @@ def _create_layout(
     _validate_layout_bounds(layout)
     project.layoutManager().addLayout(layout)
     return layout
+
+
+def _detail_zoom_satisfied(actual: float, required: float) -> bool:
+    """Allow coordinate serialization noise, not visibly insufficient magnification."""
+    return actual >= required or math.isclose(actual, required, rel_tol=5e-6, abs_tol=1e-5)
+
+
+def _fit_detail_paper(
+    spec: dict, regions: dict, zoom: float, required: float,
+    content_fraction: tuple[float, float] = (1.0, 1.0),
+) -> dict | None:
+    """Grow paper rectangles jointly; never change sources, geographic extents or styles."""
+    factor = required * 1.01 / zoom
+    detail = regions["detail_map"]
+    sidebar = max(detail[2], detail[2] * factor * content_fraction[0])
+    if sidebar > 500:
+        return None
+    resized = {**spec, "sidebar_width_mm": sidebar,
+               "width_mm": spec.get("width_mm", 297) + sidebar - detail[2]}
+    map_height = regions["main_map"][3]
+    detail_height = max(20, detail[3] * factor * content_fraction[1])
+    if spec.get("legend", True):
+        legend_height = regions["legend"][3]
+        # The 0.8 public ratio limit requires enough paper for the complete legend too.
+        needed_height = max(map_height, detail_height / 0.8,
+                            detail_height + spec.get("gap_mm", 5) + legend_height)
+        resized["detail_height_ratio"] = max(0.1, detail_height / needed_height)
+    else:
+        needed_height = max(map_height, detail_height)
+    resized["height_mm"] = spec.get("height_mm", 210) + needed_height - map_height
+    if resized["width_mm"] > 2000 or resized["height_mm"] > 2000:
+        return None
+    return resized
 
 
 def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> dict[str, Any]:
@@ -1272,7 +1334,7 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> di
 
     main_facts, detail_facts = facts(main), facts(detail)
     zoom = main.scale() / detail.scale()
-    factor = required_zoom / zoom
+    factor = required_zoom * 1.01 / zoom
     bounds = detail_facts["extent"]
     center_x, center_y = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
     half_width = (bounds[2] - bounds[0]) / factor / 2
@@ -1281,6 +1343,7 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> di
         "code": "detail_zoom_insufficient",
         "actual_zoom": zoom,
         "required_zoom": required_zoom,
+        "suggestion_target_zoom": required_zoom * 1.01,
         "target_detail_scale_denominator": main.scale() / required_zoom,
         "frames": {"main_map": main_facts, "detail_map": detail_facts},
         "suggestions": [
