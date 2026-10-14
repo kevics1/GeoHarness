@@ -13,6 +13,8 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from geoharness.data.basemaps import BasemapConfig
+
 
 class AnalysisConfig(BaseModel):
     """Native analysis settings; an empty metric CRS selects a local UTM CRS."""
@@ -249,6 +251,7 @@ class GeoConfig:
     cartography: CartographyConfig = field(default_factory=CartographyConfig)
     cognition: CognitionConfig = field(default_factory=CognitionConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    basemaps: BasemapConfig = field(default_factory=BasemapConfig)
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
@@ -463,6 +466,7 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         cartography=cartography,
         cognition=cognition,
         data=data,
+        basemaps=BasemapConfig.model_validate(raw.get("basemaps") or {}),
         permissions=permissions,
         analysis=AnalysisConfig.model_validate(_expand_vars(raw.get("analysis") or {})),
         execution=ExecutionConfig.model_validate(_expand_vars(raw.get("execution") or {})),

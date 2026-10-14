@@ -191,6 +191,11 @@ _TOOL_CATALOG = """\
   - Actions: list, inspect, load
 - **geo_raster_data**: Load/inspect local raster files (GeoTIFF/IMG/ASC/VRT)
   - Actions: list, inspect, stats
+- **geo_basemap** (when configured): list/fetch registered online basemaps into a local GeoTIFF.
+  - Use provider IDs and verified bounds/CRS; never put URLs or tokens in tool arguments.
+    Fetch once for the requested coverage, then use returned layer_spec as the bottom QGIS layer.
+    A vector basemap is rendered raster tiles, not vector features for spatial analysis.
+    Keep attribution. Offline exports use the cached GeoTIFF, without live credentials.
 - **geo_cartography**: Default PNG/PDF uses a structured QGIS layout and editable project
   - Actions: preflight, status, symbolize, compose, export, full, project
   - Follows bridge rules for analysis→symbolization mapping
@@ -267,6 +272,11 @@ def _build_execution_section(config: GeoConfig) -> str:
         "a CRS or pass raw analysis coordinates to rasterio.mask. geo_python provides "
         "GEO_DATA, PREVIOUS_OUTPUTS and mask_raster(path, GeoDataFrame, crop=True). Every "
         "RUN_DIR is new; reuse returned actual artifact paths rather than guessed dates.\n"
+        "When online basemaps are configured, use geo_basemap list/fetch with measured "
+        "subject bounds and CRS. Pass its local layer_spec first in QGIS layers and keep "
+        "the requested map extent: cached TIFF bounds include complete tiles. "
+        "Do not fetch tile URLs inside geo_python or add remote credential URLs to projects. "
+        "Keep the returned attribution in the map's source note.\n"
         "Read registered vectors with read_vector(ref), which applies each layer's measured "
         "encoding. When DATA_REFS already contains a dataset, do not search DATA_DIRS again "
         "to reconstruct its path: use read_vector(ref) or resolve_data(ref). DATA_DIRS are "

@@ -2,6 +2,38 @@
 
 当前优先完成多图层叠加与影响范围分析，支持原生 GIS 和自主 Python 分析，并读取成图进行检查、修正和重绘。空间热点与栅格/地形是后续重点。
 
+## 天地图底图
+
+配置 `basemaps.enabled: true` 后，Agent 获得 `geo_basemap` 工具。示例配置提供
+`tianditu_imagery`（卫星影像）、`tianditu_terrain`（地形图）、`tianditu_vector`（矢量底图）
+三个 provider。令牌放在配置同目录 `.env` 的 `GEOH_TIANDITU_TOKEN` 中；配置 URL 使用
+`{token}` 占位符。令牌不传给模型，不写入源码、工具回执或 QGIS 工程。
+
+先调用 `geo_basemap(action="list")`，再以实际专题范围及其 CRS 调用 `fetch`：
+
+```json
+{"action":"fetch","provider":"tianditu_imagery","bounds":[102.2,27.8,102.21,27.81],"crs":"EPSG:4326","zoom":8}
+```
+
+以上范围仅用于演示。省略 zoom 时在配置的瓦片数/像素上限内选最高可用层级；显式 zoom 超限
+会报错，不裁掉请求主体。`c` 网格以 EPSG:4490 存储，1级为2列1行；`w` 网格以
+EPSG:3857 存储。已通过服务能力描述核对卫星/矢量为1—18级、地形为1—14级。
+“矢量底图”下载的是栅格瓦片，不能当作可分析的矢量要素。
+
+工具将瓦片拼成工作区 `.geoharness/basemaps/` 中的本地 RGB GeoTIFF，并返回
+`file_path`、CRS、范围、分辨率、zoom、瓦片数、attribution、`layer_spec` 和数据档案。
+将 `layer_spec` 放在 QGIS layers 数组最前面，在 `layout.footer_text` 中保留来源“天地图”。
+缓存范围覆盖完整瓦片，制图仍应明确专题的 `map_extent`，避免底图扩大全图范围。
+QGIS 打包保存本地 TIFF 副本，PNG 与可编辑工程使用同一数据，不依赖实时服务或令牌。
+
+缓存命中会核对摘要、CRS、范围和RGB数据格式；损坏时明确报错，选择新的工作区内
+`basemaps.cache_dir` 后重新获取，保留已有工程。取消请求会停止后续瓦片下载，并清理未发布文件；
+已经在途的单次请求可持续至其请求超时。
+
+2026-10-14 本机实际检查：三个服务的能力描述可访问，但三个小范围瓦片请求均返回HTTP 403；
+卫星服务进一步返回 `code=301012`、`msg=权限类型错误`。需要提供适用于此服务调用方式的服务授权，
+不能用修改CRS/范围或无效重试解决。代码与合成瓦片的原生QGIS出图已验证，真实底图下载尚未通过。
+
 ## 配置与启动
 
 `config.example.yaml` 使用本轮已验证的服务：
