@@ -258,3 +258,10 @@
 - 同PNG新工程包覆盖旧已验证版本已复现，改为新路径/不同包独立版本，保留原地修改stale与相同包拷贝行为。123项版本/交付/QGIS/修正通过；实际第3版→第4版保存重导出PNG相同，第3版data passed保持，草稿交付成功。二次服务审图passed与主Agent实图标注/留白核对矛盾，不认作业务质量通过。
 - 全量1237项通过（1217.96秒、207条主要依赖弃用/故意缺CRS警告）；全量后的小补丁仅跑上述受影响回归。Ruff/diff、独立短引用/摘要/兼容解析/历史复核通过。普通诊断报告和有效TODO更新，源码80模块/技能34文件的最终安装正在逐文件核对；保留.env.example既有修改及旧产物。
 - 最终wheel与安装版80模块/34技能文件逐文件零差异，跨目录version/dry-run/QGIS doctor通过，无.openharness；安装版5项实际QGIS/短引用回归通过（42.28秒）。首次无隔离构建缺hatchling、一次技能EOF差异被校验抓出，改隔离并重新构建后核验通过。最终诊断记录功能已验证与真实业务未达标，不把服务passed/像素一致性当业务通过。
+
+### 数据加载信息与JSON对象兼容（2026-10-14）
+
+- 用户授权全部数据加载工具返回路径/格式/完整字段类型/CRS/范围等，原生分析兼容一次JSON编码，明确只需简单验证。新增共享描述，向量load/inspect全部字段及空值、栅格inspect/stats各波段头信息、数据库load/inspect表定位符及加载行范围/类型，不输出连接凭证。CSV inspect补实际schema/空值/行数；移除PostGIS目录/inspect错误推断4326，未测CRS明确unknown，load仍实际测量。
+- SpatialSource before-validator仅一次json.loads且必须对象，沿用未知字段/唯一定位符/参数校验，覆盖source/reference/zones。read_file(None)明确未选数据而非权限错误，给出已有read_vector/resolve_data恢复提示。
+- 简单验证28项通过（13.30秒），覆盖45列完整展示、真实CSV、DB未知CRS、栅格统计含元数据、一次编码真实面积10000m²、None路径错误。第一次测试假定驱动整数int64，改为核对实际dtype后通过；Ruff/diff通过。实际F:/Desktop/Project/GeoHarness/example/test/数据/预测蔓延范围.shp只读读取返回3要素/6字段/EPSG:4326/准确路径，编码参数解析成功。独立快速只读审查两项覆盖缺口补齐后clear，未运行全量测试、模型或整图流程。
+- 最终wheel已安装，81模块与源码逐文件一致；安装版对同一蔓延数据只读load，路径可见、3要素、JSON source解码均通过。未改原始数据/.env.example/模型或凭证。

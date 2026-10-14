@@ -370,12 +370,11 @@ class PostGISConnector:
         geom_columns = self._geometry_columns(tables)
         sources: list[DataSource] = []
         for table in tables:
-            has_geom = table in geom_columns
             metadata: dict[str, Any] = {
                 "format": "PostGIS table",
                 "path": table,
                 "geometry_column": geom_columns.get(table, ""),
-                "crs": "EPSG:4326" if has_geom else "",
+                "crs": "",  # Geometry presence does not establish its SRID.
             }
             sources.append(DataSource(
                 name=table,
@@ -417,8 +416,8 @@ class PostGISConnector:
         try:
             schema = self.get_table_schema(name)
             extent = self.get_table_extent(name)
-            has_geom = any(v == "geometry" for v in schema.values())
-            detail["crs"] = "EPSG:4326" if has_geom else ""
+            detail["crs"] = ""
+            detail["crs_note"] = "Unknown until measured; load reads actual geometry SRIDs."
             detail["bbox"] = extent
             detail["schema"] = schema
         except Exception as e:

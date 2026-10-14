@@ -16,6 +16,7 @@ from typing import Any, Literal
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
+from geoharness.data.description import describe_source
 from geoharness.data.profiles import (
     CRS_OPERATION_HINT,
     local_source_listing,
@@ -162,26 +163,7 @@ class GeoRasterDataTool(BaseTool):
             return ToolResult(
                 output="Error: raster file changed during inspection; inspect again.", is_error=True
             )
-        lines = [f"Raster: {detail.get('name', name)}"]
-        lines.append(f"  Path: {detail.get('path', '')}")
-        lines.append(f"  Driver: {detail.get('format', '')}")
-        lines.append(
-            f"  Size: {detail.get('width')} x {detail.get('height')} px, "
-            f"{detail.get('band_count')} band(s), dtype={detail.get('dtype')}"
-        )
-        if detail.get("crs"):
-            lines.append(f"  CRS: {detail['crs']}")
-        res = detail.get("resolution")
-        if res:
-            lines.append(f"  Resolution: {res[0]:.6g} x {res[1]:.6g}")
-        bbox = detail.get("bbox")
-        if bbox:
-            lines.append(
-                f"  Bounds: [{bbox[0]:.4f}, {bbox[1]:.4f}, "
-                f"{bbox[2]:.4f}, {bbox[3]:.4f}]"
-            )
-        if detail.get("nodata") is not None:
-            lines.append(f"  NoData: {detail['nodata']}")
+        lines = [f"Raster: {detail.get('name', name)}", describe_source(detail, kind="raster")]
         lines.append(CRS_OPERATION_HINT)
         return ToolResult(
             output="\n".join(lines),
@@ -205,13 +187,15 @@ class GeoRasterDataTool(BaseTool):
         return ToolResult(
             output=(
                 f"Band {stats['band']} statistics for '{name}':\n"
+                f"{describe_source(detail, kind='raster')}\n"
                 f"  Valid pixels: {stats['count']}\n"
                 f"  Min / Max: {stats['min']:.4f} / {stats['max']:.4f}\n"
                 f"  Mean / Std: {stats['mean']:.4f} / {stats['std']:.4f}\n"
                 f"  P5 / P50 / P95: {stats['p5']:.4f} / {stats['p50']:.4f} / "
                 f"{stats['p95']:.4f}\n{CRS_OPERATION_HINT}"
             ),
-            metadata={**stats, "data_profiles": [profile] if profile else []},
+            metadata={**stats, "source_detail": detail,
+                      "data_profiles": [profile] if profile else []},
         )
 
     def is_read_only(self, arguments: BaseModel) -> bool:

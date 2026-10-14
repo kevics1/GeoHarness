@@ -32,6 +32,20 @@ class SpatialSource(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def decode_json_object(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except (ValueError, RecursionError) as exc:
+                raise ValueError("Spatial source must be an object or one JSON-encoded object") \
+                    from exc
+            if not isinstance(decoded, dict):
+                raise ValueError("Spatial source JSON must decode to an object in one step")
+            return decoded
+        return value
+
     @model_validator(mode="after")
     def validate_locator(self) -> SpatialSource:
         if sum(bool(value) for value in (self.file_path, self.source_name, self.geojson)) != 1:
@@ -48,7 +62,8 @@ class GeoAnalysisInput(BaseModel):
 
     action: Literal["buffer", "clip", "intersection", "distance", "count", "impact", "area"]
     source: SpatialSource = Field(
-        description="Assets/features to analyze; original data is read-only."
+        description='Object describing assets/features, e.g. {"file_path": "returned path"}; '
+                    "prefer an object over JSON text. Original data is read-only."
     )
     reference: SpatialSource | None = Field(
         default=None, description="Hazards or overlay/mask layer."

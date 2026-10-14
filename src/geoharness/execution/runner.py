@@ -392,6 +392,10 @@ def _install_guards(spec: dict[str, Any]) -> None:
 
     @wraps(original_read)
     def vector_read(filename: Any, *args: Any, **kwargs: Any) -> Any:
+        if filename is None:
+            raise ValueError("No vector source selected: read_file received None. "
+                             "Use read_vector(name/ref) or resolve_data(name/ref) from DATA_REFS. "
+                             "DATA_DIRS are read roots, not dataset file locations.")
         filename = checked_native_path(filename)
         return original_read(filename, *args, **kwargs)
 

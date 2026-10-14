@@ -98,6 +98,10 @@ def registered_review_files(
 
 def python_recovery_hints(code: str, stderr: str) -> list[str]:
     hints = []
+    if "No vector source selected" in stderr:
+        hints.append("No dataset was selected; this is not a filesystem permission failure. "
+                     "Use read_vector(name/ref) or resolve_data(name/ref) from DATA_REFS. "
+                     "Use the Path returned by load/inspect, not a guessed DATA_DIRS subfolder.")
     if "DATA_DIRS" in code and "'list' object has no attribute 'split'" in stderr:
         hints.append("DATA_DIRS is list[Path]: iterate it directly. Only "
                      "os.environ['DATA_DIRS'].split(os.pathsep) returns environment paths.")

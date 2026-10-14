@@ -310,6 +310,10 @@ QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定�
 
 向量检查返回实际字段类型和空值数量；登记的原生分析输出也带schema。`geo_analysis` 的 `source.filters` / `reference.filters` 可按现有属性精确选择时间或情景，匹配为空不会自动使用全部时段。distance/impact返回 `reference_relation`（covered_by、intersects、outside）；可用 `distance_breaks_m: [50, 1000]` 生成 `distance_class`，范围内部与外部距离分级分开。`reference_scope` 记录所选参考集合和合并方式。成图事实会从落盘几何复算关系、距离及分类；图例名称应表达这一实际口径，不能把外部邻近点称为范围内。
 
+`geo_vector_data` 的 load/inspect 均返回实际路径、格式、全部字段名和类型、空值数量、CRS、范围及要素/记录数；不再只显示前20或40个字段。`geo_raster_data` 的 inspect/stats 均附带源路径、格式、CRS、范围、尺寸、分辨率、各波段类型/NoData/单位等头信息。`geo_db_data` 的 load/inspect 返回表定位符、字段及空间信息；数据库没有本地文件路径，load的范围和数量描述已加载的行，并标出读取上限。完整描述同时放在工具元数据的source_detail中，未知信息明确标为unknown，不提供连接凭证。list保留发现索引，不为列目录额外读取全部数据。
+
+原生分析的source/reference/zones推荐使用对象；若聚合服务或模型多编码为一层合法JSON对象字符串，入口会解析一次，再执行原有定位符/权限/CRS/参数校验。多重编码、非对象、非法JSON和未知字段仍拒绝。Python读取None会明确提示未选中数据源，应使用返回路径或read_vector(name/ref)，不把这类错误解释为文件权限故障。
+
 下面是视觉审查状态，与最终 quality_status 分开：
 
 | 视觉状态 | 含义 |

@@ -170,8 +170,16 @@ class FileLoader:
             import geopandas as gpd  # type: ignore[import-untyped]
 
             if path.suffix.lower() == _CSV_EXT:
-                # CSV needs coordinate column specification
+                import pandas as pd
+
+                frame = pd.read_csv(path)
                 info["format"] = "csv"
+                info["columns"] = list(frame.columns)
+                info["schema"] = {str(col): str(dtype) for col, dtype in frame.dtypes.items()}
+                info["null_counts"] = {str(col): int(series.isna().sum())
+                                       for col, series in frame.items()}
+                info["row_count"] = len(frame)
+                info["crs"] = ""
                 info["note"] = "CSV requires coordinate column specification"
                 return info
 
