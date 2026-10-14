@@ -1,13 +1,12 @@
 """GeoHarness tool registry — whitelist + native + MCP.
 
 Builds a ToolRegistry with only domain-relevant tools:
-- 4 native tools (geo_db_data, geo_vector_data, geo_raster_data,
-  geo_cartography) — one loader per data type plus cartography
+- 8 native tools plus 2 optional QGIS tools: Processing and editable projects
 - 5 whitelisted OpenHarness tools (ask_user_question, skill, todo_write,
   tool_search, brief) — user interaction helpers
 - MCP tools (registered dynamically when MCP manager is connected)
 
-Total target: 4 + 5 + 27 MCP = 36 tools (when all MCP servers connected).
+15 tools are available with QGIS enabled; configured MCP tools register dynamically.
 """
 
 from __future__ import annotations
@@ -17,8 +16,12 @@ from typing import Any
 
 from openharness.tools.base import ToolRegistry
 
+from geoharness.tools.geo_analysis import GeoAnalysisTool
 from geoharness.tools.geo_cartography import GeoCartographyTool
 from geoharness.tools.geo_db_data import GeoDBDataTool
+from geoharness.tools.geo_deliver import GeoDeliverTool
+from geoharness.tools.geo_map_review import GeoMapReviewTool
+from geoharness.tools.geo_python import GeoPythonTool
 from geoharness.tools.geo_raster_data import GeoRasterDataTool
 from geoharness.tools.geo_vector_data import GeoVectorDataTool
 
@@ -48,8 +51,7 @@ def build_geo_tool_registry(
     Args:
         mcp_manager: Optional McpClientManager with connected servers.
             If provided, all MCP tools are registered.
-        config: Optional GeoConfig (currently unused but reserved for
-            future config-driven tool filtering).
+        config: Optional GeoConfig controlling optional QGIS tool availability.
 
     Returns:
         ToolRegistry with domain-specific tools.
@@ -62,7 +64,20 @@ def build_geo_tool_registry(
     registry.register(GeoVectorDataTool())
     registry.register(GeoRasterDataTool())
     registry.register(GeoCartographyTool())
-    logger.info("Registered 4 native tools")
+    registry.register(GeoAnalysisTool())
+    registry.register(GeoPythonTool(
+        timeout_limit=getattr(getattr(config, "execution", None), "timeout_seconds", None)
+    ))
+    registry.register(GeoMapReviewTool())
+    registry.register(GeoDeliverTool())
+    logger.info("Registered 8 native tools")
+
+    if getattr(getattr(config, "qgis", None), "enabled", True):
+        from geoharness.tools.geo_qgis import GeoQgisTool
+        from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
+
+        registry.register(GeoQgisTool())
+        registry.register(GeoQgisProjectTool())
 
     # 2. Register whitelisted OpenHarness tools
     _register_whitelist_tools(registry)
@@ -93,6 +108,14 @@ def _register_whitelist_tools(registry: ToolRegistry) -> None:
     registered = 0
     for tool in default_registry.list_tools():
         if tool.name in _WHITELIST_TOOL_NAMES:
+            if tool.name == "skill":
+                from geoharness.tools.geo_skill import GeoSkillTool
+
+                tool = GeoSkillTool()
+            elif tool.name == "todo_write":
+                from geoharness.tools.geo_todo import GeoTodoWriteTool
+
+                tool = GeoTodoWriteTool()
             registry.register(tool)
             registered += 1
 

@@ -14,6 +14,8 @@ from typing import Any
 
 from geoharness._proj_fix import ensure_proj_data
 from geoharness.data.catalog import DataSource
+from geoharness.data.encoding import source_encoding, vector_read_options
+from geoharness.data.profiles import file_signature, profile_key
 
 # Repair a stale system PROJ_LIB before geopandas initialises PROJ (first
 # to_crs with a poisoned database permanently breaks CRS handling).
@@ -164,23 +166,36 @@ class FileLoader:
             "path": str(path),
             "size_bytes": path.stat().st_size if path.exists() else 0,
         }
+        info.update(source_encoding(path))
 
         try:
             import geopandas as gpd  # type: ignore[import-untyped]
 
             if path.suffix.lower() == _CSV_EXT:
-                # CSV needs coordinate column specification
+                import pandas as pd
+
+                frame = pd.read_csv(path)
                 info["format"] = "csv"
+                info["columns"] = list(frame.columns)
+                info["schema"] = {str(col): str(dtype) for col, dtype in frame.dtypes.items()}
+                info["null_counts"] = {str(col): int(series.isna().sum())
+                                       for col, series in frame.items()}
+                info["row_count"] = len(frame)
+                info["crs"] = ""
                 info["note"] = "CSV requires coordinate column specification"
                 return info
 
-            gdf = gpd.read_file(path, rows=1)  # Read 1 row for schema
+            gdf = gpd.read_file(path, **vector_read_options(info))
             info["crs"] = str(gdf.crs) if gdf.crs else "unknown"
             info["columns"] = list(gdf.columns)
+            info["schema"] = {str(name): str(dtype) for name, dtype in gdf.dtypes.items()}
+            info["null_counts"] = {str(name): int(series.isna().sum())
+                                   for name, series in gdf.items() if name != gdf.geometry.name}
             info["geometry_type"] = str(gdf.geom_type.iloc[0]) if len(gdf) > 0 else "unknown"
 
             # Get full bounds
-            gdf_full = gpd.read_file(path)
+            gdf_full = gdf
+            info["row_count"] = len(gdf_full)
             if len(gdf_full) > 0:
                 bounds = gdf_full.total_bounds  # [minx, miny, maxx, maxy]
                 info["bbox"] = [float(b) for b in bounds]
@@ -217,7 +232,7 @@ class FileLoader:
         if not path.is_absolute():
             path = self._file_dir / path
 
-        gdf = gpd.read_file(path)
+        gdf = gpd.read_file(path, **vector_read_options(source_encoding(path)))
         if gdf.crs is None:
             gdf.set_crs("EPSG:4326", inplace=True)
 
@@ -262,22 +277,36 @@ class FileLoader:
         if path is None:
             return {}
 
-        key = str(path).lower()
+        key = profile_key(path)
+        signature = file_signature(path)
         with self._detail_lock:
             cached = self._detail_cache.get(key)
         if cached is not None:
             cached_at = cached.get("_cached_at", 0.0)
-            if (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS:
+            if (
+                signature is not None
+                and cached.get("_file_stat") == signature
+                and (time.monotonic() - cached_at) < _DETAIL_TTL_SECONDS
+            ):
                 info = dict(cached)
                 info.pop("_cached_at", None)
+                info.pop("_file_stat", None)
+                info["_measured_file_stat"] = cached["_file_stat"]
                 return info
 
         info = self._read_file_info(path)
+        if file_signature(path) != signature:
+            return {}
+        info["_measured_file_stat"] = signature
         if not info.get("error"):
             with self._detail_lock:
                 stored = dict(info)
                 stored["_cached_at"] = time.monotonic()
+                stored["_file_stat"] = signature
                 self._detail_cache[key] = stored
+        else:
+            with self._detail_lock:
+                self._detail_cache.pop(key, None)
         return info
 
     def resolve_path(self, name: str) -> Path | None:
@@ -294,7 +323,7 @@ class FileLoader:
             name: File name (with/without extension) or full path.
 
         Returns:
-            GeoDataFrame; CRS defaults to EPSG:4326 when the file has none.
+            GeoDataFrame; unknown CRS stays unknown and must be explicitly declared.
 
         Raises:
             ValueError: If the file cannot be found or contains no features.
@@ -304,9 +333,12 @@ class FileLoader:
         path = self._find_file(name)
         if path is None:
             raise ValueError(f"File not found: {name!r}")
-        gdf = gpd.read_file(path)
-        if gdf.crs is None:
-            gdf = gdf.set_crs("EPSG:4326")
+        gdf = gpd.read_file(path, **vector_read_options(source_encoding(path)))
+        if not isinstance(gdf, gpd.GeoDataFrame):
+            raise ValueError(
+                "File has no spatial geometry; read attribute tables with geo_python/pandas "
+                "or provide explicit coordinates/geometry and CRS."
+            )
         if gdf.empty:
             raise ValueError(f"File contains no features: {path}")
         return gdf

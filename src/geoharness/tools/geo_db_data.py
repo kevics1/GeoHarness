@@ -16,6 +16,8 @@ from typing import Any, Literal
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
+from geoharness.data.description import describe_source
+
 logger = logging.getLogger(__name__)
 
 # A single database action is bounded so a hung socket cannot freeze the TUI.
@@ -148,22 +150,7 @@ class GeoDBDataTool(BaseTool):
             return ToolResult(
                 output=f"Table '{name}' not found in PostGIS.", is_error=True
             )
-        lines = [f"Table: {detail.get('name', name)}"]
-        lines.append(f"  Source: {detail.get('source_type', 'postgis')}")
-        lines.append(f"  Format: {detail.get('format', 'PostGIS table')}")
-        if detail.get("crs"):
-            lines.append(f"  CRS: {detail['crs']}")
-        bbox = detail.get("bbox")
-        if bbox:
-            lines.append(
-                f"  Extent: [{bbox[0]:.4f}, {bbox[1]:.4f}, "
-                f"{bbox[2]:.4f}, {bbox[3]:.4f}]"
-            )
-        schema = detail.get("schema") or {}
-        if schema:
-            lines.append(f"  Columns ({len(schema)}):")
-            for col, typ in schema.items():
-                lines.append(f"    - {col}: {typ}")
+        lines = [f"Table: {detail.get('name', name)}", describe_source(detail, kind="postgis")]
         return ToolResult(output="\n".join(lines), metadata={"source_detail": detail})
 
     def _load(self, connector: Any, name: str, limit: int) -> ToolResult:
@@ -185,35 +172,34 @@ class GeoDBDataTool(BaseTool):
             # them usefully instead of failing the whole call.
             if "no geometry column" in str(exc):
                 detail = connector.get_source_detail(name) or {}
-                cols = detail.get("schema") or {}
-                col_text = (
-                    ", ".join(f"{c}: {t}" for c, t in list(cols.items())[:12])
-                    if cols
-                    else "(run inspect for columns)"
-                )
+                detail.setdefault("name", name)
                 return ToolResult(
                     output=(
                         f"Table '{name}' is an attribute table (no geometry) — "
                         f"not directly mappable, but usable for joins/analysis.\n"
-                        f"  Columns: {col_text}\n"
+                        f"{describe_source(detail, kind='postgis')}\n"
                         f"  Typical use: join on region_id with a spatial table "
                         f"(province/city/county), or query via postgres MCP "
                         f"tools for aggregates."
                     ),
-                    metadata={"attribute_only": True, "table": name},
+                    metadata={"attribute_only": True, "table": name, "source_detail": detail},
                 )
             return ToolResult(output=f"Error: {exc}", is_error=True)
-        cols = ", ".join(str(c) for c in gdf.columns[:20])
         b = gdf.total_bounds
+        detail = {"name": name, "source_type": "postgis", "format": "PostGIS table",
+            "crs": str(gdf.crs) if gdf.crs is not None else None,
+            "bbox": b.tolist() if len(gdf) else None, "feature_count": len(gdf),
+            "row_count": len(gdf), "row_limit": limit,
+            "schema": {str(col): str(dtype) for col, dtype in gdf.dtypes.items()},
+            "null_counts": {str(col): int(series.isna().sum()) for col, series in gdf.items()},
+            "geometry_type": ", ".join(str(t) for t in gdf.geom_type.dropna().unique()[:8])}
         return ToolResult(
             output=(
                 f"Loaded table '{name}':\n"
-                f"  Features: {len(gdf)}\n"
-                f"  Columns ({len(gdf.columns)}): {cols}\n"
-                f"  CRS: {gdf.crs}\n"
-                f"  Extent: [{b[0]:.4f}, {b[1]:.4f}, {b[2]:.4f}, {b[3]:.4f}]"
+                f"{describe_source(detail, kind='postgis')}\n"
+                "Extent and row count describe loaded rows, not the full table."
             ),
-            metadata={"feature_count": len(gdf), "crs": str(gdf.crs)},
+            metadata={"feature_count": len(gdf), "crs": str(gdf.crs), "source_detail": detail},
         )
 
     def is_read_only(self, arguments: BaseModel) -> bool:

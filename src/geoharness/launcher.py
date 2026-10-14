@@ -41,6 +41,7 @@ from geoharness.config.settings import GeoConfig, load_geo_config
 from geoharness.hooks.cascade import build_cascade_manager
 from geoharness.mcp.connect import activate_mcp
 from geoharness.prompts.system_prompt import build_geo_system_prompt
+from geoharness.workspace_isolation import install_workspace_isolation
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ async def launch_geo_tui(
     Returns:
         Exit code (0 = success).
     """
+    install_workspace_isolation()
     config = load_geo_config(config_path)
 
     if not config.api_key:
@@ -79,17 +81,25 @@ async def launch_geo_tui(
     if print_mode:
         return await _run_print_mode(cwd, config, system_prompt, prompt)
 
-    # Generate a clean isolated settings.json and point OPENHARNESS_CONFIG_DIR
-    # at it — inherited by the backend subprocess spawned by launch_react_tui.
-    _setup_config_isolation(config)
-
-    # Try React TUI (default)
+    # The backend loads the same explicit YAML as the launcher, including the
+    # new analysis/execution/review sections. Restore the parent environment.
+    previous_config_path = os.environ.get("GEOH_CONFIG_PATH")
+    if config_path is not None:
+        os.environ["GEOH_CONFIG_PATH"] = str(config_path.resolve())
     try:
-        return await _run_react_tui(cwd, config, system_prompt, prompt)
-    except Exception as e:
-        logger.warning("React TUI failed: %s, falling back to print mode", e)
-        print(f"React TUI 不可用: {e}。回退到打印模式。")
-        return await _run_print_mode(cwd, config, system_prompt, prompt)
+        _setup_config_isolation(config)
+        try:
+            return await _run_react_tui(cwd, config, system_prompt, prompt)
+        except Exception as e:
+            logger.warning("React TUI failed: %s, falling back to print mode", e)
+            print(f"React TUI 不可用: {e}。回退到打印模式。")
+            return await _run_print_mode(cwd, config, system_prompt, prompt)
+    finally:
+        if config_path is not None:
+            if previous_config_path is None:
+                os.environ.pop("GEOH_CONFIG_PATH", None)
+            else:
+                os.environ["GEOH_CONFIG_PATH"] = previous_config_path
 
 
 def _setup_config_isolation(config: GeoConfig) -> None:
@@ -286,7 +296,7 @@ async def _run_print_mode(
 
     bundle = await build_geo_runtime(
         cwd=cwd,
-        config_path=None,
+        config_override=config,
         system_prompt=system_prompt,
     )
 

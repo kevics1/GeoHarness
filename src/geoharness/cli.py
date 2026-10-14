@@ -92,7 +92,7 @@ def dry_run(
             table.add_row("RuntimeBundle", "OK")
             table.add_row("API Client", type(bundle.api_client).__name__)
             table.add_row("ToolRegistry", f"{len(bundle.tool_registry.list_tools())} tools")
-            table.add_row("MCP Manager", "connected")
+            table.add_row("MCP Manager", "configured (not connected)")
             table.add_row("QueryEngine", type(bundle.engine).__name__)
             console.print(table)
         except Exception as e:
@@ -103,7 +103,35 @@ def dry_run(
 
 
 @app.command()
+def qgis_doctor(
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="指定配置文件路径"),
+) -> None:
+    """实际检查 QGIS 环境和可用 Processing 提供者（不打开桌面）。"""
+    import asyncio
+    import json
+
+    from geoharness.config.settings import load_geo_config
+    from geoharness.qgis.runner import execute_qgis
+
+    settings = load_geo_config(config).qgis
+    if not settings.enabled:
+        console.print("[yellow]QGIS 集成已禁用。[/yellow]")
+        raise typer.Exit(1)
+    try:
+        result = asyncio.run(execute_qgis("doctor", {}, cwd=Path.cwd(), settings=settings))
+    except (OSError, ValueError, RuntimeError) as exc:
+        console.print(f"[red]QGIS 检查失败: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(json.dumps(result, ensure_ascii=False, indent=2), markup=False)
+    if result.get("status") != "succeeded":
+        raise typer.Exit(1)
+
+
+@app.command()
 def run(
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="指定配置文件路径"
+    ),
     cwd: Optional[Path] = typer.Option(
         None, "--cwd", help="工作目录"
     ),
@@ -123,6 +151,7 @@ def run(
     exit_code = asyncio.run(
         launch_geo_tui(
             cwd=work_cwd,
+            config_path=config,
             prompt=prompt,
             print_mode=print_mode,
         )
@@ -140,22 +169,13 @@ model: ${GEOH_MODEL}
 api_key: ${GEOH_API_KEY}
 base_url: ${GEOH_BASE_URL}
 
-# MCP 服务器配置
-mcp:
-  geo-mcp-server:
-    command: python
-    args: ["-m", "geo_mcp_server"]
-    env:
-      PYTHONUTF8: "1"
-  postgres:
-    command: python
-    args: ["-m", "postgres_mcp_server"]
-    env:
-      PGHOST: ${GEOH_POSTGRES_HOST}
-      PGPORT: ${GEOH_POSTGRES_PORT}
-      PGDATABASE: ${GEOH_POSTGRES_DB}
-      PGUSER: ${GEOH_POSTGRES_USER}
-      PGPASSWORD: ${GEOH_POSTGRES_PASSWORD}
+agent:
+  max_tokens: 16384
+  internal_todo_path: .geoharness/tasks/TODO.md
+
+# 可选 MCP 扩展：安装服务后按其实际入口填写 command、args、cwd 和 env。
+# 默认使用原生空间分析与数据库工具，避免启动未安装的模块。
+mcp: {}
 
 # 制图配置
 cartography:
@@ -182,6 +202,42 @@ cognition:
     l1_to_l2_tools: ["geo_spatial_relation", "geo_all_relations"]
     l2_to_l3_tools: ["geo_moran_local", "geo_getis_ord"]
     suggestion_prompt: "分析结果已完成，建议加载更高级认知技能以深入理解空间模式。"
+
+# 原生空间分析（无需 MCP；metric_crs 为空时选择适用的本地 UTM）
+analysis:
+  outputs_dir: .geoharness/analysis
+  metric_crs: ""
+  timeout_seconds: 120
+
+# 自主 Python 分析：源数据默认只读，输出限于单次运行目录
+execution:
+  enabled: true
+  outputs_dir: .geoharness/runs
+  timeout_seconds: 120
+  max_output_chars: 12000
+
+# 独立 QGIS 环境；留空自动发现，或在 install_dir 设置实际安装目录
+qgis:
+  enabled: true
+  install_dir: ""
+  python_executable: ""
+  prefix_path: ""
+  outputs_dir: .geoharness/qgis
+  timeout_seconds: 180
+  max_output_chars: 12000
+  max_search_results: 20
+
+# 实际成图视觉检查；空 model/base_url/api_key 复用主模型
+map_review:
+  enabled: true
+  timeout_seconds: 90
+  max_tokens: 8192
+  layout:
+    legend_outside: true
+
+# 最终交付目录必须位于当前工作目录内
+delivery:
+  outputs_dir: exports
 
 # 数据配置
 data:
@@ -216,7 +272,7 @@ GEOH_POSTGRES_USER=postgres
 GEOH_POSTGRES_PASSWORD=postgres
 
 # 制图输出目录（原生渲染的 PNG/PDF/SVG/HTML 落盘位置）
-GEOH_OUTPUTS_DIR=~/.geoharness/exports
+GEOH_OUTPUTS_DIR=exports
 # 可选：PostGIS / MCP 相关变量
 # GEOH_GEO_MCP_PATH=/path/to/geo-mcp-server
 """

@@ -1,5 +1,9 @@
 # GeoHarness
 
+当前首期聚焦多图层叠加与影响范围分析，支持原生 GIS 运算、可复现的自主 Python 分析，以及读取实际成图进行检查、有限自动修正和重绘。入口与配置保持 OpenHarness/GeoHarness 隔离。
+
+最新操作与检查状态说明见 [user-guide.md](user-guide.md)，执行架构见 [architecture.md](architecture.md)。本地聚合服务配置见 [config.example.yaml](config.example.yaml)。基础工具为 8 个原生工具与 5 个辅助工具；启用 QGIS 后增加 geo_qgis 和 geo_qgis_project，MCP 工具按实际连接动态发现。地图同时提供可编辑 QGIS 工程，默认交付到当前工作目录。空间热点与栅格/地形的完整业务验收列为后续重点。
+
 地理方向原生 Agent 系统 — 空间分析优先，制图为分析产物。
 
 基于 OpenHarness 构建，通过直接构造 RuntimeBundle 实现 8 层配置隔离，不修改上游源码。
@@ -11,10 +15,11 @@
   GeoTIFF/IMG/ASC/VRT）— 每个工具只访问自己的后端，互不拖累
 - **多图层合成制图**：一次调用将行政区划/水系/道路/火场/居民点等多层
   叠加到一张 PNG/HTML，支持高程栅格底图、自动统一 CRS、图层图例
-- **原生渲染，无 QGIS 依赖**：matplotlib（Agg，无头安全）+ folium/Leaflet
+- **复用本机 QGIS**：动态发现 Processing 算法、查询参数、执行本地 .model3；通过 PyQGIS 创建和读取真实工程，从保存的打印布局导出 PNG/PDF
+- **保留原生渲染**：matplotlib（Agg，无头安全）+ folium/Leaflet，可独立运行
 - **认知级联**：L1 感知 → L2 理解 → L3 推理，建议制（模型可跳过）
 - **生产级鲁棒性**：逐工具超时预算、PostGIS 连接串行化+keepalive+断线重连、
-  目录扫描单飞锁、PROJ 环境自愈、371 项自动化测试
+  目录扫描单飞锁、PROJ 环境自愈、独立 QGIS 任务日志与取消清理
 
 ## 架构概览
 
@@ -22,9 +27,9 @@
 用户输入
   → GeoHarness 系统提示词（6地理原则 + 技能目录 + 工具目录 + 级联状态）
   → LLM 调用（OpenAI 兼容 API）
-  → 工具调度（4 原生 + 27 MCP + 5 白名单 = 36 工具）
+  → 工具调度（8 原生 + 2 可选 QGIS + 5 白名单；按配置接入 MCP）
   → 认知级联（L1感知 → L2理解 → L3推理，建议制，模型可跳过）
-  → 制图输出（桥接规则 → 原生渲染 → PNG/PDF/SVG/HTML）
+  → 制图输出（QGIS 工程/打印布局或原生渲染 → 图片/工程 → 检查与交付）
 ```
 
 **认知三级联**：
@@ -43,11 +48,11 @@
 
 - Python 3.10+
 - OpenHarness AI (`pip install openharness-ai>=0.1.9`)
-- Python 3.10+（原生制图渲染，无需安装 QGIS / PROJ / GDAL 桌面套件）
 - PostgreSQL 15+ with PostGIS 3.3+（空间数据存储）
 
 **可选但推荐**：
 
+- QGIS 桌面安装及其 PyQGIS 环境（Windows 可自动发现），用 `geoh qgis-doctor` 验证；执行时无需打开桌面
 - 高德开放平台 API Key（地理编码和行政区划服务，免费额度足够）
 - Node.js 18+（React TUI 前端，无则自动降级到打印模式）
 
@@ -115,7 +120,7 @@ GEOH_POSTGRES_PASSWORD=your-password
 
 # ── 制图输出 ──────────────────────────────────
 # 原生渲染（matplotlib/folium）的 PNG/PDF/SVG/HTML 落盘目录
-GEOH_OUTPUTS_DIR=~/.geoharness/exports
+GEOH_OUTPUTS_DIR=exports
 ```
 
 ### 第三步：编辑 config.yaml
@@ -129,27 +134,10 @@ model: ${GEOH_MODEL}
 api_key: ${GEOH_API_KEY}
 base_url: ${GEOH_BASE_URL}
 
-# ── MCP 服务器 ────────────────────────────────
-# 2 个领域 MCP 服务器，提供 27 个工具
-mcp:
-  geo-mcp-server:
-    # 空间分析核心：地理编码、空间统计、聚类、因果检验
-    command: python
-    args: ["-m", "geo_mcp_server"]
-    env:
-      PYTHONUTF8: "1"              # 必须！修复 Windows 中文路径 .pth 问题
-      AMAP_API_KEY: your-amap-key  # 高德 API Key，用于地理编码
-
-  postgres:
-    # PostgreSQL 查询：schema 检查、查询分析
-    command: python
-    args: ["-m", "postgres_mcp_server"]
-    env:
-      PGHOST: ${GEOH_POSTGRES_HOST}
-      PGPORT: ${GEOH_POSTGRES_PORT}
-      PGDATABASE: ${GEOH_POSTGRES_DB}
-      PGUSER: ${GEOH_POSTGRES_USER}
-      PGPASSWORD: ${GEOH_POSTGRES_PASSWORD}
+# ── MCP 服务器（可选）─────────────────────────
+# 默认仅启用原生工具；安装服务后再添加真实 command/args。
+# Geo MCP 和独立只读 Postgres MCP 的配置见 user-guide.md。
+mcp: {}
 
 # ── 制图配置 ──────────────────────────────────
 cartography:
@@ -316,11 +304,11 @@ GeoHarness/
 │   ├── hooks/cascade.py          # 认知级联钩子 (CascadeManager)
 │   ├── mcp/config.py             # MCP 服务器配置构建器
 │   └── prompts/system_prompt.py  # 系统提示词构建器
-├── skills/                       # 3 个认知技能
+├── skills/                       # 3 个认知技能 + 分析与制图操作技能
 │   ├── geo-perception/           # L1: 5步感知流程
 │   ├── geo-comprehension/        # L2: 6步理解流程
 │   └── geo-reasoning/            # L3: 6步推理流程
-├── tests/                        # 207 个测试
+├── tests/                        # 单元、集成与工作流回归测试
 │   ├── test_config.py            # 配置解析
 │   ├── test_runtime.py           # 运行时组装
 │   ├── test_data.py              # 数据层
@@ -335,7 +323,7 @@ GeoHarness/
 
 ## 工具清单
 
-**原生工具 (4)**：
+**原生工具 (8)，可选 QGIS 工具 (2)**：
 
 | 工具 | 功能 | 只读 |
 |------|------|------|
@@ -343,6 +331,12 @@ GeoHarness/
 | geo_vector_data | 加载/检视本地矢量数据 (SHP/GeoJSON/GPKG/CSV) | 是 |
 | geo_raster_data | 加载/检视本地栅格数据 (GeoTIFF/IMG/ASC/VRT) | 是 |
 | geo_cartography | 原生渲染地图 PNG/PDF/SVG + 交互 HTML | 视操作 |
+| geo_analysis | 缓冲、裁剪、相交、距离、分区计数与影响范围分析 | 源数据只读，生成新结果 |
+| geo_python | 保存并执行自定义 GIS 分析脚本 | 源数据只读，写独立运行目录 |
+| geo_map_review | 读取实际成图，输出视觉检查与呈现修正建议 | 写独立检查报告 |
+| geo_deliver | 交付地图、结果、报告及可编辑 QGIS 工程 | 写当前工作目录 exports 子目录 |
+| geo_qgis | 本机算法发现/参数查询/Processing 执行/本地 .model3 | 视操作，产物写独立任务目录 |
+| geo_qgis_project | 创建、检查和导出真实可编辑 QGIS 工程 | inspect 只读，create/export 写新目录 |
 
 **MCP 工具 (27)**：
 
@@ -386,7 +380,7 @@ A: 静态渲染需要一个中文字体。安装任意一款即可（如 `Noto S
 
 **Q: 想调整输出目录 / 地图尺寸**
 
-A: 输出目录由 `.env` 的 `GEOH_OUTPUTS_DIR`（或 config.yaml 的 `cartography.outputs_dir`）控制，默认 `~/.geoharness/exports`。
+A: 地图默认写入当前工作目录的 `exports/`，可用 config.yaml 的 `cartography.outputs_dir` 设置，初始化模板通过 `.env` 的 `GEOH_OUTPUTS_DIR` 引用该值。geo_deliver 的最终交付由 `delivery.outputs_dir` 控制，必须是当前工作目录的子目录。可编辑工程与使用方式见 [user-guide.md](user-guide.md)。
 
 **Q: 没有 PostGIS 数据库怎么办？**
 

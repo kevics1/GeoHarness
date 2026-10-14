@@ -3,14 +3,13 @@
 The React terminal frontend spawns this module
 (``python -m geoharness.tui_backend``) instead of upstream
 ``python -m openharness --backend-only``. Upstream's ``ReactBackendHost``
-is reused as-is, but its runtime factory
+loop is reused, but its runtime factory
 (``openharness.ui.backend_host.build_runtime``) is swapped for the
 GeoHarness runtime so the TUI gets the Geo system prompt, native tools
 and domain MCP servers — instead of upstream ``build_runtime()``.
 
-Known limitation: session snapshot restore (``restore_messages``) is
-accepted but not applied; the GeoHarness runtime starts a fresh
-conversation.
+The backend also suppresses the duplicate system transcript emitted by
+upstream immediately after an error event.
 """
 
 from __future__ import annotations
@@ -23,6 +22,65 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_error_detail(exc: Exception, bundle: Any) -> str:
+    """Display the cause without echoing configured authentication or DSNs."""
+    metadata = getattr(getattr(bundle, "engine", None), "tool_metadata", {})
+    config = metadata.get("geoharness_config")
+    secrets = [
+        getattr(config, "api_key", ""),
+        getattr(getattr(config, "map_review", None), "api_key", ""),
+        getattr(getattr(config, "data", None), "postgis_dsn", ""),
+    ]
+    for server in (getattr(config, "mcp_servers", None) or {}).values():
+        secrets.extend(value for key, value in server.env.items() if any(
+            marker in key.upper() for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET", "DSN", "URI")
+        ))
+    detail = str(exc)
+    for secret in sorted((str(value) for value in secrets if value), key=len, reverse=True):
+        detail = detail.replace(secret, "[redacted]")
+    return " ".join(detail.split())[:1200]
+
+
+def _geo_backend_host_class():
+    from openharness.ui.backend_host import ReactBackendHost
+    from openharness.ui.protocol import BackendEvent
+
+    class GeoReactBackendHost(ReactBackendHost):
+        """Keep request failures visible and leave the frontend ready for input."""
+
+        _last_error_message: str | None = None
+
+        async def _emit(self, event):
+            previous = self._last_error_message
+            self._last_error_message = None
+            if (
+                previous is not None and event.type == "transcript_item"
+                and event.item is not None and event.item.role == "system"
+                and event.item.text == previous
+            ):
+                return
+            if event.type == "error":
+                self._last_error_message = event.message
+            await super()._emit(event)
+
+        async def _run_active_request(self, awaitable):
+            try:
+                return await super()._run_active_request(awaitable)
+            except Exception as exc:
+                detail = _runtime_error_detail(exc, self._bundle)
+                await self._emit(BackendEvent(
+                    type="error", message=(
+                        f"本轮运行异常终止（{type(exc).__name__}）：{detail}。"
+                        "可继续输入；已完成的工具不会自动重执行。"
+                    ),
+                ))
+                # assistant_complete alone does not clear the React frontend's busy state.
+                await self._emit(BackendEvent(type="line_complete"))
+                return True
+
+    return GeoReactBackendHost
 
 
 async def geo_backend_runtime_factory(**kwargs: Any) -> Any:
@@ -48,6 +106,31 @@ async def geo_backend_runtime_factory(**kwargs: Any) -> Any:
         permission_prompt=kwargs.get("permission_prompt"),
         ask_user_prompt=kwargs.get("ask_user_prompt"),
     )
+
+    restored_messages = kwargs.get("restore_messages")
+    if restored_messages:
+        from openharness.engine.messages import (
+            ConversationMessage,
+            sanitize_conversation_messages,
+        )
+
+        bundle.engine.load_messages(sanitize_conversation_messages([
+            ConversationMessage.model_validate(message) for message in restored_messages
+        ]))
+    restored_metadata = kwargs.get("restore_tool_metadata")
+    if isinstance(restored_metadata, dict):
+        # Restore conversation focus, never serialized config or live connectors.
+        focus = restored_metadata.get("task_focus_state")
+        if isinstance(focus, dict):
+            bundle.engine.tool_metadata["task_focus_state"] = focus
+        from geoharness.config.settings import GeoConfig
+        from geoharness.session_state import restore_geo_session_state
+
+        live_config = bundle.engine.tool_metadata.get("geoharness_config")
+        if isinstance(live_config, GeoConfig):
+            restore_geo_session_state(
+                bundle.engine.tool_metadata, restored_metadata, cwd=cwd, config=live_config,
+            )
 
     max_turns = kwargs.get("max_turns")
     if max_turns is not None:
@@ -79,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parse_args(list(sys.argv[1:] if argv is None else argv))
     backend_host.build_runtime = geo_backend_runtime_factory
+    backend_host.ReactBackendHost = _geo_backend_host_class()
 
     host_kwargs: dict[str, Any] = {}
     if args.cwd:

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from geoharness.config.settings import GeoConfig, McpServerConfig
+from geoharness.config.settings import GeoConfig, MapReviewConfig, McpServerConfig
 
 
 class TestBuildGeoRuntime:
@@ -49,6 +49,9 @@ class TestBuildGeoRuntime:
 
             bundle = await build_geo_runtime(cwd=tmp_path)
             assert isinstance(bundle, RuntimeBundle)
+            from geoharness.session_state import GeoSessionBackend
+
+            assert isinstance(bundle.session_backend, GeoSessionBackend)
 
     @pytest.mark.asyncio
     async def test_runtime_uses_domain_api_client(
@@ -66,6 +69,21 @@ class TestBuildGeoRuntime:
 
             bundle = await build_geo_runtime(cwd=tmp_path)
             assert isinstance(bundle.api_client, OpenAICompatibleClient)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("extras", [{}, {"thinking": {"type": "disabled"}}])
+    async def test_visual_review_owns_transport_even_when_main_settings_are_inherited(
+        self, tmp_path: Path, extras,
+    ) -> None:
+        config = GeoConfig(model="test-model", api_key="test-only",
+                           map_review=MapReviewConfig(request_extra_body=extras))
+        with patch("geoharness.runtime.load_geo_config", return_value=config):
+            from geoharness.runtime import build_geo_runtime
+
+            bundle = await build_geo_runtime(cwd=tmp_path)
+            assert bundle.engine.tool_metadata.get("map_review_client") is None
+            review_config = bundle.engine.tool_metadata["geoharness_config"].map_review
+            assert review_config.request_extra_body == extras
 
     @pytest.mark.asyncio
     async def test_runtime_cwd_set_correctly(

@@ -16,6 +16,14 @@ from typing import Any, Literal
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
+from geoharness.data.description import describe_source
+from geoharness.data.profiles import (
+    CRS_OPERATION_HINT,
+    local_source_listing,
+    make_profile,
+    record_profiles,
+)
+
 logger = logging.getLogger(__name__)
 
 _RASTER_TIMEOUT_SECONDS = 60.0
@@ -105,9 +113,12 @@ class GeoRasterDataTool(BaseTool):
             return ToolResult(output=f"Unknown action: {args.action}", is_error=True)
 
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 asyncio.to_thread(work), timeout=_RASTER_TIMEOUT_SECONDS
             )
+            if not result.is_error:
+                record_profiles(context.metadata, result.metadata.get("data_profiles", []))
+            return result
         except asyncio.TimeoutError:
             return ToolResult(
                 output=(
@@ -132,16 +143,8 @@ class GeoRasterDataTool(BaseTool):
             )
 
     def _list(self, loader: Any) -> ToolResult:
-        sources = loader.list_sources()
-        if not sources:
-            return ToolResult(output="No local raster files found.")
-        lines = []
-        for src in sources:
-            meta = getattr(src, "metadata", {}) or {}
-            lines.append(f"  - {src.name} ({meta.get('format', 'raster')})")
-        return ToolResult(
-            output=f"Found {len(sources)} raster file(s):\n" + "\n".join(lines)
-        )
+        output, metadata = local_source_listing(loader, kind="raster")
+        return ToolResult(output=output, metadata=metadata)
 
     def _inspect(self, loader: Any, name: str) -> ToolResult:
         if not name:
@@ -150,32 +153,22 @@ class GeoRasterDataTool(BaseTool):
                 is_error=True,
             )
         detail = loader.get_source_detail(name)
-        if not detail:
+        if not detail or detail.get("error"):
             return ToolResult(
                 output=f"Raster file '{name}' not found or not readable.",
                 is_error=True,
             )
-        lines = [f"Raster: {detail.get('name', name)}"]
-        lines.append(f"  Path: {detail.get('path', '')}")
-        lines.append(f"  Driver: {detail.get('format', '')}")
-        lines.append(
-            f"  Size: {detail.get('width')} x {detail.get('height')} px, "
-            f"{detail.get('band_count')} band(s), dtype={detail.get('dtype')}"
-        )
-        if detail.get("crs"):
-            lines.append(f"  CRS: {detail['crs']}")
-        res = detail.get("resolution")
-        if res:
-            lines.append(f"  Resolution: {res[0]:.6g} x {res[1]:.6g}")
-        bbox = detail.get("bbox")
-        if bbox:
-            lines.append(
-                f"  Bounds: [{bbox[0]:.4f}, {bbox[1]:.4f}, "
-                f"{bbox[2]:.4f}, {bbox[3]:.4f}]"
+        profile = make_profile(detail, kind="raster")
+        if "_measured_file_stat" in detail and profile is None:
+            return ToolResult(
+                output="Error: raster file changed during inspection; inspect again.", is_error=True
             )
-        if detail.get("nodata") is not None:
-            lines.append(f"  NoData: {detail['nodata']}")
-        return ToolResult(output="\n".join(lines), metadata={"source_detail": detail})
+        lines = [f"Raster: {detail.get('name', name)}", describe_source(detail, kind="raster")]
+        lines.append(CRS_OPERATION_HINT)
+        return ToolResult(
+            output="\n".join(lines),
+            metadata={"source_detail": detail, "data_profiles": [profile] if profile else []},
+        )
 
     def _stats(self, loader: Any, name: str, band: int) -> ToolResult:
         if not name:
@@ -183,17 +176,26 @@ class GeoRasterDataTool(BaseTool):
                 output="Error: 'name' or 'file_path' is required for stats.",
                 is_error=True,
             )
+        try:
+            detail = loader.get_source_detail(name)
+        except Exception:  # noqa: BLE001 — optional header metadata must not discard valid stats
+            detail = {}
+        # The header and pixels must refer to the same measured file version.
+        # A replacement during band_stats is rejected by make_profile below.
         stats = loader.band_stats(name, band=band)
+        profile = make_profile(detail, kind="raster") if not detail.get("error") else None
         return ToolResult(
             output=(
                 f"Band {stats['band']} statistics for '{name}':\n"
+                f"{describe_source(detail, kind='raster')}\n"
                 f"  Valid pixels: {stats['count']}\n"
                 f"  Min / Max: {stats['min']:.4f} / {stats['max']:.4f}\n"
                 f"  Mean / Std: {stats['mean']:.4f} / {stats['std']:.4f}\n"
                 f"  P5 / P50 / P95: {stats['p5']:.4f} / {stats['p50']:.4f} / "
-                f"{stats['p95']:.4f}"
+                f"{stats['p95']:.4f}\n{CRS_OPERATION_HINT}"
             ),
-            metadata=stats,
+            metadata={**stats, "source_detail": detail,
+                      "data_profiles": [profile] if profile else []},
         )
 
     def is_read_only(self, arguments: BaseModel) -> bool:

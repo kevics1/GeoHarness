@@ -81,7 +81,7 @@ class TestAttributeTableLoad:
 
 
 class TestSpatialAnalysisSkill:
-    def test_skill_file_exists_and_registers(self) -> None:
+    def test_skill_file_exists_and_registers(self, temp_config_dir: Path) -> None:
         from openharness.skills.loader import load_skill_registry
 
         skill_path = Path(__file__).resolve().parent.parent / "skills"
@@ -89,7 +89,7 @@ class TestSpatialAnalysisSkill:
         names = {s.name for s in reg.list_skills()}
         assert "spatial-analysis" in names
 
-    def test_skill_references_real_tools_and_skills(self) -> None:
+    def test_skill_references_real_tools_and_skills(self, temp_config_dir: Path) -> None:
         """The entry skill must only reference tools/skills that exist."""
         skill_path = (
             Path(__file__).resolve().parent.parent
@@ -98,11 +98,24 @@ class TestSpatialAnalysisSkill:
         text = skill_path.read_text(encoding="utf-8")
         for token in (
             "geo_vector_data", "geo_db_data", "geo_cartography",
-            "geo_moran_global", "geo_getis_ord", "geo_cluster_detect",
-            "proximity-analysis", "overlay-analysis", "zonal-statistics",
+            "geo_analysis", "geo_python", "geo_map_review",
             "cartography",
         ):
             assert token in text, f"skill must reference {token}"
+        from geoharness.tools import build_geo_tool_registry
+
+        tools = {tool.name for tool in build_geo_tool_registry().list_tools()}
+        for name in ("geo_analysis", "geo_python", "geo_map_review", "geo_cartography"):
+            assert name in tools
+        import re
+
+        from openharness.skills.loader import load_skill_registry
+
+        root = skill_path.parents[2]
+        skills = load_skill_registry(root, extra_skill_dirs=(str(root / "skills"),))
+        available = {skill.name for skill in skills.list_skills()}
+        for name in re.findall(r'skill\(name="([^"]+)"\)', text):
+            assert name in available, f"Referenced skill is missing: {name}"
 
 
 class TestSystemPromptGuidance:
@@ -112,10 +125,14 @@ class TestSystemPromptGuidance:
     def test_prompt_names_the_entry_skill(self, tmp_path: Path) -> None:
         assert "spatial-analysis" in self._prompt(tmp_path)
 
-    def test_prompt_warns_point_data_needs_aggregation(self, tmp_path: Path) -> None:
+    def test_prompt_prioritizes_available_qgis_and_actual_map_review(self, tmp_path: Path) -> None:
         prompt = self._prompt(tmp_path)
-        assert "点数据不能直接算" in prompt
-        assert "MCP" in prompt  # statistics must go through MCP tools
+        assert "QGIS 可用时先用 geo_qgis 搜索算法、help 查参数" in prompt
+        assert "geo_qgis_project" in prompt
+        assert "已有影响分析接口 geo_analysis" in prompt
+        assert "geo_python" in prompt
+        assert "geo_map_review" in prompt
+        assert "Do not invoke Moran/LISA/causal analysis for a simple overlay task" in prompt
 
     def test_prompt_uses_real_skill_tool_name(self, tmp_path: Path) -> None:
         """The skill tool is 'skill', not 'skill_view' (old prompt typo)."""
@@ -127,7 +144,7 @@ class TestSystemPromptGuidance:
 class TestSkillVisibleAtRuntime:
     @pytest.mark.asyncio
     async def test_skill_tool_loads_bundled_skill_via_runtime(
-        self, tmp_path: Path
+        self, tmp_path: Path, temp_config_dir: Path
     ) -> None:
         """The runtime must expose extra_skill_dirs to the `skill` tool.
 
@@ -139,6 +156,9 @@ class TestSkillVisibleAtRuntime:
 
         from geoharness.runtime import build_geo_runtime
 
+        (temp_config_dir / "config.yaml").write_text(
+            "api_key: synthetic-test-key\n", encoding="utf-8"
+        )
         rt = await build_geo_runtime(cwd=tmp_path)
         ctx = ToolExecutionContext(
             cwd=tmp_path, metadata=rt.engine.tool_metadata, hook_executor=None

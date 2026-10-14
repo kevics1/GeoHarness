@@ -291,6 +291,30 @@ class TestSectionBuilders:
 class TestLauncher:
     """Test launcher functions."""
 
+    @pytest.mark.asyncio
+    async def test_explicit_config_is_inherited_by_tui_and_parent_environment_restored(
+        self, tmp_path, monkeypatch,
+    ):
+        import os
+
+        from geoharness.launcher import launch_geo_tui
+
+        path = tmp_path / "custom.yaml"
+        path.write_text("model: chosen\napi_key: local\nmap_review:\n  max_repairs: 1\n",
+                        encoding="utf-8")
+        monkeypatch.setenv("GEOH_CONFIG_PATH", "previous-value")
+
+        async def inspect_tui(cwd, config, system_prompt, prompt):
+            assert os.environ["GEOH_CONFIG_PATH"] == str(path.resolve())
+            assert config.model == "chosen" and config.map_review.max_repairs == 1
+            return 0
+
+        with patch("geoharness.launcher._setup_config_isolation"), patch(
+            "geoharness.launcher._run_react_tui", side_effect=inspect_tui,
+        ):
+            assert await launch_geo_tui(tmp_path, config_path=path) == 0
+        assert os.environ["GEOH_CONFIG_PATH"] == "previous-value"
+
     def test_launch_returns_error_without_api_key(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -357,6 +381,7 @@ class TestLauncher:
                         )
                         assert exit_code == 0
                         mock_build.assert_called_once()
+                        assert mock_build.call_args.kwargs["config_override"].model == "test"
                         mock_activate.assert_awaited_once_with(mock_bundle)
 
     @pytest.mark.asyncio

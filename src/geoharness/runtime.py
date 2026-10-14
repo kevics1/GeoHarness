@@ -16,7 +16,6 @@ from typing import Any
 from openharness.api.openai_client import OpenAICompatibleClient
 from openharness.commands.registry import create_default_command_registry
 from openharness.config.settings import PathRuleConfig, PermissionSettings
-from openharness.engine.query_engine import QueryEngine
 from openharness.hooks.executor import HookExecutionContext, HookExecutor
 from openharness.hooks.loader import HookRegistry
 from openharness.mcp.client import McpClientManager
@@ -26,19 +25,24 @@ from openharness.state.store import AppStateStore
 from openharness.tools.base import ToolRegistry
 from openharness.ui.runtime import RuntimeBundle
 
+from geoharness.api_client import GeoOpenAICompatibleClient
 from geoharness.config.settings import GeoConfig, load_geo_config
+from geoharness.engine import GeoQueryEngine
 from geoharness.hooks.cascade import (
     CascadeManager,
     build_cascade_manager,
     register_cascade_hooks,
 )
+from geoharness.hooks.executor import GeoHookExecutor
 from geoharness.mcp.config import build_mcp_configs, verify_mcp_isolation
+from geoharness.session_state import GeoSessionBackend
+from geoharness.workspace_isolation import install_workspace_isolation
 
 logger = logging.getLogger(__name__)
 
 # Agent turn limit. The upstream default (8) aborts multi-layer cartography
-# ("Stopped after 8 turns") well before the workflow finishes; 40 comfortably
-# covers a 9-layer fire-incident map (inspect + load + render per layer).
+# ("Stopped after 8 turns") well before the workflow finishes. Forty bounds one
+# batch; pending tool results can be resumed without starting a new map budget.
 _DEFAULT_MAX_TURNS = 40
 
 
@@ -49,6 +53,7 @@ async def build_geo_runtime(
     extra_skill_dirs: tuple[str, ...] = (),
     permission_prompt: Any | None = None,
     ask_user_prompt: Any | None = None,
+    config_override: GeoConfig | None = None,
 ) -> RuntimeBundle:
     """Build GeoHarness runtime by directly constructing RuntimeBundle.
 
@@ -66,8 +71,12 @@ async def build_geo_runtime(
     Returns:
         Fully assembled RuntimeBundle with domain-specific components.
     """
+    # Reused upstream prompt/plugin consumers also need project path isolation;
+    # OPENHARNESS_CONFIG_DIR alone does not affect their cwd/.openharness paths.
+    install_workspace_isolation()
+
     # 1. Load GeoHarness config (from ~/.geoharness/config.yaml)
-    config = load_geo_config(config_path)
+    config = config_override or load_geo_config(config_path)
     logger.info("GeoHarness config loaded: model=%s", config.model)
 
     # 2. Build API client directly (bypasses resolve_auth profile override)
@@ -79,7 +88,7 @@ async def build_geo_runtime(
     logger.info("MCP servers: %s", list(config.mcp_servers.keys()))
 
     # 4. Build tool registry with whitelist
-    tool_registry = _build_tool_registry()
+    tool_registry = _build_tool_registry(config)
     logger.info("Tools registered: %d", len(tool_registry.list_tools()))
 
     # 5. Build permission checker
@@ -98,20 +107,19 @@ async def build_geo_runtime(
     if system_prompt is None:
         system_prompt = _build_system_prompt(config, cwd, cascade_manager)
 
-    # Skill directories: project skills/ plus any caller-provided dirs. Needed
+    # Skill directories: bundled skills/ plus any caller-provided dirs. Needed
     # both for the RuntimeBundle (below) and the engine's tool_metadata so the
     # `skill` tool can find bundled skills at runtime.
-    project_skills_dir = str(Path(__file__).parent.parent.parent / "skills")
-    all_skill_dirs = (project_skills_dir, *extra_skill_dirs)
+    all_skill_dirs = (str(_bundled_skills_dir()), *extra_skill_dirs)
 
-    engine = QueryEngine(
+    engine = GeoQueryEngine(
         api_client=api_client,
         tool_registry=tool_registry,
         permission_checker=permission_checker,
         cwd=str(cwd),
         model=config.model,
         system_prompt=system_prompt,
-        max_tokens=4096,
+        max_tokens=config.agent.max_tokens,
         # Multi-layer cartography routinely needs 20+ tool calls (inspect every
         # layer, load, symbolize, export). The upstream default of 8 turns
         # aborts mid-workflow ("Stopped after 8 turns"); default to 40, still
@@ -124,12 +132,29 @@ async def build_geo_runtime(
             "geoharness_config": config,
             "data_catalog": data_catalog,
             "cascade_manager": cascade_manager,
+            "map_workflow_state": {},
+            "map_job_state": {},
+            # Upstream execution shallow-copies metadata for each tool. Share
+            # this bucket before the first inspect so measured profiles survive.
+            "geo_data_context": {},
             # The `skill` tool reads this key to find skill directories.
             # Without it, project skills (cartography, spatial-analysis, …)
             # are invisible at runtime even though they are bundled — which
             # made the model burn turns guessing skill names in the TUI.
             "extra_skill_dirs": all_skill_dirs,
+            # Visual review always owns its transport, even when it inherits the
+            # main provider/model: extra_body, forced review output and disabled
+            # SDK retries must not be lost through the agent's streaming client.
+            # Tests may still explicitly inject a review client at the tool seam.
         },
+    )
+
+    # Refresh between model turns, including continue_pending; do not duplicate
+    # data profiles in the persisted conversation or expose configuration secrets.
+    from geoharness.data.task_context import model_data_context
+
+    api_client.data_context_provider = lambda: model_data_context(
+        engine.tool_metadata, cwd=cwd, config=config,
     )
 
     # 8b. Warm up in the background: geopandas/rasterio imports plus the first
@@ -168,9 +193,11 @@ async def build_geo_runtime(
             "api_key": config.api_key,
             "api_format": "openai",
             "base_url": config.base_url,
+            "system_prompt": system_prompt,
         },
         extra_skill_dirs=all_skill_dirs,
         extra_plugin_roots=(),
+        session_backend=GeoSessionBackend(),
     )
 
     # 12. Verify MCP isolation
@@ -178,6 +205,15 @@ async def build_geo_runtime(
 
     logger.info("GeoHarness runtime assembled successfully")
     return bundle
+
+
+def _bundled_skills_dir() -> Path:
+    """Find installed package resources, or source skills in an editable checkout."""
+    package_dir = Path(__file__).resolve().parent
+    installed_dir = package_dir / "skills"
+    if installed_dir.is_dir():
+        return installed_dir
+    return package_dir.parent.parent / "skills"
 
 
 def _warm_data_layer(data_catalog: Any) -> None:
@@ -212,8 +248,9 @@ def _resolve_max_turns(config: GeoConfig) -> int:
 
     The upstream ``QueryEngine`` default is 8, which aborts multi-layer
     cartography workflows long before the model can inspect, load, symbolize
-    and export every layer. GeoHarness defaults to 40; set ``GEOH_MAX_TURNS``
-    to override (0 or a negative value disables the limit upstream).
+    and export every layer. GeoHarness defaults to 40 per batch; set
+    ``GEOH_MAX_TURNS`` to a positive integer to override. Pending tool results
+    survive the batch limit and can be resumed.
 
     Returns:
         The turn limit to pass to ``QueryEngine``.
@@ -240,9 +277,10 @@ def _build_api_client(config: GeoConfig) -> OpenAICompatibleClient:
     if not config.api_key:
         logger.warning("No API key configured — agent will fail on LLM calls")
 
-    return OpenAICompatibleClient(
+    return GeoOpenAICompatibleClient(
         api_key=config.api_key,
         base_url=config.base_url if config.base_url else None,
+        settings=config.agent,
     )
 
 
@@ -256,8 +294,8 @@ def _build_mcp_manager(config: GeoConfig) -> McpClientManager:
     return McpClientManager(server_configs=server_configs)
 
 
-def _build_tool_registry() -> ToolRegistry:
-    """Build the GeoHarness tool registry (4 native + 5 whitelisted).
+def _build_tool_registry(config: GeoConfig | None = None) -> ToolRegistry:
+    """Build the GeoHarness tool registry with configured QGIS tools.
 
     MCP tools are registered later by geoharness.mcp.connect.activate_mcp()
     once servers have connected — registration mutates this same registry
@@ -265,7 +303,7 @@ def _build_tool_registry() -> ToolRegistry:
     """
     from geoharness.tools import build_geo_tool_registry
 
-    return build_geo_tool_registry()
+    return build_geo_tool_registry(config=config)
 
 
 def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
@@ -284,13 +322,16 @@ def _build_permission_checker(config: GeoConfig) -> PermissionChecker:
             path_rules.append(PathRuleConfig(pattern=variant, allow=True))
 
     perm_settings = PermissionSettings(path_rules=path_rules)
-    # geo_cartography writes ONLY into the configured outputs directory
-    # (~/.geoharness/exports); asking the user to confirm every map export
-    # adds friction without protecting anything. Built-in sensitive-path
-    # protection and explicit denied_tools still outrank this allow-list;
-    # config deny_paths also keep applying to generic file tools, while the
-    # cartography tool never targets anything but the exports directory.
-    perm_settings.allowed_tools.append("geo_cartography")
+    # Native tools enforce their artifact/workspace destinations. Sensitive-path
+    # protection and explicit denied_tools still outrank this allow-list.
+    perm_settings.allowed_tools.extend([
+        "geo_cartography", "geo_analysis", "geo_map_review", "geo_deliver",
+        "todo_write",
+    ])
+    if config.execution.enabled:
+        perm_settings.allowed_tools.append("geo_python")
+    if config.qgis.enabled:
+        perm_settings.allowed_tools.extend(["geo_qgis", "geo_qgis_project"])
     return PermissionChecker(settings=perm_settings)
 
 
@@ -330,7 +371,7 @@ def _build_hook_executor(
         api_client=api_client,
         default_model=config.model,
     )
-    return HookExecutor(registry=registry, context=context)
+    return GeoHookExecutor(registry=registry, context=context)
 
 
 def _build_system_prompt(

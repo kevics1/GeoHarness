@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from openharness.mcp.types import McpStdioServerConfig, McpToolInfo
 from openharness.tools.base import ToolRegistry
 
@@ -113,6 +114,44 @@ class TestConnectMcpServers:
     async def test_empty_manager_noop(self) -> None:
         manager = FakeMcpManager()
         assert await connect_mcp_servers(manager) == {}
+
+    async def test_failed_state_reports_status_detail(self, caplog) -> None:
+        manager = FakeMcpManager(behaviors={"geo": "silent"})
+        manager._statuses["geo"].state = "failed"
+        manager._statuses["geo"].detail = "No module named geo_mcp_server"
+        results = await connect_mcp_servers(manager)
+        assert "No module named geo_mcp_server" in results["geo"]
+        assert "No module named geo_mcp_server" in caplog.text
+
+    @pytest.mark.parametrize("credential_key", ["API_KEY", "DATABASE_URI"])
+    async def test_status_detail_redacts_configured_credentials(
+        self, caplog, credential_key
+    ) -> None:
+        manager = FakeMcpManager(behaviors={"geo": "silent"})
+        manager._statuses["geo"].state = "failed"
+        manager._statuses["geo"].detail = "connect rejected SECRET-MCP-KEY"
+        manager._server_configs["geo"].env = {credential_key: "SECRET-MCP-KEY"}
+        results = await connect_mcp_servers(manager)
+        assert "[redacted]" in results["geo"]
+        assert "SECRET-MCP-KEY" not in results["geo"]
+        assert "SECRET-MCP-KEY" not in caplog.text
+
+    @pytest.mark.parametrize("password_first", [True, False])
+    async def test_overlapping_postgres_credentials_redact_whole_uri(
+        self, caplog, password_first
+    ) -> None:
+        manager = FakeMcpManager(behaviors={"db": "silent"})
+        uri = "postgresql://synthetic-user:synthetic-password@synthetic-host/synthetic-db"
+        entries = [("PGPASSWORD", "synthetic-password"), ("DATABASE_URI", uri)]
+        manager._server_configs["db"].env = dict(entries if password_first else entries[::-1])
+        manager._statuses["db"].state = "failed"
+        manager._statuses["db"].detail = f"connection rejected {uri}"
+
+        results = await connect_mcp_servers(manager)
+
+        assert results["db"].endswith("connection rejected [redacted]")
+        assert "synthetic-" not in results["db"]
+        assert "synthetic-" not in caplog.text
 
 
 # ── register_mcp_tools ────────────────────────────────────────────

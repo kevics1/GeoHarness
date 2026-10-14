@@ -389,7 +389,7 @@ class TestSystemPromptEndToEnd:
             model="test",
             api_key="key",
             base_url="https://test.example.com/v1",
-            cartography=CartographyConfig(
+            cartography=CartographyConfig(static_renderer="matplotlib",
                 default_template="/custom/template.qpt",
                 bridge_rules={
                     "custom_analysis": BridgeRule(

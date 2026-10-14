@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -10,6 +11,138 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class AnalysisConfig(BaseModel):
+    """Native analysis settings; an empty metric CRS selects a local UTM CRS."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outputs_dir: str = ".geoharness/analysis"
+    metric_crs: str = ""
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+
+
+class ExecutionConfig(BaseModel):
+    """Reproducible Python execution with workspace write guards."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    enabled: bool = True
+    outputs_dir: str = ".geoharness/runs"
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+    max_output_chars: int = Field(default=12000, ge=100, le=1000000)
+
+
+class PublicationConfig(BaseModel):
+    """Bounded recovery for transient Windows directory publication failures."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    max_attempts: int = Field(default=4, ge=1, le=10)
+    retry_delay_seconds: float = Field(default=0.1, ge=0, le=1)
+
+
+class QgisConfig(BaseModel):
+    """An independently installed QGIS runtime; never import it into the agent process."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    enabled: bool = True
+    install_dir: str = ""
+    python_executable: str = ""
+    prefix_path: str = ""
+    outputs_dir: str = ".geoharness/qgis"
+    plans_dir: str = ".geoharness/qgis-plans"
+    timeout_seconds: float = Field(default=180, gt=0, le=3600)
+    max_output_chars: int = Field(default=12000, ge=100, le=1000000)
+    max_search_results: int = Field(default=20, ge=1, le=100)
+
+
+class AgentConfig(BaseModel):
+    """Completion budget for reasoning and complete tool arguments."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    max_tokens: int = Field(default=16384, ge=1024, le=65536)
+    auto_continue: bool = Field(default=True, description=(
+        "Continue pending tool results after a turn batch when new successful progress exists."
+    ))
+    internal_todo_path: str = ".geoharness/tasks/TODO.md"
+    include_stream_usage: bool = True
+    request_extra_body: dict[str, Any] = Field(default_factory=dict)
+    empty_response_retries: int = Field(default=1, ge=0, le=1)
+    empty_response_fallback_model: str = ""
+    empty_response_fallback_extra_body: dict[str, Any] = Field(default_factory=dict)
+    empty_response_max_tokens: int | None = Field(default=None, ge=256, le=65536)
+    tool_argument_retries: int = Field(default=1, ge=0, le=1, description=(
+        "One targeted recovery for truncated invalid JSON calls; complete sibling calls "
+        "and prior tool results are preserved. Uses the configured empty-response fallback."
+    ))
+
+    @field_validator("request_extra_body", "empty_response_fallback_extra_body")
+    @classmethod
+    def validate_provider_extensions(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Extensions must not silently replace the configured model or tool context."""
+        reserved = {
+            "model", "messages", "tools", "stream", "stream_options",
+            "max_tokens", "max_completion_tokens",
+        }
+        if reserved.intersection(value):
+            raise ValueError("Use explicit agent settings for model and token limits")
+        return value
+
+
+class DeliveryConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    outputs_dir: str = "exports"
+
+
+class MapLayout(BaseModel):
+    """Presentation parameters that a map reviewer may safely adjust."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    width: float = Field(default=10, ge=4, le=24)
+    height: float = Field(default=8, ge=4, le=24)
+    dpi: int = Field(default=150, ge=72, le=300)
+    legend_outside: bool = False
+    title_font_size: float = Field(default=14, ge=8, le=32)
+    legend_font_size: float = Field(default=9, ge=6, le=20)
+    point_size: float = Field(default=18, ge=2, le=150)
+    line_width: float = Field(default=1.8, ge=0.2, le=8)
+    polygon_alpha: float = Field(default=0.75, ge=0.1, le=1)
+
+
+class MapReviewConfig(BaseModel):
+    """Image-based review. Empty model/provider fields reuse the main model."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    enabled: bool = True
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    request_extra_body: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional provider request extensions; empty inherits provider defaults.",
+    )
+    # Accepted for existing configuration files; generation has no count or
+    # cumulative review-time limit. timeout_seconds still bounds each request.
+    max_repairs: int = Field(default=4, ge=0, deprecated=True,
+                            description="Legacy setting; ignored for map generation.")
+    max_reviews_per_request: int = Field(default=5, ge=0, deprecated=True,
+                                        description="Legacy setting; review count is unlimited.")
+    total_timeout_seconds: float = Field(default=120, gt=0, deprecated=True,
+                                        description="Legacy setting; cumulative time is unlimited.")
+    timeout_seconds: float = Field(default=90, gt=0, le=300)
+    service_failure_ttl_seconds: float = Field(
+        default=60, gt=0, le=86400, allow_inf_nan=False,
+        description="Transient review outage cooldown; server Retry-After may extend it.",
+    )
+    max_tokens: int = Field(default=8192, ge=256, le=65536)
+    max_image_side: int = Field(default=1800, ge=256, le=4096)
+    auto_repair: bool = True
+    max_rois: int = Field(default=5, ge=0, le=8)
+    roi_max_side: int = Field(default=2048, ge=256, le=4096)
+    max_border_fraction: float = Field(default=0.08, gt=0, le=0.25)
+    diagnostics_max_chars: int = Field(default=2048, ge=128, le=8192)
+    max_validation_errors: int = Field(default=12, ge=1, le=50)
+    layout: MapLayout = Field(default_factory=MapLayout)
 
 # Pattern for ${VAR} expansion in config values
 _VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
@@ -39,8 +172,24 @@ class CartographyConfig:
     """Cartography configuration."""
 
     default_template: str = ""
-    outputs_dir: str = ""
+    outputs_dir: str = "exports"
+    static_renderer: str = "qgis"
+    jobs_dir: str = ".geoharness/maps"
+    minimum_span_geographic: float = 0.02
+    minimum_span_projected: float = 1000
+    extent_padding: float = 0.05
     bridge_rules: dict[str, BridgeRule] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.static_renderer not in {"qgis", "matplotlib"}:
+            raise ValueError("cartography.static_renderer must be qgis or matplotlib")
+        if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0
+               for value in (self.minimum_span_geographic, self.minimum_span_projected)):
+            raise ValueError("cartography minimum extent spans must be positive")
+        if isinstance(self.extent_padding, bool) or not math.isfinite(self.extent_padding) or not (
+            0 <= self.extent_padding <= 1
+        ):
+            raise ValueError("cartography.extent_padding must be between 0 and 1")
 
 
 @dataclass(frozen=True)
@@ -101,6 +250,13 @@ class GeoConfig:
     cognition: CognitionConfig = field(default_factory=CognitionConfig)
     data: DataConfig = field(default_factory=DataConfig)
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    publication: PublicationConfig = field(default_factory=PublicationConfig)
+    qgis: QgisConfig = field(default_factory=QgisConfig)
+    map_review: MapReviewConfig = field(default_factory=MapReviewConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
 
 
 def _expand_vars(value: Any) -> Any:
@@ -165,11 +321,16 @@ def _parse_cartography(raw: dict[str, Any] | None) -> CartographyConfig:
     if not raw:
         return CartographyConfig()
     template = _expand_vars(raw.get("default_template", ""))
-    outputs_dir = _expand_vars(raw.get("outputs_dir", ""))
+    outputs_dir = _expand_vars(raw.get("outputs_dir") or CartographyConfig().outputs_dir)
     rules = _parse_bridge_rules(raw.get("bridge_rules"))
     return CartographyConfig(
         default_template=template,
         outputs_dir=outputs_dir,
+        static_renderer=raw.get("static_renderer", "qgis"),
+        jobs_dir=_expand_vars(raw.get("jobs_dir") or CartographyConfig().jobs_dir),
+        minimum_span_geographic=raw.get("minimum_span_geographic", 0.02),
+        minimum_span_projected=raw.get("minimum_span_projected", 1000),
+        extent_padding=raw.get("extent_padding", 0.05),
         bridge_rules=rules,
     )
 
@@ -262,6 +423,8 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         GeoConfig dataclass with all configuration.
     """
     # Determine config directory and file
+    if config_path is None and os.environ.get("GEOH_CONFIG_PATH"):
+        config_path = Path(os.environ["GEOH_CONFIG_PATH"]).expanduser()
     if config_path is None:
         config_dir = Path.home() / ".geoharness"
         config_path = config_dir / "config.yaml"
@@ -301,6 +464,13 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         cognition=cognition,
         data=data,
         permissions=permissions,
+        analysis=AnalysisConfig.model_validate(_expand_vars(raw.get("analysis") or {})),
+        execution=ExecutionConfig.model_validate(_expand_vars(raw.get("execution") or {})),
+        publication=PublicationConfig.model_validate(_expand_vars(raw.get("publication") or {})),
+        qgis=QgisConfig.model_validate(_expand_vars(raw.get("qgis") or {})),
+        map_review=MapReviewConfig.model_validate(_expand_vars(raw.get("map_review") or {})),
+        agent=AgentConfig.model_validate(_expand_vars(raw.get("agent") or {})),
+        delivery=DeliveryConfig.model_validate(_expand_vars(raw.get("delivery") or {})),
     )
 
 

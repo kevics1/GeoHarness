@@ -35,6 +35,7 @@ from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 from geoharness._proj_fix import ensure_proj_data  # noqa: E402
+from geoharness.config.settings import MapLayout  # noqa: E402
 
 # Reprojection (to_crs) must not inherit a poisoned PROJ database.
 ensure_proj_data()
@@ -216,7 +217,7 @@ def _quantile_classes(vals: np.ndarray, k: int) -> np.ndarray:
     try:
         import mapclassify
 
-        return np.asarray(mapclassify.Quantiles(vals, k=k).yb, dtype=int) - 1
+        return np.asarray(mapclassify.Quantiles(vals, k=k).yb, dtype=int)
     except Exception as exc:
         logger.warning("mapclassify unavailable (%s); using rank quantiles", exc)
 
@@ -360,15 +361,10 @@ def _to_wgs84(gdf: Any) -> Any:
     """Reproject to EPSG:4326 for web tiling (leaflet is lon/lat)."""
     crs = getattr(gdf, "crs", None)
     if crs is None:
-        logger.warning("Dataset has no CRS; assuming EPSG:4326 for interactive output")
-        return gdf
+        raise ValueError("Cannot render an interactive map with an unknown CRS.")
     if crs.is_geographic and crs.to_epsg() == 4326:
         return gdf
-    try:
-        return gdf.to_crs("EPSG:4326")
-    except Exception as exc:
-        logger.warning("Reprojection to EPSG:4326 failed (%s); using source CRS", exc)
-        return gdf
+    return gdf.to_crs("EPSG:4326")
 
 
 # ── Composition elements (static maps) ────────────────────────────────────
@@ -389,16 +385,22 @@ def _nice_distance(meters: float) -> float:
 def _draw_scalebar(ax: Any, gdf: Any) -> None:
     """Draw an approximate scale bar (kilometres)."""
     try:
-        minx, miny, maxx, maxy = gdf.total_bounds
+        # The canvas includes margins; using feature bounds overstates the bar.
+        minx, maxx = ax.get_xlim()
+        miny, maxy = ax.get_ylim()
         width = float(maxx - minx)
         if width <= 0:
             return
         crs = getattr(gdf, "crs", None)
-        if crs is not None and crs.is_geographic:
+        if crs is None:
+            return
+        if crs.is_geographic:
             mid_lat = (float(miny) + float(maxy)) / 2.0
-            width_m = width * 111_320.0 * max(0.05, math.cos(math.radians(mid_lat)))
+            _, _, width_m = crs.get_geod().inv(float(minx), mid_lat, float(maxx), mid_lat)
         else:
-            width_m = width
+            width_m = width * crs.axis_info[0].unit_conversion_factor
+        if not math.isfinite(width_m) or width_m <= 0:
+            return
         distance_m = _nice_distance(width_m * 0.22)
         if distance_m <= 0:
             return
@@ -460,7 +462,9 @@ def _draw_north_arrow(ax: Any) -> None:
         logger.debug("North arrow skipped: %s", exc)
 
 
-def _attach_legend(ax: Any, legend: list[tuple[str, str]], method: str) -> None:
+def _attach_legend(
+    ax: Any, legend: list[tuple[str, str]], method: str, layout: MapLayout | None = None,
+) -> None:
     if not legend:
         return
     if method == "flow":
@@ -471,11 +475,14 @@ def _attach_legend(ax: Any, legend: list[tuple[str, str]], method: str) -> None:
         handles = [Patch(facecolor=color, edgecolor="#5a5a5a", label=label)
                    for label, color in legend]
         title = "Classes"
+    options = layout or MapLayout()
+    placement = {"loc": "upper left", "bbox_to_anchor": (1.02, 1)} if (
+        options.legend_outside
+    ) else {"loc": "lower left", "bbox_to_anchor": (0.01, 0.09)}
     leg = ax.legend(
         handles=handles,
-        loc="lower left",
-        bbox_to_anchor=(0.01, 0.09),
-        fontsize=8,
+        **placement,
+        fontsize=options.legend_font_size,
         frameon=True,
         framealpha=0.9,
         title=title,
@@ -501,11 +508,15 @@ def render_static(
     add_legend: bool = True,
     add_scalebar: bool = True,
     add_north_arrow: bool = True,
+    layout: MapLayout | None = None,
+    extent: list[float] | None = None,
 ) -> Path:
     """Render a static map to PNG / PDF / SVG and return the written path."""
     _configure_matplotlib()
     _validate_gdf(gdf)
     path = _prepare_output_path(output_path, ".png")
+    options = layout or MapLayout(width=figsize[0], height=figsize[1], dpi=dpi)
+    figsize, dpi = (options.width, options.height), options.dpi
 
     method = (render_method or "categorized").strip().lower()
     hex_colors, legend, weights = _row_colors_and_legend(
@@ -523,7 +534,8 @@ def render_static(
             for coords in _geom_lines(geom):
                 segments.append(coords)
                 seg_colors.append(hex_colors[i])
-                seg_widths.append(weights[i] if weights else 1.6)
+                # Scale every flow width equally, preserving the data ratios.
+                seg_widths.append((weights[i] if weights else 1.6) * options.line_width / 1.8)
         if not segments:
             raise ValueError(
                 "Cannot render flow: geometries contain no lines or polygon rings."
@@ -534,19 +546,24 @@ def render_static(
         ax.autoscale()
         ax.set_aspect("equal")
     else:
-        gdf.plot(
-            ax=ax,
-            color=hex_colors,
-            edgecolor="#5a5a5a",
-            linewidth=0.4,
-            aspect="equal",
-        )
+        polygon_mask = gdf.geom_type.isin(["Polygon", "MultiPolygon"]).to_numpy()
+        for mask, alpha in ((polygon_mask, options.polygon_alpha), (~polygon_mask, 1.0)):
+            if not mask.any():
+                continue
+            gdf.loc[mask].plot(
+                ax=ax, color=[color for color, include in zip(hex_colors, mask) if include],
+                edgecolor="#5a5a5a", linewidth=options.line_width,
+                markersize=options.point_size, aspect="equal", alpha=alpha,
+            )
 
+    if extent is not None:
+        ax.set_xlim(extent[0], extent[2])
+        ax.set_ylim(extent[1], extent[3])
     if title:
-        ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+        ax.set_title(title, fontsize=options.title_font_size, fontweight="bold", pad=12)
 
     if add_legend:
-        _attach_legend(ax, legend, method)
+        _attach_legend(ax, legend, method, options)
     if add_scalebar:
         _draw_scalebar(ax, gdf)
     if add_north_arrow:
@@ -601,6 +618,7 @@ def render_interactive(
     output_path: Any,
     tiles: str = "OpenStreetMap",
     tooltip_fields: list[str] | None = None,
+    extent: list[float] | None = None,
 ) -> Path:
     """Render an interactive Leaflet map (HTML) via folium; return the path."""
     import folium
@@ -617,6 +635,10 @@ def render_interactive(
     view["_geoh_weight"] = weights if weights else [1.2] * len(view)
 
     bounds = view.total_bounds
+    if extent is not None:
+        from pyproj import Transformer
+
+        bounds = Transformer.from_crs(gdf.crs, 4326, always_xy=True).transform_bounds(*extent)
     center = [(bounds[1] + bounds[3]) / 2.0, (bounds[0] + bounds[2]) / 2.0]
     fmap = folium.Map(location=center, tiles=tiles, control_scale=True)
 
@@ -713,6 +735,169 @@ _LAYER_KIND_DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 
+def _layer_style_options(layer: dict[str, Any]) -> dict[str, Any]:
+    """Normalize explicit per-layer styles, including the tool's field_name alias."""
+    keys = {
+        "color", "column", "field_name", "render_method", "color_scheme", "n_classes",
+        "categories", "colors", "default_color",
+    }
+    options = {key: value for key, value in layer.items() if key in keys}
+    style = layer.get("style", {})
+    if not isinstance(style, dict):
+        raise ValueError("Layer style must be an object.")
+    if unknown := set(style) - keys - {"type"}:
+        raise ValueError(
+            f"Unsupported layer style options: {', '.join(sorted(unknown))}. "
+            f"geo_cartography style accepts {', '.join(sorted(keys | {'type'}))}. "
+            "For QGIS renderer/outline_color/width_mm/size_mm/opacity settings, use "
+            "geo_qgis_project with its typed layers/style schema; do not remove map layers "
+            "or classifications to bypass this parameter mismatch."
+        )
+    options.update({key: value for key, value in style.items() if key in keys})
+    if "type" in style:
+        if not isinstance(style["type"], str):
+            raise ValueError("Layer style type must be a string.")
+        aliases = {
+            "categorizedSymbol": "categorized", "graduatedSymbol": "graduated",
+            "singleSymbol": "none", "single": "none",
+        }
+        method = aliases.get(style["type"], style["type"])
+        if options.get("render_method") not in (None, "", method):
+            raise ValueError("Layer style type conflicts with render_method.")
+        options["render_method"] = method
+    column, alias = options.get("column", ""), options.pop("field_name", "")
+    if column and alias and column != alias:
+        raise ValueError("Layer column and field_name refer to different fields.")
+    options["column"] = str(column or alias or "")
+    method = str(options.get("render_method") or (
+        "categorized" if options["column"] else "none"
+    )).lower()
+    if method not in {"categorized", "graduated", "flow", "none"}:
+        raise ValueError(f"Unsupported layer render_method: {method!r}.")
+    if method == "none" and options["column"]:
+        raise ValueError("A symbolized layer field requires a categorized/graduated/flow method.")
+    options["render_method"] = method
+    if "n_classes" in options and (
+        not isinstance(options["n_classes"], int) or isinstance(options["n_classes"], bool)
+        or options["n_classes"] < 1
+    ):
+        raise ValueError("Layer n_classes must be a positive integer.")
+    if scheme := options.get("color_scheme"):
+        if not isinstance(scheme, str) or (
+            _CONTINUOUS_SCHEMES.get(scheme) or _QUALITATIVE_SCHEMES.get(scheme) or scheme
+        ) not in matplotlib.colormaps:
+            raise ValueError(f"Unsupported layer color_scheme: {scheme!r}.")
+    return options
+
+
+def _layer_symbolization(
+    gdf: Any, layer: dict[str, Any]
+) -> tuple[dict[str, Any], list[str], list[tuple[str, str]], list[float] | None,
+           list[dict[str, Any]] | None]:
+    """Use identical row colors and category definitions for native and QGIS maps."""
+    from geoharness.cartography.values import normalize_style
+
+    options = _layer_style_options(layer)
+    options = normalize_style(gdf, options)
+    kind = _geom_kind(gdf)
+    column, method = options["column"], options["render_method"]
+    if column and column not in gdf:
+        raise ValueError(f"Layer symbolization field {column!r} does not exist.")
+    if method != "none" and not column:
+        raise ValueError(f"Layer render_method {method!r} requires column or field_name.")
+    explicit = "categories" in options or "colors" in options
+    if explicit and method != "categorized":
+        raise ValueError("Explicit categories/colors require categorized symbolization.")
+    if method == "graduated" and _numeric_values(gdf[column]) is None:
+        raise ValueError(f"Layer graduated field {column!r} must be numeric.")
+    if method == "flow" and kind != "line":
+        raise ValueError("Multilayer flow symbolization requires line geometries.")
+    if method == "none":
+        color = to_hex(options.get("color") or _LAYER_KIND_DEFAULTS[kind][0])
+        return options, [color] * len(gdf), [], None, None
+    if not explicit:
+        colors, legend, weights = _row_colors_and_legend(
+            gdf, column, method, str(options.get("color_scheme") or "Set1"),
+            int(options.get("n_classes", 5)),
+        )
+        if method == "categorized" and not legend:
+            for value in pd.unique(gdf[column].dropna()):
+                row = np.flatnonzero((gdf[column] == value).to_numpy())[0]
+                legend.append((str(value), colors[row]))
+            nulls = gdf[column].isna().to_numpy()
+            if nulls.any():
+                colors = ["#e4e7ec" if null else color for color, null in zip(colors, nulls)]
+                legend.append(("Other / NULL", "#e4e7ec"))
+        return options, colors, legend, weights, None
+
+    supplied = options.get("categories")
+    palette = options.get("colors")
+    if supplied is None:
+        supplied = list(pd.unique(gdf[column].dropna()))
+        try:
+            supplied.sort()
+        except TypeError:
+            pass
+    if not isinstance(supplied, list) or not supplied:
+        raise ValueError("Layer categories must be a non-empty list of values or category objects.")
+    if palette is not None and not isinstance(palette, (list, dict)):
+        raise ValueError("Layer colors must be a list or a category-to-color object.")
+    if isinstance(palette, list) and len(palette) != len(supplied):
+        raise ValueError("Layer colors must contain one color per category.")
+    generated = _discrete_colors(
+        str(options.get("color_scheme") or "Set1"), len(supplied), categorical=True
+    )
+    categories = []
+    seen = set()
+    for i, item in enumerate(supplied):
+        if isinstance(item, dict):
+            if "value" not in item or set(item) - {"value", "label", "color"}:
+                raise ValueError("Each category object accepts value, label and color only.")
+            value = item["value"]
+            label = str(item.get("label", value))
+            color = item.get("color")
+        else:
+            value, label, color = item, str(item), None
+        value = value.item() if hasattr(value, "item") else value
+        if not isinstance(value, (str, int, float, bool, type(None))):
+            raise ValueError("Category values must be scalar values.")
+        if value in seen:
+            raise ValueError(f"Duplicate layer category: {value!r}.")
+        seen.add(value)
+        if color is None and isinstance(palette, list):
+            color = palette[i]
+        elif color is None and isinstance(palette, dict):
+            color = palette.get(value, palette.get(str(value)))
+            if color is None:
+                raise ValueError(f"Layer colors has no color for category {value!r}.")
+        categories.append({"value": value, "label": label, "color": to_hex(
+            generated[i] if color is None else color
+        )})
+    index = {entry["value"]: entry["color"] for entry in categories}
+    default = to_hex(options.get("default_color") or "#e4e7ec")
+    row_colors = []
+    uses_default = False
+    for value in gdf[column]:
+        if pd.isna(value):
+            row_colors.append(index.get(None, default))
+        elif value in index:
+            row_colors.append(index[value])
+        elif "default_color" in options:
+            if None in index and index[None] != default:
+                raise ValueError(
+                    "default_color must match the explicit NULL/fallback category color."
+                )
+            row_colors.append(default)
+            uses_default = True
+        else:
+            raise ValueError(f"Layer category {value!r} is absent from categories/colors.")
+    if None not in index:
+        categories.append({"value": None, "label": "Other / NULL", "color": default})
+    legend = [(entry["label"], entry["color"]) for entry in categories
+              if entry["value"] is not None or gdf[column].isna().any() or uses_default]
+    return options, row_colors, legend, None, categories
+
+
 def render_layers(
     layers: list[dict[str, Any]],
     *,
@@ -721,6 +906,10 @@ def render_layers(
     figsize: tuple[float, float] = (10.0, 8.0),
     dpi: int = 150,
     basemap_raster: str = "",
+    layout: MapLayout | None = None,
+    raster_cache: dict[str, Any] | None = None,
+    extent: list[float] | None = None,
+    extent_crs: str = "",
 ) -> Path:
     """Compose several layers onto ONE output map.
 
@@ -731,13 +920,18 @@ def render_layers(
                   "gdf": GeoDataFrame,          # required
                   "label": "受威胁居民点",        # legend label (required)
                   "color": "#e4572e",           # optional, kind default else
-                  "render_method": "none",      # kept simple: uniform layer colour
-                  "column": "",                 # ignored for now (uniform colour)
+                  "column": "RiskTier",       # field_name is an alias
+                  "render_method": "categorized",  # none/categorized/graduated/flow
+                  "categories": ["High", "Low"],  # optional category order
+                  "colors": ["#d73027", "#1a9850"],  # optional, one per category
+                  "style": {},                # optional nested style options
                 }
 
         title: Map title.
         output_path: ``.png``/``.pdf``/``.svg`` (static) or ``.html`` (interactive).
         basemap_raster: Optional raster file path drawn beneath all layers.
+        extent: Optional xmin,ymin,xmax,ymax in the output map CRS; retains
+            the intended map frame even when a context layer extends outside it.
 
     Returns:
         The written output path.
@@ -748,19 +942,24 @@ def render_layers(
     """
     if not layers:
         raise ValueError("render_layers needs at least one layer.")
-    prepared: list[tuple[str, Any, str, str]] = []
+    if extent is not None and (
+        len(extent) != 4 or not np.isfinite(extent).all()
+        or extent[0] >= extent[2] or extent[1] >= extent[3]
+    ):
+        raise ValueError("Map extent needs finite xmin, ymin, xmax, ymax bounds.")
+    prepared = []
     for idx, layer in enumerate(layers):
         gdf = layer.get("gdf")
         label = str(layer.get("label") or f"layer_{idx + 1}")
         if gdf is None:
             raise ValueError(f"Layer {label!r} is missing 'gdf'.")
         _validate_gdf(gdf)
+        if gdf.crs is None:
+            raise ValueError(f"Layer {label!r} has no CRS; declare it before composition.")
         kind = _geom_kind(gdf)
-        static_color, _, _, _ = _LAYER_KIND_DEFAULTS.get(
-            kind, _LAYER_KIND_DEFAULTS["polygon"]
-        )
-        color = str(layer.get("color") or static_color)
-        prepared.append((label, gdf, color, kind))
+        options, colors, legend, weights, _categories = _layer_symbolization(gdf, layer)
+        color = to_hex(options.get("color") or _LAYER_KIND_DEFAULTS[kind][0])
+        prepared.append((label, gdf, colors, kind, legend or [(label, color)], weights))
 
     path = _prepare_output_path(output_path, ".png")
     is_html = path.suffix.lower() in {".html", ".htm"}
@@ -769,26 +968,49 @@ def render_layers(
     # first layer's CRS so scalebar maths stays correct.
     if is_html:
         prepared = [
-            (label, _to_wgs84(gdf), color, kind)
-            for label, gdf, color, kind in prepared
+            (label, _to_wgs84(gdf), colors, kind, legend, weights)
+            for label, gdf, colors, kind, legend, weights in prepared
         ]
 
     if is_html:
-        return _render_layers_interactive(prepared, title, path)
+        if extent is not None:
+            from pyproj import Transformer
+
+            native_crs = raster_cache.get("basemap", {}).get("crs") if raster_cache else None
+            if basemap_raster and native_crs is None:
+                import rasterio
+
+                with rasterio.open(basemap_raster) as source:
+                    native_crs = source.crs
+            native_crs = extent_crs or native_crs or layers[0]["gdf"].crs
+            extent = list(Transformer.from_crs(native_crs, 4326, always_xy=True).transform_bounds(
+                *extent
+            ))
+        return _render_layers_interactive(prepared, title, path, extent)
     return _render_layers_static(
-        prepared, title, path, figsize, dpi, basemap_raster
+        prepared, title, path, figsize, dpi, basemap_raster, layout, raster_cache, extent
     )
 
 
 def _render_layers_static(
-    prepared: list[tuple[str, Any, str, str]],
+    prepared: list[tuple],
     title: str,
     path: Path,
     figsize: tuple[float, float],
     dpi: int,
     basemap_raster: str,
+    layout: MapLayout | None = None,
+    raster_cache: dict[str, Any] | None = None,
+    map_extent: list[float] | None = None,
 ) -> Path:
     _configure_matplotlib()
+    options = layout or MapLayout(width=figsize[0], height=figsize[1], dpi=dpi)
+    figsize, dpi = (options.width, options.height), options.dpi
+    target_crs = prepared[0][1].crs
+    prepared = [
+        (label, gdf.to_crs(target_crs), colors, kind, legend, weights)
+        for label, gdf, colors, kind, legend, weights in prepared
+    ]
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.set_facecolor("#f7f9fb")
 
@@ -803,17 +1025,24 @@ def _render_layers_static(
         import rasterio
         from rasterio.plot import plotting_extent
 
-        with rasterio.open(basemap_raster) as ds:
-            arr = ds.read(1, masked=True)
-            extent = plotting_extent(ds)
-            raster_crs = ds.crs
-            ax.imshow(
-                arr,
-                extent=extent,
-                cmap="terrain" if ds.dtypes[0] in ("int16", "float32") else "gray",
-                alpha=0.75,
-                zorder=0,
-            )
+        cache = raster_cache if raster_cache is not None else {}
+        if "basemap" not in cache:
+            with rasterio.open(basemap_raster) as ds:
+                cache["basemap"] = {
+                    "array": ds.read(1, masked=True), "extent": plotting_extent(ds),
+                    "crs": ds.crs, "dtype": ds.dtypes[0],
+                }
+        basemap = cache["basemap"]
+        extent = basemap["extent"]
+        raster_crs = basemap["crs"]
+        if raster_crs is None:
+            plt.close(fig)
+            raise ValueError("Raster basemap has no CRS; cannot align vector layers.")
+        ax.imshow(
+            basemap["array"], extent=basemap["extent"],
+            cmap="terrain" if basemap["dtype"] in ("int16", "float32") else "gray",
+            alpha=0.75, zorder=0,
+        )
         if raster_crs is not None:
             # geopandas.to_crs accepts EPSG integers / WKT text, NOT rasterio
             # CRS objects — pass a string it understands.
@@ -822,32 +1051,35 @@ def _render_layers_static(
             except Exception:  # noqa: BLE001
                 target_epsg = None
             target_crs: Any = target_epsg or raster_crs.to_wkt()
-            reprojected: list[tuple[str, Any, str, str]] = []
-            for label, gdf, color, kind in prepared:
+            reprojected = []
+            for label, gdf, colors, kind, legend, weights in prepared:
                 try:
                     if gdf.crs is not None:
                         gdf = gdf.to_crs(target_crs)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Could not reproject layer %r to raster CRS: %s",
-                        label,
-                        exc,
-                    )
-                reprojected.append((label, gdf, color, kind))
+                    plt.close(fig)
+                    raise ValueError(f"Cannot align layer {label!r} with raster CRS.") from exc
+                reprojected.append((label, gdf, colors, kind, legend, weights))
             prepared = reprojected
 
-    for label, gdf, color, kind in prepared:
+    for order, (label, gdf, colors, kind, _legend, weights) in enumerate(prepared, start=1):
+        if gdf.empty:
+            continue
         if kind == "line":
-            gdf.plot(ax=ax, color=color, linewidth=1.8, aspect="equal", zorder=2)
+            widths = [w * options.line_width / 1.8 for w in weights] if weights else (
+                options.line_width
+            )
+            gdf.plot(ax=ax, color=colors, linewidth=widths,
+                     aspect="equal", zorder=order)
         elif kind == "point":
             gdf.plot(
-                ax=ax, color=color, markersize=18, edgecolor="#333333",
-                linewidth=0.4, aspect="equal", zorder=3,
+                ax=ax, color=colors, markersize=options.point_size, edgecolor="#333333",
+                linewidth=0.4, aspect="equal", zorder=order,
             )
         else:
             gdf.plot(
-                ax=ax, color=color, edgecolor="#5a5a5a", linewidth=0.5,
-                alpha=0.75, aspect="equal", zorder=1,
+                ax=ax, color=colors, edgecolor="#5a5a5a", linewidth=0.5,
+                alpha=options.polygon_alpha, aspect="equal", zorder=order,
             )
 
     # Extent = union of all vector layers (plus raster when present) so the
@@ -855,9 +1087,11 @@ def _render_layers_static(
     try:
         import pandas as _pd
 
-        frames = [gdf[["geometry"]] for _label, gdf, _c, _k in prepared]
+        frames = [layer[1][["geometry"]] for layer in prepared]
         stacked = _pd.concat(frames, ignore_index=True)
-        union = type(prepared[0][1])(stacked, geometry="geometry")
+        union = type(prepared[0][1])(
+            stacked, geometry="geometry", crs=prepared[0][1].crs,
+        )
         minx, miny, maxx, maxy = union.total_bounds
         if basemap_raster and raster_crs is not None:
             # Clip the canvas to the raster footprint: vectors (e.g. rivers)
@@ -878,6 +1112,9 @@ def _render_layers_static(
         logger.debug("Extent union failed (%s); falling back to autoscale", exc)
         ax.autoscale()
         union_for_scale = prepared[0][1]
+    if map_extent is not None:
+        ax.set_xlim(map_extent[0], map_extent[2])
+        ax.set_ylim(map_extent[1], map_extent[3])
 
     # One merged legend from the layer labels. NB: Line2D needs an explicit
     # `color` — without it the line is drawn in matplotlib's default blue,
@@ -892,19 +1129,23 @@ def _render_layers_static(
             markerfacecolor=color,
             markeredgecolor="#333333" if kind == "point" else color,
             markersize=9,
-            label=label,
+            label=entry if entry == label else f"{label}: {entry}",
         )
-        for label, _gdf, color, kind in prepared
+        for label, _gdf, _colors, kind, legend, _weights in prepared
+        for entry, color in legend
     ]
     if handles:
+        placement = {"loc": "upper left", "bbox_to_anchor": (1.02, 1)} if (
+            options.legend_outside
+        ) else {"loc": "upper right"}
         ax.legend(
-            handles=handles, loc="upper right", fontsize=9,
+            handles=handles, fontsize=options.legend_font_size, **placement,
             framealpha=0.92, title="图层",
         )
 
     # Title + scalebar (uses the union extent computed above).
     if title:
-        ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+        ax.set_title(title, fontsize=options.title_font_size, fontweight="bold", pad=12)
     try:
         _draw_scalebar(ax, union_for_scale)
     except Exception:  # noqa: BLE001 — scalebar is cosmetic
@@ -922,9 +1163,10 @@ def _render_layers_static(
 
 
 def _render_layers_interactive(
-    prepared: list[tuple[str, Any, str, str]],
+    prepared: list[tuple],
     title: str,
     path: Path,
+    extent: list[float] | None = None,
 ) -> Path:
     import folium
 
@@ -934,7 +1176,9 @@ def _render_layers_interactive(
     ys0: list[float] = []
     xs1: list[float] = []
     ys1: list[float] = []
-    for label, gdf, color, _kind in prepared:
+    for _label, gdf, _colors, _kind, _legend, _weights in prepared:
+        if gdf.empty:
+            continue
         b = gdf.total_bounds  # [minx, miny, maxx, maxy]
         xs0.append(float(b[0]))
         ys0.append(float(b[1]))
@@ -942,18 +1186,30 @@ def _render_layers_interactive(
         ys1.append(float(b[3]))
     minx, miny = min(xs0), min(ys0)
     maxx, maxy = max(xs1), max(ys1)
+    if extent is not None:
+        minx, miny, maxx, maxy = extent
     fmap = folium.Map(
         location=[(miny + maxy) / 2.0, (minx + maxx) / 2.0],
         tiles="OpenStreetMap",
         control_scale=True,
     )
-    for label, gdf, color, _kind in prepared:
+    for label, gdf, colors, kind, _legend, weights in prepared:
+        if gdf.empty:
+            continue
+        view = gdf.copy()
+        view["_geoh_color"] = colors
+        view["_geoh_weight"] = weights if weights else 2.0
         gj = folium.GeoJson(
-            gdf.to_json(),
+            view.to_json(),
             name=label,
-            style_function=lambda _f, _c=color: _layer_geojson_style(
-                "categorized", _c
-            ),
+            style_function=lambda feature, _kind=kind: {
+                **_layer_geojson_style(
+                    "flow" if _kind == "line" else "categorized",
+                    feature["properties"]["_geoh_color"],
+                ),
+                **({"weight": feature["properties"]["_geoh_weight"]} if _kind == "line" else {}),
+            },
+            marker=folium.CircleMarker(radius=5, fill=True, fill_opacity=0.9),
             highlight_function=lambda _f: {"weight": 2.5, "fillOpacity": 0.85},
         )
         gj.add_to(fmap)

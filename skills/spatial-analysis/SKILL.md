@@ -1,74 +1,94 @@
 ---
 name: spatial-analysis
-description: 空间分析总入口 — 点数据分布规律（Moran's I/核密度/热点）与多图层叠加、邻近、分区统计的完整工具链与工作流。用户要求"分析空间规律/分布/聚集/热点"时加载。
+description: 地理空间分析入口。聚焦叠加、缓冲、距离、分区计数与影响范围；使用原生 GIS、QGIS Processing 或 Python，核对持久输出并交付地图与结果。
 ---
 
 # 空间分析工作流
 
-## 第一步：判断数据形态（决定整条技术路线）
+先明确用户问题、输入图层、分析对象、距离/范围口径与交付要求。仅询问不能从数据或配置得到、并会改变分析结果的信息。
 
-| 数据形态 | 特征 | 走哪条路线 |
-|---|---|---|
-| **点数据** | 居民点/监测站/POI（每行一个点） | → 路线 A：点模式分析 |
-| **面数据** | 行政区/网格（每行一个多边形+属性值） | → 路线 B：面聚合统计 |
-| **线数据** | 河流/道路（拓扑/网络问题） | → 路线 C：网络/缓冲分析 |
+工具文本返回准确的产物路径、统计和最多 20 行属性预览；不要猜测输出文件名。完整属性/manifest 用 geo_python 按返回路径读取。SOURCE_CWD、RUN_DIR 是 Path 全局变量；DATA_DIRS 是 list[Path]，直接迭代，仅环境变量版本需要按 os.pathsep 拆分。脚本当前目录及唯一输出目录为 RUN_DIR，交付复制交给 geo_deliver。
 
-## 路线 A：点数据空间规律（如"受威胁居民点空间规律"）
+QGIS 返回的五项既有诊断文件 request/result/manifest/stdout/stderr 可用精确路径只读查看，不枚举 .geoharness/qgis 或 .profile。读取工具的 execution_contract/recovery_hints，避免重复错误。Shapely 几何没有 .to_crs，转换时用 GeoSeries 声明已核实源CRS再投影。QGIS 字体优先 font_family，显式 font_file 用工作区/数据目录内的字体文件，不在 Python 中写工作区/fonts。
 
-点数据无法直接算 Moran's I（需要面单元聚合）。标准流程：
+## 检查输入
 
-1. **描述性空间结构**（L1，本地即可完成）
-   - `geo_vector_data action=load` → 得到要素数、字段、CRS、范围
-   - `geo_vector_data action=inspect` → 几何类型确认（Point?）
-   - 用 `postgres` MCP 工具做 SQL 分组统计（按区县/字段分组计数）
+本地数据用 geo_vector_data，数据库数据用 geo_db_data；确认几何类型、字段、CRS 和范围。load 的概况没有完整几何，不要手工重建 GeoJSON。未知 CRS 需要明确声明；已有 CRS 用变换，不重新贴标签。检查空/无效几何和阈值；计量使用米制投影。原生分析默认按全部输入范围选择适用的 UTM，跨带或极地等范围需要显式配置 analysis.metric_crs。
 
-2. **空间聚集证据**（L2，用 MCP 空间分析工具）
-   - 核密度估计 / 热点：`geo-mcp-server` 的 `geo_cluster_detect`、
-     `geo_getis_ord`（Gi*）
-   - 全局/局部自相关：`geo_moran_global` / `geo_moran_local`（LISA）
-     —— 注意：需先把点聚合到面单元（如 village/county 网格计数），
-     再以 `geometries` 参数传入多边形坐标（避免大 payload 超时）
-3. **邻近与背景关联**（L1+）
-   - 到火场/道路/水系的距离：`geo_calculate_distance`、`geo_buffer`
-   - 拓扑关系：`geo_spatial_relation`
+本地 vector/raster list 自动检查最多8个文件并保留实际元信息，未检查项使用前 inspect。模型后续请求和 Python 的 GEO_DATA 保留已测 CRS/范围、字段或栅格分辨率/band/dtype/nodata；文件修改使旧记录失效。Metric分析可以使用不同于栅格的投影，但每次 overlay/mask 必须把带已知CRS几何转换到目标栅格CRS。Python 优先 mask_raster(path, GeoSeries/GeoDataFrame, crop=True)，不把裸 Shapely 列表直接交给不同投影的 rasterio.mask。
 
-4. **成果落图**
-   - `geo_cartography` 多图层渲染（layers 参数），
-     叠加 行政区划+火场+居民点（按密度/等级配色）
+每次 geo_python 都创建新的 RUN_DIR；读取上一轮产物用工具返回的真实路径或 PREVIOUS_OUTPUTS，不猜日期、不从当前 RUN_DIR找旧文件。Python可读已核验QGIS诊断、预览图、project.json，目录枚举与profile继续拒绝；完整图层/布局用geo_qgis_project inspect或实际result.json。analysis_manifests每个都要对应实际原生产物或layer.derivation；绑定失败按返回的具体清单/产物路径修正，不附无关图层或统计绕过。
 
-> ⚠️ `analysis_type`（cluster_detect/moran_local 等）只影响制图符号化方案，
-> 不执行统计计算。统计必须调 MCP 工具；符号化只是把结果画出来。
+## 执行空间运算
 
-## 路线 B：面数据统计
+QGIS 启用且可用时，优先复用其 Processing：先 `geo_qgis(action="doctor")` 确认运行环境，
+再 `search` 查实际算法、`help` 获取参数与枚举，最后 `run` 执行。常见算法可搜索
+buffer、clip、intersection、zonal、slope、hillshade、nearest；不猜测 ID 或选项索引。
+`parameters` 是参数对象，输入用真实本地数据路径，输出由工具放到新的任务目录。
+距离按所选算法的 CRS/单位解释；需要米制时先重投影，不能把经纬度上的500当作500米。
+`model` 可执行已存在的本地 `.model3` 多步骤模型；缺少算法、外部提供者或参数时报告实际错误。
+保留结果、参数、CRS、日志和 manifest，算法完成不等于分析方法得到证明。
 
-1. `geo_db_data action=load`（PostGIS 表）或 `geo_vector_data action=load`
-2. `geo_moran_global` / `geo_moran_local`（直接传面几何 + 属性值）
-3. `geo_getis_ord` 找热点/冷点
-4. 成果图用 graduated 渲染（连续值分级）
+首期 geo_analysis 不依赖 MCP 或 PostGIS。source、reference、zones 使用结构化 SpatialSource，每个来源恰好提供 file_path、source_name 或 geojson 中的一项。
 
-## 路线 C：线/邻近/叠加
+面积统计使用 action=area，只传面 source，可传实际时次/类别 group_field。结果 area_m2 与整体/分组 feature_area_sum_m2、union_area_m2、overlap_area_m2 来自米制投影几何；overlap 是面积之和减去去重覆盖，不是重叠区域本身。累计或重叠范围不能相加称为覆盖，不按文件顺序猜时间次序。将返回的 result/manifest 用于制图，自动说明复算持久输出面积并同时呈现两种口径；不要手写未验证的总面积。
 
-- 邻近/可达性 → 技能 `proximity-analysis`
-- 多因子叠加/风险区划 → 技能 `overlay-analysis`
-- 分区统计（面内点数/均值）→ 技能 `zonal-statistics`
-
-## 相关技能
-
-| 技能名 | 用途 |
+| action | 运算与输入 |
 |---|---|
-| `geo-perception` | L1 五步感知（坐标/距离/方向/几何/拓扑） |
-| `geo-comprehension` | L2 六步理解（自相关/热点/异质性） |
-| `geo-reasoning` | L3 六步推理（聚类/OD/因果） |
-| `proximity-analysis` | 邻近/覆盖/可达性 |
-| `overlay-analysis` | 多图层叠加/风险区划 |
-| `zonal-statistics` | 分区统计 |
-| `cartography` | 分析成果落图（含多图层用法） |
+| buffer | source 按 distance_m 生成缓冲区 |
+| clip | source 按 reference 面图层裁剪 |
+| intersection | source 与 reference 做几何交集 |
+| distance | source 到 reference 的最短距离，输出 distance_m |
+| count | 按 zones 或 reference 统计 source 要素数量 |
+| impact | source 资产到 reference 危险区的距离及 affected，可选 zones 分区统计 |
 
-## 报告规范
+例如：
 
-空间规律分析结论必须包含：
-1. **全局格局**（聚集/离散/随机 + 统计量与 p 值）
-2. **局部位置**（热点/冷点在哪里 —— LISA/Gi* 结果）
-3. **尺度声明**（分析单元、MAUP 提醒）
-4. ** CRS 声明**（WGS84 / CGCS2000 / 投影坐标）
-5. **成果图**（geo_cartography 渲染，符号化与分析类型匹配）
+```json
+{"action":"impact","source":{"file_path":"居民点.geojson"},"reference":{"file_path":"危险区.geojson"},"zones":{"file_path":"行政区.geojson"},"distance_m":500,"output_name":"impact"}
+```
+
+affected 表示相交或最短距离不超过阈值，不是未经验证的风险等级。分区采用 intersects，包含边界；跨区/重叠区会分别计数，所以分区数之和可能超过全局唯一资产数。保留这项计数口径。
+
+输出包含 GeoJSON、CSV、统计、manifest 和可制图 layers。计量 CRS 与导出 CRS 分别记录。核验实际数量、单位和参数；空影响选集也是有效结果，不应改阈值制造受影响对象。
+
+保留实际 manifest 路径。将统计/方法写入地图时，给 geo_cartography 或 geo_qgis_project 的新建请求传 analysis_manifests（最多8个 geo_analysis 原生清单）。工具读取真实输出，核对摘要/计数、impact 阈值标记与影响选集，并要求至少一份输出是当前实际地图图层。旧清单没有原始摘要时只能核对现存输出计数；任意 Python、Processing 清单与自由说明不属于这个接口支持的统计证据。
+
+这类核对证明持久输出一致性，没有重新计算原始空间运算。不能把 analysis facts 的 verified 当成数学或业务结论已证明；地图回执中的 analysis_correctness 始终 unverified。需要严格正确性结论时，核验原始输入、方法和关键数值并明确验证范围。
+
+## 组合分析与自主 Python
+
+组合任务使用 geo_python。可用已安装的 GeoPandas、Shapely、pandas、matplotlib 和 rasterio，读取 SOURCE_CWD/DATA_DIRS，输出只写 RUN_DIR 或相对文件名。保留脚本、参数、日志与结果，检查 exit_code；失败按实际错误修正。
+
+制图脚本一次生成多张图片时，最后写出的图片作为 primary_map 候选登记一个版本，map_candidates 列出全部图片候选；附件不是连续修订，后续明确选择主图。已登记旧图的重复审查只更新该版本检查。
+
+源数据默认只读；修改数据时生成新文件。不使用网络、shell、子进程或读取凭证。应用级保护用于可信分析脚本，不是 OS 沙箱。
+
+## 结果制图与检查
+
+QGIS 分析结果可直接作为 `geo_qgis_project` 的真实图层创建可编辑工程和布局。
+`geo_cartography` 默认 PNG/PDF 由 QGIS 同一工程布局导出，保留 Matplotlib、HTML/SVG
+与 geo_python 入口。检查工程实际导出的 PNG（preview_path），用返回的 project_dir 交付；
+需要编辑后重新出图时，inspect/export 原工程，导出到新目录，保留用户的原工程。
+
+加载 skill(name="cartography")。将 geo_analysis 返回的 layers 序列化后传给 geo_cartography，突出真正的影响选集，不要把全部资产画成受影响对象。
+
+新建制图会在渲染前检查实际字段、数值/类别、几何、CRS、范围与可见数量；独立 action=preflight 不绘图。GIS map_extent 是 xmin,ymin,xmax,ymax，与 imshow 顺序不同；显式主/详范围同时声明显示 CRS。required 图层默认至少相交1个要素，空影响选集应明确 required=false，保留零数量与警告。计量 CRS 和显示 CRS 分开；几何相交计数与栅格范围相交不能证明图层实际无遮挡或像素/语义正确。
+
+原生制图会读取实际成图进行视觉检查，并输出可编辑 QGIS 工程。Python PNG 使用 geo_map_review，提供目标、预期图层与真实分析摘要。后续版本、审图和交付沿用工具返回的系统 UUID map_id；“继续/接着做/continue/resume”保留任务和已完成结果。地图版本、修正次数和累积审查时长不限；通过、无有效修正、真实失败或重复方案/图片时停止自动修正。只合并修复具体呈现错误，不为审美反复改图，不根据视觉建议更换数据、方法或阈值。
+
+向量inspect和登记引用包含实际schema/空值信息，不能根据数字外观假设属性是数值。时间/情景用geo_analysis的source/reference.filters选现有字段的精确值；空匹配不回退为全部数据。distance/impact返回reference_relation：covered_by为整个几何被参考范围覆盖，intersects为相交但未完整覆盖，outside为不相交。distance_breaks_m可生成distance_class，外部50米邻近不等于范围内。直接用原生结果字段分类，图例、统计与reference_scope的实际时刻/合并规则一致，不用自由脚本将正距离阈值重命名为内部。
+
+使用 geo_cartography(action="status",map_id=...) 读取当前回执。parameters、data_checked、rendered、layout_checked、visual_checked、packaged、delivered 分别记录实际证据；quality_status=passed 要求同一图的数据、渲染、已测布局和实际视觉均通过。视觉通过或工程打包不能补出缺少的 preflight；自定义 Python 图缺少绑定数据检查仍为 draft。QGIS 标签配置与 bounds_check 也不证明所有标签、位置或业务语义正确。停止无效视觉重试，说明未验证阶段并交付草稿；颜色/非白像素计数不能代替视觉审查。
+
+## 交付
+
+制图子集使用原生分析输出路径加 derivation（feature_indices、keep_fields、annotations），保留可核验来源；不要删业务属性后另写几何文件来冒充完整结果。工具会区分完整分析数与实际上图数，新增地图注记不属于分析统计。日期/null 与驱动加入的 Feature.id 由制图工具处理，不改变原始文件；真实业务 ID、字段和几何变化仍会被拒绝。两个制图入口共用同一事实规则，计量 CRS 来自分析清单，显示 CRS 来自地图设置。
+
+用 geo_deliver 把数据结果、实际主图、QGIS 工程、脚本/manifest 和报告交付到当前工作目录 exports 的新子目录。传 primary_map 与实际 review_path，保留 map-receipt.json；工程与图片摘要/快照变化时旧证明失效，应核对新版本后重新交付。Python 图用 geo_cartography(action="project",map_path=...,project_output_dir=...) 和实际图层打包，不重新绘图或提升质量，不在脚本中绕过 RUN_DIR 复制文件。
+
+交付默认在已登记选中图存在已知问题/失效检查时选择同一任务的未变化布局通过候选，并使用该候选的对应工程；status 的 delivery_candidate 是建议，实际结果以 geo_deliver.selection 为准。没有候选会明确失败，用户要求保留指定问题图时可 version_policy=selected 草稿交付。未完成真实视觉检查的候选仍为 draft，不能因回到早期版本就宣称视觉通过。
+
+最终给出数量/距离/范围、方法、计量/显示 CRS、单位、计数口径和工具返回的路径。区分 quality_status 的 passed/draft 与阶段 issues/unverified/stale；只声称实际完成的核对，不把业务正确性或准确率评测写成已完成。
+
+当前优先多图层叠加与影响范围验收，热点/空间分布、栅格/地形业务和准确率评测延后。现有 skill(name="geo-perception")、skill(name="geo-comprehension")、skill(name="geo-reasoning") 可提供领域参考；只用实际可用工具，不把简单叠加强制升级到 Moran/LISA 或因果分析。

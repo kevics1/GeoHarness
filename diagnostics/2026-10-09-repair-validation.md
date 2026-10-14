@@ -1,0 +1,42 @@
+# test01 四项修复验证（2026-10-09）
+
+本次针对已诊断的工具错误和 PNG/QGS 布局差异实施修复。原始数据、旧地图和既有交付保留；主模型、凭证与用户已有配置未改变。
+
+## 已完成的行为
+
+1. 新建 QGIS 布局实测图例后在同一次调用中调整侧栏/详图，保留字号、纸张和类别；返回必需/可用尺寸及有效参数。原生 PNG/PDF/预览来自保存后重新打开的布局，标记 `saved_layout`。旧 Python 图片补工程仍兼容，明确标记 `reference`，不能把复制的预览当成布局一致的证明。
+2. 仅对输出截断且 JSON 不完整的工具参数进行一次定向补全。保留原调用 ID、有效并行调用与已完成的工具结果；不重新执行成功工具，不改变主模型。补全仍失败则保留诊断。
+3. `geo_python` 明示 SOURCE_CWD/RUN_DIR 的 Path 类型及 DATA_DIRS 的 list[Path] 类型，提供基于真实错误的提示；精确只读授予最近合法 QGIS 任务的 request/result/manifest/stdout/stderr，不开放目录枚举、profile、配置、凭证或额外写权限。
+4. 交付可在同一任务中选择文件/证据未变化的布局通过候选及对应工程；优先全质量通过，否则为草稿。新版本有问题时不自动覆盖较好的候选，未登记用户编辑图不被旧 map_id 替换。新增原生 area，分开整体/分组面积之和与去重覆盖，并从持久输出复算地图说明。
+
+## 真实数据证据
+
+输入：`F:/Desktop/Project/GeoHarness/example/test01/数据/预测蔓延范围.shp`；计量 CRS：`EPSG:32648`。三期时间按实际属性读取，文件行顺序并非时间顺序。
+
+| 时次 | 面积 km² |
+|---|---:|
+| 2020-03-30 19:00 | 3.489278 |
+| 2020-03-30 22:00 | 11.471952 |
+| 2020-03-31 03:00 | 33.149289 |
+| 要素面积之和 | 48.110519 |
+| 合并去重覆盖 | 33.149636 |
+
+相加的 48.11 km² 不应称为去重覆盖。存在小范围几何差异，也不宣称三期完全嵌套。
+
+独立验证目录：`C:/Users/Administrator/AppData/Local/Temp/geoharness-test01-area-layout-t6wer56a/`。`verification.json` 保存统计、自动底栏、布局、输入摘要和导出摘要。使用本机 QGIS 3.44.7 创建三期图层工程，再重新打开保存的 `.qgz`，同为 96 DPI 的两次 PNG 导出 SHA256 均为 `ef6221e8b84ea9bb9f34de0f2f98191552cb7a100f559b9e1b6e117f73ccb496`。输入 SHP 摘要未变化。
+
+该图仅验证实际面积、说明绑定和同工程导出，不是原森林火灾应急专题图的完整业务重绘。未调用视觉审查，状态为草稿。几何布局检查不证明所有地图标签、图层语义或分析方法都正确。
+
+真实原图例失败请求的复验见 `C:/Users/Administrator/AppData/Local/Temp/geoharness-test01-fixed-layout-t4oxuwdn/verification.json`：预检、新建、重导出通过，侧栏由 58 增至约 64 mm、详图比例由 0.4 调整为约 0.366；A4、9pt 字号与图例类别保留，同 DPI PNG 摘要相同。
+
+## 验证状态
+
+阶段回归通过：Python 执行与权限 48 项；分析/事实/版本/交付初步整合 127 项；追加边界后相关整合 145 项、版本交付 30 项。最终评审确认的三处交付边界已修补：报告副本改动后恢复源仍标 changed/draft；selected 仅按 ID 能交付当前问题草稿；原位用户编辑不会被自动替换。最终交付相关 59 项、评审独立 7 项通过，独立审查无未解决确定缺陷（另有 175 项相关验证）。
+
+最终全量 **983 passed**，耗时 907.99 秒；195 条警告为依赖弃用及缺 CRS 测试夹具提示，零失败。ruff 与 diff 检查通过。主模型/凭证保持原配置，不修改上游 OpenHarness。
+
+全局 wheel 已更新到 `D:/Python312/Lib/site-packages/geoharness`，69 个 Python 模块和 6 份技能与源码逐字节一致。验证记录：`C:/Users/Administrator/AppData/Local/Temp/geoharness-final-wheel-04df372281eb45aeb3df2b03b7beb317/install-verification.json`。
+
+从 `F:/Desktop/Project/GeoHarness/example/test01` 启动安装版 `geoh version`、`geoh dry-run` 和 `geoh qgis-doctor` 均成功；15 个原生工具、QGIS 3.44.7 的 440 个算法可用，QGIS stderr 为空。真实 `geoh run --print --prompt ...` 中两项 MCP 连接成功，主模型仍为 `cbcn/deepseek-v4.1-flash(max)`；一次 geo_python 调用打印 WindowsPath、WindowsPath、list 后正常回复并以 0 退出，没有本次空回复/ContextVar异常，没有创建 `.openharness`。运行记录：`test01/.geoharness/runs/env_check-20261009T153536Z-8b7077d5529c/`。
+
+该启动验收只检查类型与工具链，未读取业务数据或生成业务地图。新建地图仍需要实际视觉审查；旧参考工程不会因安装更新自动变为与 Python 图片同源。
