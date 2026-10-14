@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
-if TYPE_CHECKING:
-    from geoharness.config.settings import GeoConfig
+from geoharness.config.settings import GeoConfig
 
 logger = logging.getLogger(__name__)
 

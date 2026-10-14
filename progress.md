@@ -302,9 +302,9 @@
 - 构建wheel SHA256 9b78d27fcf2184994ce72714034196ff7971f242019003d26b282e9b275be574并全局安装；83模块/34技能文件与源码逐字节一致。安装版冷却配置/复审输入/style规范化/None恢复smoke、临时目录geoh version通过。未修改原始数据/旧图/主模型/凭证/上游/AGENTS/Skills/.env.example既有修改；并未宣称实际503服务已恢复或业务地图视觉通过。
 
 
-## 2026-10-14 最新错误只读诊断与天地图接入完成
+## 2026-10-15 撤回在线底图，准备GitHub发布
 
-- 新增geo_basemap工具、配置三源、缓存/数据档案/QGIS读取根/提示词；原始数据、旧工程、主模型、上游、AGENTS/Skills及.env.example既有修改保留。用户提供的tk仅加入本机配置.env，本机YAML启用三provider，地形max_zoom14。
-- 9项离线小检查7.17秒通过，Ruff/diff通过。独立审查发现并已修复取消后继续下载及缓存未验证；取消检查覆盖发布重试。fresh settings导入循环与QGIS默认拒缓存问题在集成smoke中发现并修正。合成瓦片原生预检/plan_ref create成功，QGIS工程/PNG存在且凭证扫描通过。
-- 实际GetCapabilities核实三源；三个小瓦片请求403，卫星301012权限类型错误，真实服务授权验收未通过且列TODO。未运行全量、真实模型/业务地图，不声称真实底图或视觉质量通过。
-- wheel f058723def535f8797a56ec41e098f597a66a4a1a61e3de3004d05b9758bfed6已安装；85模块/34技能源码、wheel、安装三方一致。临时目录geoh version及安装版三provider list/脱敏检查通过。
+- 已撤销新增在线底图源码/工具注册/示例配置/使用说明，本机YAML和.env仅移除对应新段/变量。原有本地栅格、分析和QGIS保留；已安装移除后的wheel。
+- 80项针对性回归通过（12秒）；修正旧栅格inspect测试的旧文本断言，改查真实宽高显示及metadata。Ruff/diff及独立撤回审查通过。83模块/34技能源码、wheel与安装版一致，跨目录CLI/注册检查通过。未运行全量或业务整图。
+- 现有公开仓库kevics1/GeoHarness默认master，可写。已跟踪快照扫描无本机已知凭证命中；本地.env.example既有修改与未跟踪文件不进入发布。Git网络仅在本次命令绕过失效本机代理。
+- 删除.scratch两个底图测试目录被自动审批拒绝（blocked by policy），保留本机测试产物并排除发布。

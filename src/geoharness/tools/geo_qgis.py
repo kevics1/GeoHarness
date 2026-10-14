@@ -44,11 +44,6 @@ def qgis_read_roots(config: GeoConfig, cwd: Path) -> list[Path]:
         getattr(config, section).outputs_dir
         for section in ("analysis", "execution", "cartography", "qgis")
     )
-    if config.basemaps.enabled:
-        cache = Path(config.basemaps.cache_dir).expanduser()
-        cache = (cache if cache.is_absolute() else cwd / cache).resolve()
-        if cache.is_relative_to(cwd.resolve()) and cache != cwd.resolve():
-            values.append(str(cache))
     roots = [cwd.resolve()]
     for value in values:
         if value:

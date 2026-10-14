@@ -262,9 +262,10 @@
 - 首个style重复字段测试误用了single渲染下无效field，产品既有校验正确；将测试改为重复相同renderer验证兼容，不放松产品校验。
 
 
-## 2026-10-14 最新错误与天地图
+## 2026-10-15 撤回底图与GitHub发布
 
-- 实际会话：第一段raster stats成功，失败的是并行Python；两次Unknown ref传相对路径，不是result名字歧义。标签字段应size_pt；截图写到runs父目录违反当前RUN_DIR规则；max推理耗完16384单次输出tokens。
-- 同一实际工程legend_ramp_partial能在_covering_pair→_issue_extent复现KeyError('extent')；图例无地理extent，是系统适用策略错误。原始完整崩溃堆栈缺失，不能声称原调用链完全相同。本次只读诊断，修复留TODO。
-- 天地图能力描述：img_c/vec_c，4490、z1=2×1、1—18；ter_w，900913/3857、z1=2×2、1—14。真实小瓦片三源HTTP403，卫星301012权限类型错误。不是CRS或模型参数故障，不把能力描述成功当瓦片成功。
-- 复用已安装rasterio/pyproj/Pillow，小网格适配支持两种CRS；provider配置与.env取凭证。受控本地缓存返回layer_spec/profiles，QGIS同份TIFF离线导出。取消、缓存摘要/格式/几何、凭证脱敏及QGIS局部读取根已检查。
+- 用户明确要求先删除新增在线底图，再发布当前项目到既有GeoHarness仓库。撤销46b7adc，活跃源码恢复baa50b0；原有本地栅格底图与QGIS仍保留。配置YAML仅移除basemaps段，本机.env仅移除专用token变量。
+- origin为kevics1/GeoHarness公开仓库，默认master。Git全局代理127.0.0.1:7890不可达；本次Git命令以临时空proxy覆盖可连接，不修改全局配置。
+- 原有栅格inspect测试断言旧尺寸文本；当前回执已分开提供Width/Height和source_detail。改为验证实际宽高显示与元数据，不修改工具行为。
+- 发布仅使用已跟踪源码/文档/测试；本地.env.example修改和未跟踪.scratch、诊断探针、数据库不进入发布。保持开发历史，以origin/master为父发布当前快照，无强推。
+- 清理两个.scratch底图测试目录被自动审批拒绝（仅返回blocked by policy）；保留这些本机临时产物，不发布，不改用其他删除方法。

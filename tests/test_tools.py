@@ -330,7 +330,10 @@ class TestGeoRasterDataTool:
             GeoRasterDataInput(action="inspect", name="dem"), context
         )
         assert not result.is_error
-        assert "100 x 80" in result.output
+        assert "Width (px): 100" in result.output
+        assert "Height (px): 80" in result.output
+        assert result.metadata["source_detail"]["width"] == 100
+        assert result.metadata["source_detail"]["height"] == 80
         assert "EPSG:32647" in result.output
 
     @pytest.mark.asyncio
