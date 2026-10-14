@@ -292,7 +292,7 @@ QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定�
 
 带布局的QGIS预检返回 `plan_ref` 和工作区内 `report_path`。模型可用 `{"action":"create","plan_ref":"返回的引用"}` 创建已检查的地图，避免重复生成长图层数组、路径和布局计划；创建时仍重新检查源数据、字体及计划。修改参数需重新预检。报告文件以摘要绑定，修改后引用失效；Python仅获得确切报告的读取权限。`qgis.plans_dir` 默认 `.geoharness/qgis-plans`，须为当前工作区子目录。原生分析及QGIS图层的 `file_path` 也支持当前已登记的 `data:` 引用。
 
-短引用创建仅传 `action` 和 `plan_ref`；冗余参数会明确列出，需修改标题或样式时重新预检。标签优先使用 `placement="auto"`；`around_point`/`over_point` 只用于点，`parallel` 只用于线，面可用 `horizontal`。检查针对 derivation 筛选后实际绘制的几何。颜色支持 Qt 名称、十六进制色及 `rgba(r,g,b,a)`；rgba 的 RGB 为 0–255 整数、alpha 为 0–1，入口统一转换为 Qt 的 `#AARRGGBB`。
+短引用创建仅传 `action` 和 `plan_ref`；预检计划已经携带已检查的 `map_id`、`title` 和输出格式/默认值，不再重复这些字段。通用的保留地图身份要求不向短引用增加字段。冗余参数会明确列出，需修改标题、格式或样式时重新预检。标签优先使用 `placement="auto"`；`around_point`/`over_point` 只用于点，`parallel` 只用于线，面可用 `horizontal`。检查针对 derivation 筛选后实际绘制的几何。颜色支持 Qt 名称、十六进制色及 `rgba(r,g,b,a)`；rgba 的 RGB 为 0–255 整数、alpha 为 0–1，入口统一转换为 Qt 的 `#AARRGGBB`。
 
 详图未达到最小放大倍数时，默认先联合调整纸面尺寸和详图比例，保留请求的地理范围、图层、分类和标签，计算保留1%余量。微小坐标序列化误差使用绝对1e-5、相对5e-6的容差；1.99999531可视为两倍，1.991仍不足。不能适配或关闭自动适配时，诊断返回实际图框尺寸、范围、CRS、比例尺与放大倍数（错误文字保留八位小数），并给出扩大图框、候选范围或分图建议。候选范围需重新核验主体覆盖，不自动裁掉必要内容或降低要求。页面、侧栏、名单表、详图范围或比例改变后，旧建议失效，需重新预检；不要手动舍入候选坐标。
 
@@ -317,6 +317,10 @@ QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定�
 `geo_vector_data` 的 load/inspect 均返回实际路径、格式、全部字段名和类型、空值数量、CRS、范围及要素/记录数；不再只显示前20或40个字段。`geo_raster_data` 的 inspect/stats 均附带源路径、格式、CRS、范围、尺寸、分辨率、各波段类型/NoData/单位等头信息。`geo_db_data` 的 load/inspect 返回表定位符、字段及空间信息；数据库没有本地文件路径，load的范围和数量描述已加载的行，并标出读取上限。完整描述同时放在工具元数据的source_detail中，未知信息明确标为unknown，不提供连接凭证。list保留发现索引，不为列目录额外读取全部数据。
 
 向量描述还返回 `encoding`、`encoding_source`、`encoding_status`。Shapefile 按每个文件自己的 `.cpg` 声明读取，GeoJSON/JSON 使用格式规定的 UTF-8；没有有效声明时明确 unknown，由驱动按默认方式读取，不猜测整目录编码。登记的 DATA_REFS 保留编码，`read_vector(ref)` 自动采用它；不要为所有图层统一强制 GBK 或 UTF-8。声明变化会使旧数据引用失效，需重新加载。
+
+向量按路径或名称 load/inspect 后，注册 `name` 统一为实际文件短名（不带扩展名），`requested_name` 保留原请求，`path` 保留绝对路径。Python助手接受稳定ID、准确路径、唯一注册名/原请求名/文件名/短名；兼容旧记录中 name 为完整路径的情况。同名文件不猜测，须使用稳定ID或完整路径，不做中英文引号或相似字符替换。文件签名、编码声明、生产清单和结果摘要变化仍会使引用失效。
+
+每次 `geo_python` 都启动独立进程，上一段脚本定义的函数或变量不会保留。提供的GIS辅助函数是 `resolve_data`、`read_vector`、`native_layer`、`mask_raster`；`print_stats` 不是内置函数。栅格统计应单独调用 `geo_raster_data action=stats`，或在脚本中明确导入 Rasterio/NumPy 编写计算。失败回执优先显示 `error_summary` 和 `recovery_hints`，完整输出及执行信息保留；不要把后半段引用/函数错误当成前面已成功的栅格统计失败。
 
 `geo_analysis` 成功结果提供 `qgis_inputs`，包含实际原生产物的 `layers` 和对应 `analysis_manifests`，可合并进 QGIS 预检参数。只合并确实上图的产物及清单，样式直接附在原生图层上；筛选、保留字段或新增注记使用 `layer.derivation`。不要为调整外观先手动重写文件，也不要把没有上图的统计清单绑定到地图。
 

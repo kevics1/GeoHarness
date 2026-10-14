@@ -98,6 +98,14 @@ def registered_review_files(
 
 def python_recovery_hints(code: str, stderr: str) -> list[str]:
     hints = []
+    if "NameError:" in stderr and "is not defined" in stderr:
+        hints.append("Each geo_python call starts fresh: define/import every function and "
+                     "variable in this script. Only resolve_data, read_vector, native_layer "
+                     "and mask_raster are injected GIS helpers; earlier scripts do not "
+                     "supply definitions to this run.")
+        if "name 'print_stats' is not defined" in stderr:
+            hints.append("print_stats is not provided. Call geo_raster_data action=stats as "
+                         "a separate tool, or compute statistics with rasterio/numpy in Python.")
     if "UnicodeDecodeError" in stderr or "couldn't be converted correctly" in stderr:
         hints.append("Text encoding is per layer. Inspect its encoding/encoding_source or "
                      "use read_vector(name/ref), which uses the registered encoding. "
@@ -198,6 +206,11 @@ class GeoPythonTool(BaseTool):
         "DATA_REFS is dict[stable_id, record], where each record has name, path and ref; "
         "names are values, not substrings of the opaque ID keys. "
         "Use read_vector('a unique registered name') directly, without a custom name lookup. "
+        "read_vector applies each layer's registered encoding; do not force one encoding "
+        "across shapefiles. Each call starts a fresh Python process: import/define everything "
+        "used. The injected GIS helpers are resolve_data, read_vector, native_layer and "
+        "mask_raster; print_stats does not exist. Use geo_raster_data action=stats as a "
+        "separate tool or implement statistics with imported rasterio/numpy. "
         "Stable IDs bind measured sources and actual producer outputs; "
         "resolve_data(ref) returns their original Path and read_vector(ref, target_crs=None) "
         "reads vectors with optional CRS transformation. Unique registered names/paths work; "
@@ -364,8 +377,13 @@ class GeoPythonTool(BaseTool):
             lines = result["stderr"].strip().splitlines()
             result["error_summary"] = lines[-1][:500] if lines else status
             result["recovery_hints"] = python_recovery_hints(arguments.code, result["stderr"])
+        # Keep the actual cause visible before long run paths/tracebacks are collapsed.
+        visible = result if status == "succeeded" else {
+            key: result[key] for key in ("status", "error_summary", "recovery_hints")
+        } | {key: value for key, value in result.items()
+             if key not in {"status", "error_summary", "recovery_hints"}}
         response = ToolResult(
-            output=json.dumps(result, ensure_ascii=False, indent=2),
+            output=json.dumps(visible, ensure_ascii=False, indent=2),
             is_error=result["timed_out"] or result["exit_code"] != 0,
             metadata=result,
         )

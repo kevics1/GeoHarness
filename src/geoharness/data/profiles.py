@@ -107,6 +107,9 @@ def make_profile(detail: dict[str, Any], *, kind: str) -> dict[str, Any] | None:
         "file_stat": signature,
         "freshness": "current" if signature is not None else "unverified",
     }
+    if isinstance(detail.get("requested_name"), str):
+        # A locator alias must retain its exact spelling, including long paths.
+        profile["requested_name"] = detail["requested_name"]
     if "crs" in detail:
         crs = detail["crs"]
         profile["crs"] = str(crs)[:_MAX_TEXT] if crs and str(crs) != "unknown" else None

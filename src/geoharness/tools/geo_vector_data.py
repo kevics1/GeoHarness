@@ -149,6 +149,10 @@ class GeoVectorDataTool(BaseTool):
             )
         if detail.get("error"):
             return ToolResult(output=f"Error: inspect failed — {detail['error']}", is_error=True)
+        detail = dict(detail)
+        if detail.get("path"):
+            detail["name"] = Path(detail["path"]).stem
+        detail["requested_name"] = name
         profile = make_profile(detail, kind="vector")
         if "_measured_file_stat" in detail and profile is None:
             return ToolResult(
@@ -182,7 +186,8 @@ class GeoVectorDataTool(BaseTool):
         b = gdf.total_bounds
         # Measure the loaded frame itself; no GeoDataFrame survives in shared metadata.
         detail = {
-            "name": name,
+            "name": Path(path).stem if path is not None else name,
+            "requested_name": name,
             "source_type": "file",
             "path": str(Path(path).resolve()) if path is not None else None,
             "format": Path(path).suffix.lower().lstrip(".") if path is not None else "unknown",
@@ -201,7 +206,7 @@ class GeoVectorDataTool(BaseTool):
         profile = make_profile(detail, kind="vector")
         return ToolResult(
             output=(
-                f"Loaded vector file '{name}':\n"
+                f"Loaded vector file '{detail['name']}':\n"
                 f"{describe_source(detail, kind='vector')}\n"
                 "Read the registered source with read_vector(name/ref) or resolve_data(name/ref); "
                 "DATA_DIRS are read roots, not necessarily dataset directories.\n"

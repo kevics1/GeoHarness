@@ -67,6 +67,7 @@ print('five diagnostics read; other paths and writes denied')
     ("DATA_DIRS.split(':')", "DATA_DIRS is list[Path]"),
     ("from shapely.geometry import Point\nPoint(0,0).to_crs(3857)", "GeoSeries"),
     ("(SOURCE_CWD/'outside.txt').write_text('x')", "RUN_DIR"),
+    ("print_stats('fuel', band=1)", "geo_raster_data action=stats"),
 ])
 async def test_python_failures_return_specific_contract_hints(tmp_path, code, expected):
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
@@ -74,6 +75,7 @@ async def test_python_failures_return_specific_contract_hints(tmp_path, code, ex
     assert result.is_error
     assert expected in json.dumps(result.metadata["recovery_hints"])
     assert result.metadata["error_summary"]
+    assert list(json.loads(result.output))[:3] == ["status", "error_summary", "recovery_hints"]
 
 
 def test_qgis_diagnostic_discovery_rejects_redirected_files_and_mismatched_runs(tmp_path):

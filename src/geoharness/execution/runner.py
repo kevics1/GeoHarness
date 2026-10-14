@@ -621,12 +621,22 @@ def _data_helpers(references: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(ref, (str, os.PathLike)):
             raise ValueError("Use a DATA_REFS ID, unique registered name, or registered path")
         value = os.fspath(ref)
-        matches = ([records[value]] if value in records else [
-            record for record in records.values() if isinstance(record, dict) and (
-                value in {record.get("name"), record.get("output_label")}
-                or os.path.normcase(value) == os.path.normcase(record.get("path", ""))
-            )
-        ])
+        if value in records:
+            matches = [records[value]]
+        else:
+            # Exact registered paths remain usable even when short names collide.
+            matches = [record for record in records.values() if isinstance(record, dict)
+                       and os.path.normcase(value) == os.path.normcase(record.get("path", ""))]
+            if not matches:
+                matches = []
+                for record in records.values():
+                    if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+                        continue
+                    path = Path(record["path"])
+                    aliases = {record.get("name"), record.get("requested_name"),
+                               record.get("output_label"), path.name, path.stem}
+                    if value in aliases:
+                        matches.append(record)
         if not matches:
             raise ValueError("Unknown data ref; use geo_vector_data list/inspect or "
                              "geo_raster_data list/inspect to populate DATA_REFS")

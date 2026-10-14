@@ -95,7 +95,8 @@ def summary(report: dict, reference: str, path: Path) -> dict:
     result.update(plan_ref=reference, report_path=str(path),
         create_call={"action": "create", "plan_ref": reference},
         note="Full preflight and original parameters are in report_path. "
-             "Use create_call unchanged; altered sources/fonts/styles require a new preflight.")
+             "Use create_call unchanged: do not add map_id, title or output_format; the plan "
+             "already carries the checked values/defaults. Changes require a new preflight.")
     return result
 
 

@@ -158,7 +158,7 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                       "producer": "measured_source" if source else item["producer"]}
             if source:
                 for key in ("crs", "feature_count", "geometry_type", "schema",
-                            "encoding", "encoding_source", "encoding_status"):
+                            "encoding", "encoding_source", "encoding_status", "requested_name"):
                     if key in item:
                         record[key] = item[key]
             else:

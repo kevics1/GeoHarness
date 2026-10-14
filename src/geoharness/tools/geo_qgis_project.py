@@ -330,7 +330,8 @@ class GeoQgisProjectInput(BaseModel):
 
     action: Literal["create", "inspect", "export", "preflight"]
     plan_ref: str = Field(default="", description=(
-        "Returned preflight plan_ref. create accepts only action+plan_ref and revalidates sources."
+        "Returned preflight plan_ref. create accepts only action+plan_ref; it carries checked "
+        "map_id/title/output_format already. Do not repeat those fields; sources are revalidated."
     ))
     layers: list[QgisProjectLayer] = Field(
         default_factory=list,
@@ -389,7 +390,8 @@ class GeoQgisProjectInput(BaseModel):
             if self.action != "create" or self.model_fields_set - {"action", "plan_ref"}:
                 extra = sorted(self.model_fields_set - {"action", "plan_ref"})
                 raise ValueError("plan_ref create accepts only action and plan_ref; "
-                                 f"remove extra fields {extra}; preflight changes first")
+                                 f"remove extra fields {extra}; map_id/title/output_format are "
+                                 "already in the checked plan. Preflight changes first")
             return self
         if self.action in {"create", "preflight"}:
             if not self.layers:

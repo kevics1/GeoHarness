@@ -245,3 +245,10 @@
 - 模型照用旧candidate_extent又改340→310→330mm页高及名单2列→1列，改变建议前提。最终坐标舍入到0.1m造成actual_zoom=1.9999953108881092，绝对容差拒绝但错误3位小数显示2.000；需微小相对容差、足够诊断精度和安全余量。
 - 非法JSON提示Expecting ',' delimiter(position2699/3245chars)，无完整原始串不能猜具体引号；finish_reason=tool_calls不证明max_tokens不足。优先预检+plan_ref减少长参数生成，失败不猜修业务参数。
 - 规划首次补丁因findings尾行上下文不全被拒，未产生修改；读取精确行后重新追加。
+
+## 2026-10-14 最新Python三次失败与短引用误用
+
+- inspect_attributes第7行统一encoding=utf-8，实际在GBK居民点解码失败；执行快照已包含逐层编码，因此是未采用已知信息。
+- inspect_fields3第16行调用未定义print_stats；前面的read_vector/水系统计成功，runner未提供此函数，每次进程独立。
+- fuel_hist_and_fields栅格和居民点统计成功，事件read_vector短名失败；该文件通过file_path加载，_load把绝对路径写成profile.name，工具注册命名不一致。需要规范名/旧记录唯一basename兼容，重名拒绝不猜，保留签名和hash检查。
+- QGIS预检回执已经给出两字段create_call，模型仍补map_id/title/output_format；明确保存身份的一般规则不向短引用增加字段，改动应重新预检。Python失败前置error_summary/recovery_hints可避免关键原因被运行路径和堆栈挤到折叠区域。
