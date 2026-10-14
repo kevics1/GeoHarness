@@ -114,6 +114,12 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
         hints.append("No dataset was selected; this is not a filesystem permission failure. "
                      "Use read_vector(name/ref) or resolve_data(name/ref) from DATA_REFS. "
                      "Use the Path returned by load/inspect, not a guessed DATA_DIRS subfolder.")
+    if "TypeError:" in stderr and "NoneType" in stderr and "os.PathLike" in stderr:
+        hints.append("A path argument is None, possibly because directory discovery found "
+                     "no match. DATA_DIRS are allowed read roots, not direct dataset folders. "
+                     "Use read_vector(name/ref) or resolve_data(name/ref) from DATA_REFS; "
+                     "if manually searching, check for no match before joining/reading paths. "
+                     "This error does not establish an encoding or permission failure.")
     if "DATA_DIRS" in code and "'list' object has no attribute 'split'" in stderr:
         hints.append("DATA_DIRS is list[Path]: iterate it directly. Only "
                      "os.environ['DATA_DIRS'].split(os.pathsep) returns environment paths.")

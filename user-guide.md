@@ -282,7 +282,7 @@ Python 可只读读取已核验 QGIS 任务返回的诊断文件、预览图和 
 
 geo_cartography 显式读取成图，结合任务、预期图层、参数和源数据摘要，检查空白、图层可见性/遮挡、图例对应、文字和布局。先准备完整布局，再合并修正可确认的错误/警告，不限制地图版本和修正次数。Matplotlib 和默认 QGIS 路径均可自动应用支持的呈现补丁并重绘；QGIS 使用下文的实际工程、区域和问题证据约束。不会因为 info 提示或单纯审美建议再画一版。报告由工具返回实际路径；Matplotlib 自动修正前地图和预览保存在成图旁独立 `.review-*` 目录。
 
-原生工具、Python 制图及独立审查均不按版本、调用次数或累积审查时长停止。旧配置 `max_repairs`、`max_reviews_per_request`、`total_timeout_seconds` 仍可读取，但不再限制成图或检查。单次API请求和脚本的超时仍有效，用户可取消正在执行的任务。相同图片和审图配置的结果会缓存，失败也不会盲目重试；明确修正模型/token/provider参数后允许再次检查。持久地图身份、历史版本与回执继续保留。
+原生工具、Python 制图及独立审查均不按版本、调用次数或累积审查时长停止。旧配置 `max_repairs`、`max_reviews_per_request`、`total_timeout_seconds` 仍可读取，但不再限制成图或检查。单次API请求和脚本的超时仍有效，用户可取消正在执行的任务。相同图片、审查目标和配置的已完成结果可缓存复用；暂时服务故障使用短期冷却，其他失败不盲目重试。明确修正模型/token/provider参数后重新核对实际条件。持久地图身份、历史版本与回执继续保留。
 
 QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定优先级、符号大小和详图；这是规划提示，不是视觉通过证明。`label_style` 支持 `placement`、`distance_mm`、`offset_x_mm/offset_y_mm`、`priority`（0最低、10最高）；`around_point` 使用距离，固定 X/Y 偏移应使用 `over_point`。`style.obstacle=true` 可让未标注的重要几何参与 PAL 避让，但不能保证所有标签显示，也不能阻止线符号本身压盖面。疏散线压盖主体应调整实际线宽/透明度/图层顺序，或在本请求内改用详图/分图。
 
@@ -293,6 +293,8 @@ QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定�
 带布局的QGIS预检返回 `plan_ref` 和工作区内 `report_path`。模型可用 `{"action":"create","plan_ref":"返回的引用"}` 创建已检查的地图，避免重复生成长图层数组、路径和布局计划；创建时仍重新检查源数据、字体及计划。修改参数需重新预检。报告文件以摘要绑定，修改后引用失效；Python仅获得确切报告的读取权限。`qgis.plans_dir` 默认 `.geoharness/qgis-plans`，须为当前工作区子目录。原生分析及QGIS图层的 `file_path` 也支持当前已登记的 `data:` 引用。
 
 短引用创建仅传 `action` 和 `plan_ref`；预检计划已经携带已检查的 `map_id`、`title` 和输出格式/默认值，不再重复这些字段。通用的保留地图身份要求不向短引用增加字段。冗余参数会明确列出，需修改标题、格式或样式时重新预检。标签优先使用 `placement="auto"`；`around_point`/`over_point` 只用于点，`parallel` 只用于线，面可用 `horizontal`。检查针对 derivation 筛选后实际绘制的几何。颜色支持 Qt 名称、十六进制色及 `rgba(r,g,b,a)`；rgba 的 RGB 为 0–255 整数、alpha 为 0–1，入口统一转换为 Qt 的 `#AARRGGBB`。
+
+向量分类参数应放在 `layers[i].style` 内。为兼容确定性的层级误写，入口仅将外层的 `renderer`、`field`、`categories` 归入 `style`；内外相同可合并，冲突则拒绝，其他未知字段仍拒绝。预检的 `parameter_normalizations` 记录具体图层和移动字段，原输入对象不被改写，分类字段和值仍接受完整校验。
 
 详图未达到最小放大倍数时，默认先联合调整纸面尺寸和详图比例，保留请求的地理范围、图层、分类和标签，计算保留1%余量。微小坐标序列化误差使用绝对1e-5、相对5e-6的容差；1.99999531可视为两倍，1.991仍不足。不能适配或关闭自动适配时，诊断返回实际图框尺寸、范围、CRS、比例尺与放大倍数（错误文字保留八位小数），并给出扩大图框、候选范围或分图建议。候选范围需重新核验主体覆盖，不自动裁掉必要内容或降低要求。页面、侧栏、名单表、详图范围或比例改变后，旧建议失效，需重新预检；不要手动舍入候选坐标。
 
@@ -322,7 +324,11 @@ QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定�
 
 每次 `geo_python` 都启动独立进程，上一段脚本定义的函数或变量不会保留。提供的GIS辅助函数是 `resolve_data`、`read_vector`、`native_layer`、`mask_raster`；`print_stats` 不是内置函数。栅格统计应单独调用 `geo_raster_data action=stats`，或在脚本中明确导入 Rasterio/NumPy 编写计算。失败回执优先显示 `error_summary` 和 `recovery_hints`，完整输出及执行信息保留；不要把后半段引用/函数错误当成前面已成功的栅格统计失败。
 
+数据已登记时直接使用 `read_vector(ref)` 或 `resolve_data(ref)`，不再遍历 `DATA_DIRS` 猜路径；`DATA_DIRS` 是读取根目录，文件可能位于子目录。手动搜索必须先检查未命中情况，再拼接或读取路径。路径为 None 的类型错误会提示该定位问题，不当成编码或权限故障。
+
 `geo_analysis` 成功结果提供 `qgis_inputs`，包含实际原生产物的 `layers` 和对应 `analysis_manifests`，可合并进 QGIS 预检参数。只合并确实上图的产物及清单，样式直接附在原生图层上；筛选、保留字段或新增注记使用 `layer.derivation`。不要为调整外观先手动重写文件，也不要把没有上图的统计清单绑定到地图。
+
+登记的原生分析结果引用还包含 `analysis_manifest`。QGIS 使用该 `data:` 引用时自动带入对应清单，并核验结果和生产清单的签名/摘要；确切原生结果路径沿用已有清单推断及严格内容核验。预检返回 `analysis_binding_note`。Python产物或原始Shapefile不会因此自动变成原生分析结果；显式传入的清单仍保留并逐份核验，不静默替换图层。
 
 分析清单与实际图层不匹配时，系统根据清单记录的原始输入路径给出候选替换建议；只有唯一对应时才列出具体 `layers[i].file_path`。这是恢复建议，不代表原始数据与结果等价，也不会自动替换。模型需保留样式、选择正确结果重新预检；没有确定对应时仅列候选，不凭名称猜测。
 
@@ -345,6 +351,10 @@ map_review 可单独配置 model、base_url、api_key；留空时复用主配置
 ## 地图交付与手动修改
 
 审图 diagnostics 区分网络、服务响应、JSON、schema、模型输出token耗尽和缓存；schema 失败保留字段位置/类型/说明及有界脱敏 JSON。缓存命中明确 request_sent=false，不能写成服务又失败一次。仅 JSON/schema 失败可用 geo_map_review 的 retry_invalid_response=true 显式恢复一次。layout_patch=null 可按空补丁处理，其它错误字段仍拒绝。
+
+503 等暂时服务故障和明确网络/连接超时使用 `map_review.service_failure_ttl_seconds`（默认60秒）冷却；服务端 `Retry-After` 可延长。冷却按审图模型、服务地址和凭证身份隔离，跨改名、重新导出、普通任务重置和会话恢复保留，不通过重绘绕过。冷却到期后的下一次审图调用可重新请求，不在工具内循环等待。`geo_map_review(retry_service_failure=true, ...)` 表达明确复审意图，只检查同一图片、不启动自动重绘，不越过冷却，也不会强行重试400/401等非暂时错误；它不替代 JSON/schema 专用恢复开关。
+
+回执的 `visual_review_completed`、`request_sent`、`image_provider_calls`/`image_cache_hits`、`request_provider_calls`/`request_cache_hits` 分别说明视觉检查完成情况、是否调用服务、当前任务中该图及整个任务的客户端调用/缓存次数；不推断SDK内部HTTP次数。请求已开始后被取消也属于一次客户端调用，取消继续生效。`service_retry_at`、`service_retry_after_seconds`、`service_retry_allowed`、`next_action` 给出实际恢复条件；`quality_note` 提醒服务失败不能证明地图正确。普通“继续”不保证发新请求或升级质量。通过/有问题的完成审查可在同图、同审查目标与配置下复用内存结果；目标变化重新审查，持久快照恢复仍沿用须核验当前视觉证据的规则。
 
 已有 Python 地图打包使用 geo_cartography(action="project", map_path="已有地图.png", project_output_dir="exports/工程目录", layers=...)。旧 output_path 作为已有地图输入继续兼容。工程目录必须留在工作区，且必须是尚不存在的新目录；已有空目录也不删除。QGIS 工程检查除图层有效外，也验证项目/地图框 CRS、范围和比例尺；打包成功不表示视觉审查通过。
 

@@ -51,7 +51,8 @@ def recent_outputs(cwd: Path, config: Any, *, limit: int = 24) -> list[dict[str,
             if manifest.resolve() != manifest or manifest.stat().st_size > 1024 * 1024:
                 continue
             manifest_signature = file_signature(manifest)
-            document = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_bytes = manifest.read_bytes()
+            document = json.loads(manifest_bytes.decode("utf-8"))
             if not isinstance(document, dict) or manifest_signature is None \
                     or file_signature(manifest) != manifest_signature:
                 continue
@@ -81,9 +82,11 @@ def recent_outputs(cwd: Path, config: Any, *, limit: int = 24) -> list[dict[str,
                     continue
                 record = {"path": str(path), "name": path.name,
                           "producer": "geo_analysis" if native else "geo_python",
-                          "manifest": str(manifest), "manifest_signature": manifest_signature}
+                          "manifest": str(manifest), "manifest_signature": manifest_signature,
+                          "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}
                 if native:
-                    record.update(output_label=label, action=document["action"])
+                    record.update(output_label=label, action=document["action"],
+                                  analysis_manifest=str(manifest))
                     for key in ("feature_count", "geojson_sha256", "schema"):
                         if key in entry:
                             record[key] = entry[key]
@@ -133,6 +136,9 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                     file_signature(manifest) != manifest_signature
                 ):
                     continue
+                manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+                if item.get("manifest_sha256", manifest_digest) != manifest_digest:
+                    continue
                 expected = item.get("geojson_sha256")
                 if expected is not None:
                     if not isinstance(expected, str) or len(expected) != 64:
@@ -163,7 +169,10 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                         record[key] = item[key]
             else:
                 record.update(manifest=str(manifest),
-                              manifest_signature=manifest_signature)
+                              manifest_signature=manifest_signature,
+                              manifest_sha256=manifest_digest)
+                if item["producer"] == "geo_analysis":
+                    record["analysis_manifest"] = str(manifest)
                 if expected is not None:
                     record["sha256"] = expected
                 for key in ("output_label", "action", "feature_count", "schema"):
@@ -195,6 +204,16 @@ def resolve_registered_path(value: str, metadata: dict, *, cwd: Path, config: An
     if (not isinstance(reference, dict) or not isinstance(reference.get("path"), str)
             or file_signature(reference["path"]) != reference.get("signature")):
         raise ValueError("Unknown or changed data reference; inspect the source again")
+    manifest = reference.get("manifest")
+    if manifest is not None:
+        manifest_path = Path(manifest).absolute()
+        if (manifest_path.resolve() != manifest_path
+                or not isinstance(reference.get("manifest_signature"), dict)
+                or file_signature(manifest_path) != reference["manifest_signature"]):
+            raise ValueError("Registered producer manifest is stale; inspect the output again")
+        if (reference.get("manifest_sha256") and hashlib.sha256(manifest_path.read_bytes())
+                .hexdigest() != reference["manifest_sha256"]):
+            raise ValueError("Registered producer manifest changed; inspect the output again")
     if reference.get("sha256"):
         digest = hashlib.sha256()
         with Path(reference["path"]).open("rb") as stream:
@@ -203,6 +222,10 @@ def resolve_registered_path(value: str, metadata: dict, *, cwd: Path, config: An
         if (digest.hexdigest() != reference["sha256"]
                 or file_signature(reference["path"]) != reference.get("signature")):
             raise ValueError("Registered analysis output changed; use an actual returned result")
+    if manifest is not None and (
+        file_signature(manifest_path) != reference["manifest_signature"]
+    ):
+        raise ValueError("Registered producer manifest is stale; inspect the output again")
     return reference["path"]
 
 

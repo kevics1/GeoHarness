@@ -28,6 +28,12 @@ class GeoMapReviewInput(BaseModel):
         default=False,
         description="Allow one explicit retry of a cached JSON/schema failure; never loops.",
     )
+    retry_service_failure: bool = Field(
+        default=False,
+        description="Explicitly request review of the same image after a transient outage. "
+        "Never bypasses service cooldown/Retry-After, retries credentials/input errors, "
+        "or redraws the map. After cooldown a new call can send one request.",
+    )
     auto_repair: bool | None = Field(
         default=None, description="False disables evidence-bound automatic presentation repair.",
     )
@@ -119,7 +125,11 @@ class GeoMapReviewTool(BaseTool):
         "use these returned artifacts and do not repeat an already applied repair plan. "
         "Unsupported suggestions remain issues. Review-only mode does not apply patches; "
         "a supported manual presentation change needs a new render and pixel review. "
-        "A failed API call means unverified, never passed."
+        "A failed API call means unverified, never passed. Cached results are not new service "
+        "failures. Transient outages expire after service cooldown; retry_service_failure "
+        "requests reinspection of the same image. Read request_sent, image_provider_calls, "
+        "image_cache_hits, visual_review_completed and next_action; ordinary continue does "
+        "not guarantee a new provider request or visual success."
     )
     input_model = GeoMapReviewInput
 
@@ -159,9 +169,16 @@ class GeoMapReviewTool(BaseTool):
             seen_images = {first_digest}
             enabled = (arguments.auto_repair if arguments.auto_repair is not None
                        else config.map_review.auto_repair)
+            if arguments.retry_service_failure:
+                # Recovery is review-only; a service outage must not cause a new map.
+                enabled = False
             while True:
                 if current.metadata.get("review_status") != "issues" or not enabled:
-                    stop = "review_complete" if enabled else "review_only"
+                    stop = (
+                        "visual_review_unverified" if enabled and current.metadata.get(
+                            "review_status") == "unverified" else
+                        "review_complete" if enabled else "review_only"
+                    )
                     break
                 checker = context.metadata.get("geoharness_permission_checker")
                 if checker is None:
@@ -219,6 +236,7 @@ class GeoMapReviewTool(BaseTool):
                     current = await self._review_one(arguments.model_copy(update={
                         "file_path": str(preview), "map_id": identity,
                         "retry_invalid_response": False,
+                        "retry_service_failure": False,
                     }), context)
                     if current.is_error:
                         stop = "Review of the new PNG failed; visual quality is unverified."
@@ -393,12 +411,18 @@ class GeoMapReviewTool(BaseTool):
                 summary="Layout geometry has collisions or clipped content; "
                 "repair these before requesting visual review.",
                 issues=layout_issues,
+                diagnostics={"stage": "layout", "outcome": "blocked", "request_sent": False,
+                             "visual_review_completed": False,
+                             "next_action": "repair_measured_layout_first"},
             )
             budget = {
                 "review_cached": False,
                 "review_budget_exhausted": False,
                 "image_sha256": digest,
                 "visual_review_status": "unverified",
+                "request_sent": False,
+                "visual_review_completed": False,
+                "next_action": "repair_measured_layout_first",
             }
             context.metadata.setdefault("map_workflow_state", {}).setdefault("cache", {})[
                 digest
@@ -410,6 +434,7 @@ class GeoMapReviewTool(BaseTool):
                 task=arguments.task,
                 evidence=evidence,
                 retry_invalid_response=arguments.retry_invalid_response,
+                retry_service_failure=arguments.retry_service_failure,
                 metadata=context.metadata,
                 map_id=identity,
                 client=context.metadata.get("map_review_client"),
@@ -456,7 +481,8 @@ class GeoMapReviewTool(BaseTool):
                 + json.dumps(receipt_summary(receipt), ensure_ascii=False)
                 + "\n"
                 + (
-                    "Unchanged image: cached result; do not retry.\n"
+                    "No new review request was sent: cached conclusion or service cooldown. "
+                    "Follow diagnostics.next_action and service_retry_after_seconds.\n"
                     if budget["review_cached"]
                     else ""
                 )

@@ -223,6 +223,30 @@ def _workflow(raw: Any, secrets: tuple[str, ...], *, restoring: bool) -> dict[st
     attempts = attempts if isinstance(attempts, dict) else {}
     validated_attempts = {key: True for key, value in list(attempts.items())[-MAX_REVIEW_CACHE:]
                           if _digest(key) and value is True}
+    services = raw.get("service_recovery")
+    services = services if isinstance(services, dict) else {}
+    validated_services = {}
+    for key, value in list(services.items())[-MAX_REVIEW_CACHE:]:
+        if not _digest(key) or not isinstance(value, dict):
+            continue
+        retry_at = _seconds(value.get("retry_at"))
+        failure = value.get("failure")
+        if retry_at is None or not isinstance(failure, dict):
+            continue
+        diagnostic = _safe_json({field: failure[field] for field in {
+            "failure_stage", "error_type", "http_status", "service_failure_transient",
+            "service_error_code", "retry_after_seconds", "service_retry_at",
+        } if field in failure}, secrets)
+        validated_services[key] = {"retry_at": retry_at, "failure": diagnostic}
+    activity = raw.get("review_activity")
+    activity = activity if isinstance(activity, dict) else {}
+    validated_activity = {}
+    for key, value in list(activity.items())[-MAX_REVIEW_CACHE:]:
+        if not _digest(key) or not isinstance(value, dict):
+            continue
+        calls, hits = _counter(value.get("provider_calls")), _counter(value.get("cache_hits"))
+        if calls is not None and hits is not None:
+            validated_activity[key] = {"provider_calls": calls, "cache_hits": hits}
     return {
         "reviews": reviews, "seconds": seconds,
         # Reservation is an in-flight promise, not measured consumption. After
@@ -231,6 +255,10 @@ def _workflow(raw: Any, secrets: tuple[str, ...], *, restoring: bool) -> dict[st
         "reserved_seconds_reset_reason": _RESERVATION_REASON,
         "maps": maps, "cache": cache, "cache_settings": fingerprints,
         "validation_retries": validated_retries,
+        "service_recovery": validated_services,
+        "review_activity": validated_activity,
+        "provider_calls_total": _counter(raw.get("provider_calls_total")) or 0,
+        "cache_hits_total": _counter(raw.get("cache_hits_total")) or 0,
         "repair_attempts": validated_attempts,
     }
 

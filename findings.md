@@ -252,3 +252,11 @@
 - inspect_fields3第16行调用未定义print_stats；前面的read_vector/水系统计成功，runner未提供此函数，每次进程独立。
 - fuel_hist_and_fields栅格和居民点统计成功，事件read_vector短名失败；该文件通过file_path加载，_load把绝对路径写成profile.name，工具注册命名不一致。需要规范名/旧记录唯一basename兼容，重名拒绝不猜，保留签名和hash检查。
 - QGIS预检回执已经给出两字段create_call，模型仍补map_id/title/output_format；明确保存身份的一般规则不向短引用增加字段，改动应重新预检。Python失败前置error_summary/recovery_hints可避免关键原因被运行路径和堆栈挤到折叠区域。
+
+## 2026-10-14 定位/样式与服务恢复依据
+
+- 最新Python root=None后只检查DATA_DIRS各根目录直下shp，而文件在数据子目录；os.path.join(None,...)先失败，数据引用已齐全。恢复提示原未覆盖此模式，应指向read_vector/resolve_data而非猜目录。
+- layers[6]误把renderer/field/categories放外层；仅这三个字段作白名单无冲突归并，冲突/其他未知字段继续拒绝；记录实际规范化。
+- 原生分析确切路径原先已有manifest推断，不重复造轮子。引用增加明确analysis_manifest和生产清单摘要，入口保留严格校验，原始shp不会被静默替换。
+- 实际四次审图工具调用为两次provider503、两次缓存未发请求。503不证明图像正确；成功审查缓存和短期transient故障缓存应分开，服务冷却不得靠改名/重导出绕过，准确回传真实调用与缓存计数。
+- 首个style重复字段测试误用了single渲染下无效field，产品既有校验正确；将测试改为重复相同renderer验证兼容，不放松产品校验。

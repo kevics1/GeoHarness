@@ -177,6 +177,17 @@ class GeoQueryEngine(QueryEngine):
     @staticmethod
     def _progress_fingerprint(event: ToolExecutionCompleted) -> str:
         """Count changed results, not fresh run timestamps or repeated read calls."""
+        if event.tool_name == "geo_map_review":
+            try:
+                review, _ = json.JSONDecoder().raw_decode(event.output.lstrip())
+                diagnostic = review.get("diagnostics", {})
+                if review.get("status") == "unverified" and diagnostic.get("stage") == "cache":
+                    # Waiting/counter updates are not completed work or new service attempts.
+                    held = {key: diagnostic.get(key) for key in (
+                        "error_type", "http_status", "failure_stage", "next_action")}
+                    return hashlib.sha256(json.dumps(held, sort_keys=True).encode()).hexdigest()
+            except (TypeError, ValueError, AttributeError):
+                pass
         volatile = {
             "run_dir", "script_path", "manifest_path", "stdout_path", "stderr_path",
             "duration_seconds", "elapsed_seconds", "duration_ms",

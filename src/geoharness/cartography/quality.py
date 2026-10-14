@@ -9,8 +9,9 @@ import io
 import json
 import math
 import time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from openharness.api.client import ApiMessageCompleteEvent, ApiMessageRequest
 from openharness.api.openai_client import (
@@ -499,6 +500,7 @@ async def review_map(
     task: str,
     evidence: dict[str, Any],
     client: Any = None,
+    on_request_started: Callable[[], None] | None = None,
 ) -> MapReview:
     """Inspect pixels, with source/render evidence; failures stay unverified."""
     settings = config.map_review
@@ -637,6 +639,8 @@ async def review_map(
                 # Recovery is explicit; internal SDK retries would hide duplicate requests.
                 transport = client._client.with_options(max_retries=0)
                 diagnostics.update(stage="network", request_sent=True)
+                if on_request_started is not None:
+                    on_request_started()
                 response = await transport.chat.completions.create(**params)
                 diagnostics["stage"] = "response"
                 diagnostics["response_model"] = response.model
@@ -665,6 +669,8 @@ async def review_map(
                 return choice.message.content
 
             diagnostics.update(stage="network", request_sent=True)
+            if on_request_started is not None:
+                on_request_started()
             async for event in client.stream_message(request):
                 if isinstance(event, ApiMessageCompleteEvent):
                     diagnostics["stage"] = "response"
@@ -800,6 +806,32 @@ async def review_map(
         if status is not None:
             diagnostics["http_status"] = status
             diagnostics["stage"] = "provider"
+        diagnostics["service_failure_transient"] = (
+            status in {408, 425, 429, 500, 502, 503, 504}
+            or (status is None and diagnostics["stage"] in {"network", "provider"} and (
+                isinstance(exc, (TimeoutError, ConnectionError))
+                or type(exc).__name__ in {"APIConnectionError", "APITimeoutError"}
+            ))
+        )
+        # Never persist the response body, request URL/headers, or exception message.
+        code = getattr(exc, "code", None)
+        if isinstance(code, str) and 0 < len(code) <= 64 and all(
+            char.isalnum() or char in "._-" for char in code
+        ):
+            diagnostics["service_error_code"] = _redact_review(code, secrets)
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", {})
+        retry_after = headers.get("retry-after") if hasattr(headers, "get") else None
+        if retry_after is not None:
+            try:
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = parsedate_to_datetime(str(retry_after)).timestamp() - time.time()
+                if math.isfinite(delay):
+                    diagnostics["retry_after_seconds"] = max(0.0, delay)
+            except (TypeError, ValueError, OverflowError):
+                pass
         diagnostics.update(outcome="failed", failure_stage=diagnostics["stage"])
         result = MapReview(
             status="unverified",

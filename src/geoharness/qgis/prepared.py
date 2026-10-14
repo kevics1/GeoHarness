@@ -76,6 +76,7 @@ def diagnostic_files(*, cwd, settings) -> tuple[Path, ...]:
 def summary(report: dict, reference: str, path: Path) -> dict:
     result = {key: report[key] for key in (
         "status", "display_crs", "map_extent", "map_extent_source", "warnings", "issues",
+        "parameter_normalizations", "analysis_binding_note",
     ) if key in report}
     result["layers"] = [{"layer_index": index, **{key: layer[key] for key in (
         "label", "kind", "feature_count", "visible_main", "visible_detail", "symbolization_field",

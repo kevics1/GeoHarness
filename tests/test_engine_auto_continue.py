@@ -37,6 +37,18 @@ class Input(BaseModel):
     index: int = 0
 
 
+def test_waiting_review_counters_are_not_new_progress():
+    def event(hits):
+        return ToolExecutionCompleted(tool_name="geo_map_review", output=json.dumps({
+            "status": "unverified", "diagnostics": {
+                "stage": "cache", "http_status": 503, "error_type": "InternalServerError",
+                "failure_stage": "provider", "next_action": "wait_then_retry_same_image",
+                "image_cache_hits": hits, "service_retry_after_seconds": 60 - hits,
+            }}) + f"\nReport: workspace/preview.review-{hits}/report.json")
+    assert GeoQueryEngine._progress_fingerprint(event(1)) == (
+        GeoQueryEngine._progress_fingerprint(event(2)))
+
+
 class ProbeTool(BaseTool):
     name = "probe"
     description = "Offline continuation probe."

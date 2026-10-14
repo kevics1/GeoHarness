@@ -291,3 +291,12 @@
 - NameError恢复说明指出定义/import及真实栅格工具；失败可见回执只重排status/error_summary/recovery_hints到前部，完整metadata未删。预检摘要和字段拒绝明确计划已携带身份/标题/格式。
 - 按用户要求仅9项定向检查：名称/旧记录/歧义/变化4项4.62秒；真实Python失败提示及短引用5项15.26秒。Ruff/diff及独立只读审查通过。一次空补丁无修改被拒，后续实际补丁正常。未运行全量、模型或业务整图。
 - wheel SHA256 6a10ccbedda926058ab69c80091cf96d5b156edb185914aab250bfadacf254b3已全局安装，83模块/34技能文件与源码逐字节一致。安装版对用户实际GBK火灾事件，以stem/filename/绝对path/稳定ID四种形式只读成功，规范中文名称正确；跨目录geoh version通过。用户数据、旧图、模型凭证、Skills和.env.example既有修改未动。
+
+### 定位/样式兼容、分析引用衔接与审图服务恢复（2026-10-14）
+
+- 已登记数据优先read_vector/resolve_data，不遍历读取根猜路径；None路径错误恢复指明搜索可能未命中。QGIS入口仅将renderer/field/categories无冲突移入style，重复相同可接受，冲突及其他未知字段拒绝，回执记录parameter_normalizations，原输入不改。
+- 原生产物DATA_REFS携带analysis_manifest/生产清单摘要，native引用入口同时核验产物与清单；确切路径沿用原infer/load严格核验，回执analysis_binding_note说明自动关联，原始shp不静默替换，Python产物不冒充原生。
+- 新service_failure_ttl_seconds默认60秒，暂时HTTP/网络故障按服务身份冷却并尊重Retry-After，跨改名/重导出/reset/checkpoint保留；到期下一次调用可重试，无内部sleep/循环。retry_service_failure明确只复审不重绘，不越过冷却或重试400/401，JSON/schema专用单次恢复保留。状态/脱敏error_code/实际调用与缓存计数/next_action/视觉完成准确返回，503不证明图像正确。
+- 独立审查发现普通新消息清掉成功cache和取消漏计，均修正：内存成功cache保留且fingerprint绑定task/expected evidence，排除迭代历史；快照历史passed仍要求重新核验。实际client调用前回调记账，取消传播但计数保留。健康不同图片仍并行，已有故障按服务锁协调。新增遥测字段变化不算自动续跑的新进展。
+- 小范围检查：目录/style3项（首次fixture误用single字段被既有校验拒绝，改为合法相同renderer后通过）；分析引用5项6.75秒；服务原9项+收尾2项通过；原schema恢复与续跑遥测2项5.30秒通过。独立复核早先对三个新增文件14项通过11.99秒，和上述有重叠，不累加当独立总数；最终仅静态关闭两处问题。Ruff/diff检查通过，未跑全量、真实模型/审图服务或业务整图。
+- 构建wheel SHA256 9b78d27fcf2184994ce72714034196ff7971f242019003d26b282e9b275be574并全局安装；83模块/34技能文件与源码逐字节一致。安装版冷却配置/复审输入/style规范化/None恢复smoke、临时目录geoh version通过。未修改原始数据/旧图/主模型/凭证/上游/AGENTS/Skills/.env.example既有修改；并未宣称实际503服务已恢复或业务地图视觉通过。

@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Annotated, Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from geoharness.cartography.derivation import MapDerivation, derive_frame
 from geoharness.cartography.retry_guard import guard_map_errors
@@ -137,6 +137,7 @@ class QgisRasterStyle(BaseModel):
 
 class QgisProjectLayer(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    _normalized_style_fields: tuple[str, ...] = PrivateAttr(default=())
 
     file_path: str = Field(min_length=1, description="Existing local vector/raster source.")
     kind: Literal["vector", "raster"] = "vector"
@@ -146,7 +147,9 @@ class QgisProjectLayer(BaseModel):
         "otherwise generated from original source, layer selector, kind and name."
     ))
     layer_name: str = Field(default="", description="Optional source GeoPackage layer name.")
-    style: QgisVectorStyle | None = None
+    style: QgisVectorStyle | None = Field(default=None, description=(
+        "Vector symbol settings. Put renderer, field and categories inside this style object."
+    ))
     raster_style: QgisRasterStyle | None = None
     label_field: str = ""
     label_style: QgisLabelStyle | None = None
@@ -157,6 +160,31 @@ class QgisProjectLayer(BaseModel):
         default=None,
         description="Verified map subset/field selection/new annotations of file_path.",
     )
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def normalize_style_fields(cls, value, handler):
+        moved = ()
+        if isinstance(value, dict):
+            moved = tuple(key for key in ("renderer", "field", "categories") if key in value)
+            if moved:
+                nested = value.get("style")
+                if isinstance(nested, QgisVectorStyle):
+                    nested = nested.model_dump(exclude_unset=True)
+                if nested is not None and not isinstance(nested, dict):
+                    raise ValueError("style must be an object before merging misplaced fields")
+                style = dict(nested or {})
+                for key in moved:
+                    if key in style and style[key] != value[key]:
+                        raise ValueError(f"Conflicting {key!r} at layer and style levels; "
+                                         f"provide only style.{key}")
+                    style[key] = value[key]
+                value = {key: item for key, item in value.items() if key not in moved}
+                value["style"] = style
+        result = handler(value)
+        if moved:
+            result._normalized_style_fields = moved
+        return result
 
     @model_validator(mode="after")
     def validate_kind(self) -> QgisProjectLayer:
@@ -493,12 +521,23 @@ class GeoQgisProjectTool(BaseTool):
             except (OSError, ValueError) as exc:
                 return ToolResult(output=f"Error: prepared preflight failed: {exc}", is_error=True,
                                   metadata={"deterministic_error": True, "render_executed": False})
-        from geoharness.data.task_context import resolve_registered_path
+        from geoharness.data.task_context import data_ref_snapshot, resolve_registered_path
 
         try:
-            arguments = arguments.model_copy(update={"layers": [layer.model_copy(update={
-                "file_path": resolve_registered_path(layer.file_path, context.metadata,
-                    cwd=Path(context.cwd), config=config)}) for layer in arguments.layers]})
+            layers, bound_manifests = [], []
+            references = (data_ref_snapshot(context.metadata, cwd=Path(context.cwd), config=config)
+                          if any(layer.file_path.startswith("data:") for layer in arguments.layers)
+                          else {})
+            for layer in arguments.layers:
+                path = resolve_registered_path(layer.file_path, context.metadata,
+                                               cwd=Path(context.cwd), config=config)
+                record = references.get(layer.file_path, {})
+                if record.get("producer") == "geo_analysis" and record.get("analysis_manifest"):
+                    bound_manifests.append(record["analysis_manifest"])
+                layers.append(layer.model_copy(update={"file_path": path}))
+            arguments = arguments.model_copy(update={"layers": layers,
+                "analysis_manifests": list(dict.fromkeys([
+                    *arguments.analysis_manifests, *bound_manifests]))})
         except (OSError, ValueError) as exc:
             return ToolResult(output=f"Error: data reference failed: {exc}", is_error=True,
                               metadata={"render_executed": False})
@@ -553,6 +592,11 @@ class GeoQgisProjectTool(BaseTool):
                                             **failed})
         from geoharness.qgis.runner import execute_qgis
 
+        if preflight is not None:
+            preflight["parameter_normalizations"] = [
+                {"layer_index": index, "moved_to_style": list(layer._normalized_style_fields)}
+                for index, layer in enumerate(arguments.layers) if layer._normalized_style_fields
+            ]
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
         if preflight:
             creation = arguments.model_dump(exclude={"action"},
@@ -893,6 +937,11 @@ class GeoQgisProjectTool(BaseTool):
         ]))
         report["analysis_evidence_status"] = "verified" if manifests else "not_provided"
         report["analysis_manifests"] = manifests
+        if manifests:
+            report["analysis_binding_note"] = (
+                "Native output references/paths retain analysis provenance automatically; "
+                "all supplied and inferred manifests are verified against actual mapped outputs."
+            )
         if manifests:
 
             report["analysis"] = load_analysis_facts(

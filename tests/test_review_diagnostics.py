@@ -190,7 +190,7 @@ async def test_explicit_invalid_response_retry_is_single_and_consumes_budget(ima
         image, config=config, task="Inspect", evidence={}, metadata=metadata, client=reviewer,
     )
     cached, cached_flags = await review_with_budget(
-        image, config=config, task="Inspect again", evidence={"new": True},
+        image, config=config, task="Inspect", evidence={"previous_visual_reviews": []},
         metadata=metadata, client=reviewer,
     )
     assert reviewer.calls == 1
