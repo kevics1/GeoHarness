@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from contextlib import aclosing, nullcontext
 from copy import deepcopy
 from typing import AsyncIterator
 
-from openharness.api.usage import UsageSnapshot
-from openharness.engine.messages import ConversationMessage
-from openharness.engine.query import QueryContext, remember_user_goal, run_query
+from openharness.engine.messages import ConversationMessage, ToolResultBlock
+from openharness.engine.query import MaxTurnsExceeded, QueryContext, remember_user_goal, run_query
 from openharness.engine.query_engine import QueryEngine
-from openharness.engine.stream_events import AssistantTurnComplete, ErrorEvent, StreamEvent
+from openharness.engine.stream_events import (
+    AssistantTurnComplete,
+    ErrorEvent,
+    StatusEvent,
+    StreamEvent,
+    ToolExecutionCompleted,
+)
 from openharness.hooks import HookEvent
 
 from geoharness.cartography.jobs import begin_map_request
@@ -68,7 +76,7 @@ class GeoQueryEngine(QueryEngine):
             if coordinator_context is not None:
                 query_messages.append(coordinator_context)
             async with aclosing(self._scoped_query_events(
-                run_query(context, query_messages),
+                self._run_query_batches(context, query_messages),
             )) as stream:
                 async for event, usage in stream:
                     # Keep every mutation, including tool results before an empty follow-up.
@@ -87,18 +95,24 @@ class GeoQueryEngine(QueryEngine):
             self._settle_usage()
 
     async def continue_pending(self, *, max_turns: int | None = None) -> AsyncIterator[StreamEvent]:
-        previous_usage = self.total_usage.model_copy()
+        context = QueryContext(
+            api_client=self._api_client, tool_registry=self._tool_registry,
+            permission_checker=self._permission_checker, cwd=self._cwd,
+            model=self._model, system_prompt=self._system_prompt, max_tokens=self._max_tokens,
+            context_window_tokens=self._context_window_tokens,
+            auto_compact_threshold_tokens=self._auto_compact_threshold_tokens,
+            max_turns=max_turns if max_turns is not None else self._max_turns,
+            permission_prompt=self._permission_prompt, ask_user_prompt=self._ask_user_prompt,
+            hook_executor=self._hook_executor, tool_metadata=self._tool_metadata,
+        )
         try:
             async with aclosing(self._scoped_query_events(
-                super().continue_pending(max_turns=max_turns),
+                self._run_query_batches(context, self._messages),
             )) as stream:
-                async for event in stream:
-                    current_usage = self.total_usage.model_copy()
-                    self._ack_usage(UsageSnapshot(
-                        input_tokens=current_usage.input_tokens - previous_usage.input_tokens,
-                        output_tokens=current_usage.output_tokens - previous_usage.output_tokens,
-                    ))
-                    previous_usage = current_usage
+                async for event, usage in stream:
+                    if usage is not None:
+                        self._cost_tracker.add(usage)
+                        self._ack_usage(usage)
                     yield self._diagnose_event(event)
                     if isinstance(event, AssistantTurnComplete):
                         diagnostic = getattr(self._api_client, "last_response_diagnostic", None)
@@ -107,6 +121,88 @@ class GeoQueryEngine(QueryEngine):
                             yield ErrorEvent(message=diagnostic)
         finally:
             self._settle_usage()
+
+    async def _run_query_batches(self, context, messages):
+        """Resume only exhausted batches with new successful work, using the same history.
+
+        A normal stop, provider error, cancellation, or closed consumer never
+        triggers another request. Repeated successful calls do not constitute
+        progress. A fresh failure at the boundary gets a recovery opportunity;
+        repeated failures or a whole batch without new results need intervention.
+        """
+        config = self.tool_metadata.get("geoharness_config")
+        automatic = getattr(getattr(config, "agent", None), "auto_continue", False)
+        seen: set[str] = set()
+        seen_failures: set[str] = set()
+        while True:
+            successful: set[str] = set()
+            failures: dict[str, int] = {}
+            try:
+                async with aclosing(run_query(context, messages)) as stream:
+                    async for event, usage in stream:
+                        if isinstance(event, ToolExecutionCompleted):
+                            fingerprint = self._progress_fingerprint(event)
+                            if event.is_error:
+                                failures[fingerprint] = failures.get(fingerprint, 0) + 1
+                            else:
+                                successful.add(fingerprint)
+                        yield event, usage
+                return
+            except MaxTurnsExceeded:
+                # run_query appends its tool results after yielding the final
+                # ToolExecutionCompleted; preserve that final mutation as well.
+                self._messages[:] = messages
+                if not automatic or not self.has_pending_continuation():
+                    raise
+                last_results = [
+                    block for block in messages[-1].content if isinstance(block, ToolResultBlock)
+                ]
+                repeated_failure = any(
+                    count > 1 or key in seen_failures for key, count in failures.items()
+                )
+                if not successful.difference(seen) or (
+                    all(r.is_error for r in last_results) and repeated_failure
+                ):
+                    yield ErrorEvent(message=(
+                        "自动续跑已停止：本批没有新的成功工具结果，或末组工具重复失败。"
+                        "已保留原任务和全部工具结果，请先处理错误后继续。"
+                    )), None
+                    return
+                seen.update(successful)
+                seen_failures.update(failures)
+                yield StatusEvent(message=(
+                    "本批回合已结束，正在根据已有工具结果自动继续原任务。"
+                )), None
+
+    @staticmethod
+    def _progress_fingerprint(event: ToolExecutionCompleted) -> str:
+        """Count changed results, not fresh run timestamps or repeated read calls."""
+        volatile = {
+            "run_dir", "script_path", "manifest_path", "stdout_path", "stderr_path",
+            "duration_seconds", "elapsed_seconds", "duration_ms",
+        }
+
+        def stable(value):
+            if isinstance(value, dict):
+                return {key: stable(item) for key, item in value.items() if key not in volatile}
+            if isinstance(value, list):
+                return [stable(item) for item in value]
+            return value
+
+        try:
+            output = json.dumps(
+                stable(json.loads(event.output)), sort_keys=True, ensure_ascii=False,
+            )
+        except (TypeError, ValueError):
+            output = event.output
+        if output.startswith("[Tool output truncated]\n"):
+            # OpenHarness adds a fresh call id and artifact path to each preview.
+            # Neither identifies new work. Do not follow paths from tool text.
+            header, separator, preview = output.partition("\n\nPreview:\n")
+            header = re.sub(r"(?m)^(?:Tool use id|Full output saved to):[^\n]*\n?", "", header)
+            output = header + (separator + preview if separator else "")
+        output = re.sub(r"\d{8}T\d{6}Z-[0-9a-f]{12}\b", "<run>", output)
+        return hashlib.sha256(f"{event.tool_name}\n{output}".encode("utf-8")).hexdigest()
 
     async def _scoped_query_events(self, stream):
         """Bind recovery only while advancing/closing, never across a yielded event.

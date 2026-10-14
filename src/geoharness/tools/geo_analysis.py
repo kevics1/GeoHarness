@@ -174,6 +174,11 @@ class GeoAnalysisTool(BaseTool):
             )
             statistics = manifest["statistics"]
             output_path = manifest["paths"]["result"]["geojson"]
+            qgis_inputs = {"layers": [{"file_path": entry["geojson"], "kind": "vector",
+                "name": label, "expected_feature_count": entry["feature_count"],
+                "required": entry["feature_count"] > 0}
+                for label, entry in manifest["paths"].items() if entry.get("geojson")],
+                "analysis_manifests": [manifest["manifest_path"]]}
             return ToolResult(
                 output=(
                     f"{arguments.action}: {statistics['feature_count']} result feature(s); "
@@ -184,6 +189,10 @@ class GeoAnalysisTool(BaseTool):
                     f"Table previews (first {manifest['preview_row_limit']} rows; no geometry): "
                     f"{json.dumps(manifest['table_previews'], ensure_ascii=False)}\n"
                     f"Suggested layers: {json.dumps(manifest['layers'], ensure_ascii=False)}\n"
+                    f"QGIS inputs: {json.dumps(qgis_inputs, ensure_ascii=False)}\n"
+                    "Merge QGIS input layers/manifests from analyses actually mapped. Keep these "
+                    "original paths; use layer.derivation for subsets/fields/annotations, "
+                    "not Python rewrites merely for styling.\n"
                     + ("Empty result persisted successfully.\n" if statistics["feature_count"] == 0
                        else "")
                     + ("Reference scope: " + json.dumps(manifest["reference_scope"],
@@ -192,7 +201,7 @@ class GeoAnalysisTool(BaseTool):
                     + (f"Counting: {manifest['count_semantics']}"
                        if "count_semantics" in manifest else "")
                 ),
-                metadata={**manifest, "output_path": output_path},
+                metadata={**manifest, "output_path": output_path, "qgis_inputs": qgis_inputs},
             )
         except (asyncio.TimeoutError, TimeoutError) as exc:
             cancelled.set()

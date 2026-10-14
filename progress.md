@@ -265,3 +265,12 @@
 - SpatialSource before-validator仅一次json.loads且必须对象，沿用未知字段/唯一定位符/参数校验，覆盖source/reference/zones。read_file(None)明确未选数据而非权限错误，给出已有read_vector/resolve_data恢复提示。
 - 简单验证28项通过（13.30秒），覆盖45列完整展示、真实CSV、DB未知CRS、栅格统计含元数据、一次编码真实面积10000m²、None路径错误。第一次测试假定驱动整数int64，改为核对实际dtype后通过；Ruff/diff通过。实际F:/Desktop/Project/GeoHarness/example/test/数据/预测蔓延范围.shp只读读取返回3要素/6字段/EPSG:4326/准确路径，编码参数解析成功。独立快速只读审查两项覆盖缺口补齐后clear，未运行全量测试、模型或整图流程。
 - 最终wheel已安装，81模块与源码逐文件一致；安装版对同一蔓延数据只读load，路径可见、3要素、JSON source解码均通过。未改原始数据/.env.example/模型或凭证。
+
+### 读取契约与首次调用改进（2026-10-14）
+
+- 逐层编码：新增声明解析，共享到FileLoader/load/inspect/profile/DATA_REFS/read_vector；Shapefile采信合法.cpg，JSON用格式编码，缺失声明明确unknown。两个真实不同编码测试通过；已单独提交153f708。
+- 工具规则：颜色rgba转Qt ARGB；显式点/线标签方式在原生启动前检查，derivation先筛选再检查；plan_ref拒绝时列出冗余字段，工具描述给出规则。Python解码失败提示回到逐层元数据和注册读取入口。
+- 原生分析提供可合并qgis_inputs（真实图层路径/要素计数/清单），保留现有来源核验。详图zoom拒绝提供实际纸面尺寸/范围/CRS/比例尺与尺寸或候选范围建议，候选必须重新检查主体覆盖。
+- agent.auto_continue默认true：40回合为单批，有新成功结果自动用同一历史继续；无进展或末组重复失败停下，网络/API/取消保留停止，不重放成功工具。独立审查指出长输出随机包装误算进展和筛选前几何误拒，两处均修复；不跟随回执中的文件路径。
+- 按用户要求仅简单验证：编码/规则/原生诊断7项（10.87秒），续跑/恢复22项（14.66秒）；审查修复后相关15项（10.45秒），ruff/diff通过。未运行全量、模型请求或业务整图。
+- wheel已构建并全局安装，SHA256 f0064f2221be12e7ae173470d345fcb2135c50bf8371b1fbf67fe6c1a20d1205；83模块/34技能文件与源码逐字节一致。安装版只读读取用户实际火灾事件GBK与行政UTF-8，路径/编码可见、read_vector正确取回中文县名；rgba及auto_continue默认值通过。不修改用户原数据、旧地图、模型、凭证及.env.example既有修改。

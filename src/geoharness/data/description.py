@@ -14,6 +14,9 @@ def describe_source(detail: dict[str, Any], *, kind: str) -> str:
         lines.append(f"  Path: {detail.get('path') or 'unknown'}")
     lines.append(f"  Format: {detail.get('format') or 'unknown'}")
     lines.append(f"  CRS: {detail.get('crs') or 'unknown'}")
+    if kind == "vector" and detail.get("geometry_type"):
+        lines.append("  Labels: prefer placement=auto; around_point/over_point only for points, "
+                     "parallel for lines, horizontal for polygons.")
     for key in ("crs_note", "note"):
         if detail.get(key):
             lines.append(f"  Note: {detail[key]}")

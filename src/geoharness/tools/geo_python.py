@@ -98,6 +98,10 @@ def registered_review_files(
 
 def python_recovery_hints(code: str, stderr: str) -> list[str]:
     hints = []
+    if "UnicodeDecodeError" in stderr or "couldn't be converted correctly" in stderr:
+        hints.append("Text encoding is per layer. Inspect its encoding/encoding_source or "
+                     "use read_vector(name/ref), which uses the registered encoding. "
+                     "Do not force UTF-8 or GBK across all shapefiles.")
     if "No vector source selected" in stderr:
         hints.append("No dataset was selected; this is not a filesystem permission failure. "
                      "Use read_vector(name/ref) or resolve_data(name/ref) from DATA_REFS. "

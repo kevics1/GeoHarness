@@ -6,6 +6,8 @@ api_key: local
 mcp: {}
 agent:
   max_tokens: 16384
+  # Continue exhausted batches when successful tool results show new progress.
+  auto_continue: true
   # Set false only if the provider rejects stream_options.include_usage.
   include_stream_usage: true
   request_extra_body: {}

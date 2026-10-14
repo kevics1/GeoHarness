@@ -16,6 +16,7 @@ from geoharness.cartography.derivation import MapDerivation, derive_frame
 from geoharness.cartography.retry_guard import guard_map_errors
 from geoharness.cartography.snapshot import FrozenQgisInputs, freeze_qgis_inputs
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_map_render
+from geoharness.qgis.colors import normalize_color
 from geoharness.tools.geo_qgis import qgis_read_roots
 
 
@@ -24,7 +25,8 @@ class QgisCategory(BaseModel):
 
     value: str | int | float | bool | None
     label: str = ""
-    color: str = Field(description="Explicit QGIS/HTML color for this category, e.g. #d73027.")
+    color: str = Field(description="Use #RRGGBB, e.g. #d73027; rgba is normalized to Qt ARGB.")
+    _color = field_validator("color")(normalize_color)
     size_mm: float | None = Field(default=None, gt=0, le=50)
     width_mm: float | None = Field(default=None, ge=0, le=20)
 
@@ -36,6 +38,7 @@ class QgisRange(BaseModel):
     upper: float = Field(allow_inf_nan=False)
     label: str = ""
     color: str
+    _color = field_validator("color")(normalize_color)
     size_mm: float | None = Field(default=None, gt=0, le=50)
     width_mm: float | None = Field(default=None, ge=0, le=20)
 
@@ -62,6 +65,7 @@ class QgisVectorStyle(BaseModel):
     size_mm: float = Field(default=3, gt=0, le=50)
     width_mm: float = Field(default=0.3, ge=0, le=20)
     outline_color: str = "#ffffff"
+    _colors = field_validator("color", "outline_color")(normalize_color)
     obstacle: bool | None = Field(default=None, description=(
         "Optional PAL labeling obstacle, including unlabeled lines/polygons. None keeps "
         "the normal behavior; True protects this geometry from other layers' labels."
@@ -104,7 +108,10 @@ class QgisLabelStyle(BaseModel):
     color: str = "#222222"
     buffer_size_mm: float = Field(default=0.8, ge=0, le=5)
     buffer_color: str = "#ffffff"
-    placement: Literal["auto", "around_point", "over_point", "parallel", "horizontal"] = "auto"
+    placement: Literal["auto", "around_point", "over_point", "parallel", "horizontal"] = Field(
+        default="auto", description="Prefer auto. around_point/over_point need Point/MultiPoint; "
+        "parallel requires LineString/MultiLineString; horizontal supports polygon labels.")
+    _colors = field_validator("color", "buffer_color")(normalize_color)
     distance_mm: float = Field(default=1.5, ge=0, le=20, description=(
         "Distance from the point for around_point placement; over_point ignores this value."
     ))
@@ -346,7 +353,9 @@ class GeoQgisProjectInput(BaseModel):
     map_id: str = Field(default="", description="Stable logical map ID across versions and tools.")
     analysis_manifests: list[str] = Field(
         default_factory=list, max_length=8,
-        description="Native analysis manifests used to derive verified statistics and methods.",
+        description="Only manifests whose original outputs (or verified layer.derivation) "
+                    "are actually mapped. Omit to infer from mapped native paths; do not attach "
+                    "unrelated statistics or Python-rewritten copies.",
     )
 
     @field_validator("layers", mode="before")
@@ -377,8 +386,9 @@ class GeoQgisProjectInput(BaseModel):
     def validate_action(self) -> GeoQgisProjectInput:
         if self.plan_ref:
             if self.action != "create" or self.model_fields_set - {"action", "plan_ref"}:
+                extra = sorted(self.model_fields_set - {"action", "plan_ref"})
                 raise ValueError("plan_ref create accepts only action and plan_ref; "
-                                 "preflight changes first")
+                                 f"remove extra fields {extra}; preflight changes first")
             return self
         if self.action in {"create", "preflight"}:
             if not self.layers:
@@ -455,6 +465,8 @@ class GeoQgisProjectTool(BaseTool):
         " Preflight with layout returns plan_ref and an exact readable report_path; "
         "create with only action+plan_ref avoids repeating checked layer arrays/layout_plan. "
         "file_path accepts registered data: references; stale/unknown references are rejected."
+        " Prefer placement=auto; point placements require point geometry. Colors use "
+        "#RRGGBB or Qt names; CSS rgba is normalized, not passed literally to QColor."
     )
     input_model = GeoQgisProjectInput
 
@@ -791,6 +803,17 @@ class GeoQgisProjectTool(BaseTool):
                 gdf = gpd.read_file(path, **({"layer": name} if name else {}))
                 if layer.derivation is not None and snapshot is None:
                     gdf = derive_frame(gdf, layer.derivation)
+                if layer.label_field and layer.label_style:
+                    placement = layer.label_style.placement
+                    types = set(gdf.geom_type.dropna())
+                    allowed = ({"Point", "MultiPoint"} if placement in {
+                        "around_point", "over_point"} else {"LineString", "MultiLineString"}
+                        if placement == "parallel" else None)
+                    if allowed is not None and types and not types <= allowed:
+                        raise ValueError(f"layers[{index}].label_style.placement={placement!r} "
+                            f"requires {sorted(allowed)}, got {sorted(types)} on "
+                            f"{common['label']!r}; use placement='auto' "
+                            "or 'horizontal' for polygons")
                 if snapshot:
                     from geoharness.cartography.values import TEMPORAL_FIELDS
 

@@ -61,6 +61,9 @@ class AgentConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     max_tokens: int = Field(default=16384, ge=1024, le=65536)
+    auto_continue: bool = Field(default=True, description=(
+        "Continue pending tool results after a turn batch when new successful progress exists."
+    ))
     internal_todo_path: str = ".geoharness/tasks/TODO.md"
     include_stream_usage: bool = True
     request_extra_body: dict[str, Any] = Field(default_factory=dict)

@@ -1248,11 +1248,72 @@ def _create_layout(
     if minimum_zoom is not None and detail is not None:
         zoom = map_item.scale() / detail.scale()
         if zoom + 1e-6 < minimum_zoom:
-            raise ValueError(f"detail frame is not magnified enough (zoom={zoom:.3f}, "
-                             f"required={minimum_zoom}); use a smaller subject or larger frame")
+            error = ValueError(f"detail frame is not magnified enough (zoom={zoom:.3f}, "
+                               f"required={minimum_zoom}); use the measured frame/scale "
+                               "diagnostics; preserve all required subjects")
+            error.diagnostics = _detail_zoom_diagnostics(map_item, detail, minimum_zoom)
+            raise error
     _validate_layout_bounds(layout)
     project.layoutManager().addLayout(layout)
     return layout
+
+
+def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> dict[str, Any]:
+    """Describe a failed paper-scale constraint without changing either map's coverage."""
+    def facts(item: Any) -> dict[str, Any]:
+        rect, extent = item.rect(), item.extent()
+        return {
+            "scale_denominator": item.scale(),
+            "frame_mm": {"width": rect.width(), "height": rect.height()},
+            "extent": [extent.xMinimum(), extent.yMinimum(),
+                       extent.xMaximum(), extent.yMaximum()],
+            "crs": item.crs().authid() or item.crs().toWkt(),
+        }
+
+    main_facts, detail_facts = facts(main), facts(detail)
+    zoom = main.scale() / detail.scale()
+    factor = required_zoom / zoom
+    bounds = detail_facts["extent"]
+    center_x, center_y = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
+    half_width = (bounds[2] - bounds[0]) / factor / 2
+    half_height = (bounds[3] - bounds[1]) / factor / 2
+    return {
+        "code": "detail_zoom_insufficient",
+        "actual_zoom": zoom,
+        "required_zoom": required_zoom,
+        "target_detail_scale_denominator": main.scale() / required_zoom,
+        "frames": {"main_map": main_facts, "detail_map": detail_facts},
+        "suggestions": [
+            {
+                "strategy": "enlarge_detail_frame",
+                "detail_frame_mm": {
+                    "width": detail.rect().width() * factor,
+                    "height": detail.rect().height() * factor,
+                },
+                "assumptions": "Keep the measured main frame and both extents unchanged; "
+                               "grow/rearrange the page to fit this detail frame, then preflight.",
+            },
+            {
+                "strategy": "smaller_detail_extent_if_subjects_fit",
+                "parameter": "layout.detail_extent",
+                "candidate_extent": {
+                    "xmin": center_x - half_width, "ymin": center_y - half_height,
+                    "xmax": center_x + half_width, "ymax": center_y + half_height,
+                },
+                "crs": detail_facts["crs"],
+                "automatic_application": False,
+                "also_clear_if_present": "layout.detail_frame.focus_layers",
+                "required_check": "Candidate assumes unchanged measured frames/main scale. "
+                                  "Verify every required subject remains covered before using; "
+                                  "do not crop subjects to satisfy zoom. Preflight again.",
+            },
+            {
+                "strategy": "separate_detail_map",
+                "instruction": "If required subjects do not fit, retain their coverage and "
+                               "create a larger or separate detail map instead of cropping.",
+            },
+        ],
+    }
 
 
 def _wrap_label_text(label: Any, text: str, width: float) -> str:
