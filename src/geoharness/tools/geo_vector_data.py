@@ -17,6 +17,7 @@ from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
 from geoharness.data.description import describe_source
+from geoharness.data.encoding import source_encoding
 from geoharness.data.profiles import (
     CRS_OPERATION_HINT,
     file_signature,
@@ -195,6 +196,8 @@ class GeoVectorDataTool(BaseTool):
             "geometry_type": ", ".join(str(t) for t in gdf.geom_type.dropna().unique()[:8]),
             "_measured_file_stat": signature,
         }
+        if path is not None:
+            detail.update(source_encoding(path))
         profile = make_profile(detail, kind="vector")
         return ToolResult(
             output=(

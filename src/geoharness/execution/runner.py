@@ -661,7 +661,9 @@ def _data_helpers(references: dict[str, Any]) -> dict[str, Any]:
         record = record_for(ref)
         if record.get("kind") != "vector":
             raise ValueError("read_vector requires a registered vector data ref")
-        frame = gpd.read_file(record["path"])
+        encoding = record.get("encoding")
+        options = {"encoding": encoding} if encoding and encoding != "unknown" else {}
+        frame = gpd.read_file(record["path"], **options)
         record_for(ref)  # A read must not attach old metadata to a changed file.
         if target_crs is not None:
             if frame.crs is None:

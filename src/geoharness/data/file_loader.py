@@ -14,6 +14,7 @@ from typing import Any
 
 from geoharness._proj_fix import ensure_proj_data
 from geoharness.data.catalog import DataSource
+from geoharness.data.encoding import source_encoding, vector_read_options
 from geoharness.data.profiles import file_signature, profile_key
 
 # Repair a stale system PROJ_LIB before geopandas initialises PROJ (first
@@ -165,6 +166,7 @@ class FileLoader:
             "path": str(path),
             "size_bytes": path.stat().st_size if path.exists() else 0,
         }
+        info.update(source_encoding(path))
 
         try:
             import geopandas as gpd  # type: ignore[import-untyped]
@@ -183,7 +185,7 @@ class FileLoader:
                 info["note"] = "CSV requires coordinate column specification"
                 return info
 
-            gdf = gpd.read_file(path)
+            gdf = gpd.read_file(path, **vector_read_options(info))
             info["crs"] = str(gdf.crs) if gdf.crs else "unknown"
             info["columns"] = list(gdf.columns)
             info["schema"] = {str(name): str(dtype) for name, dtype in gdf.dtypes.items()}
@@ -230,7 +232,7 @@ class FileLoader:
         if not path.is_absolute():
             path = self._file_dir / path
 
-        gdf = gpd.read_file(path)
+        gdf = gpd.read_file(path, **vector_read_options(source_encoding(path)))
         if gdf.crs is None:
             gdf.set_crs("EPSG:4326", inplace=True)
 
@@ -331,7 +333,7 @@ class FileLoader:
         path = self._find_file(name)
         if path is None:
             raise ValueError(f"File not found: {name!r}")
-        gdf = gpd.read_file(path)
+        gdf = gpd.read_file(path, **vector_read_options(source_encoding(path)))
         if not isinstance(gdf, gpd.GeoDataFrame):
             raise ValueError(
                 "File has no spatial geometry; read attribute tables with geo_python/pandas "

@@ -24,6 +24,8 @@ def describe_source(detail: dict[str, Any], *, kind: str) -> str:
                  + str(bounds if bounds is not None else "unknown"))
     for key, label in (
         ("size_bytes", "File size (bytes)"),
+        ("encoding", "Encoding"), ("encoding_source", "Encoding source"),
+        ("encoding_status", "Encoding status"),
         ("geometry_type", "Geometry"), ("feature_count", "Features"), ("row_count", "Rows"),
         ("row_limit", "Loaded row limit"), ("width", "Width (px)"), ("height", "Height (px)"),
         ("band_count", "Bands"), ("dtype", "Pixel dtype"), ("dtypes", "Band dtypes"),

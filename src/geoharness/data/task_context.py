@@ -157,7 +157,8 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                       "name": item.get("name") or path.name, "signature": signature,
                       "producer": "measured_source" if source else item["producer"]}
             if source:
-                for key in ("crs", "feature_count", "geometry_type", "schema"):
+                for key in ("crs", "feature_count", "geometry_type", "schema",
+                            "encoding", "encoding_source", "encoding_status"):
                     if key in item:
                         record[key] = item[key]
             else:
@@ -285,6 +286,8 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
         "data_refs is the exact DATA_REFS snapshot used by geo_python. Prefer resolve_data(ref), "
         "read_vector(ref, target_crs=None), or native_layer(ref, derivation=None) "
         "over path guesses. "
+        "Each layer may use a different declared encoding; read_vector(ref) uses that layer's "
+        "registered encoding. Never force one encoding across all files. "
         "DATA_REFS is dict[stable_id, record]; each record has name/path/ref. Names are "
         "not contained in the opaque ID keys. read_vector('unique registered name') works "
         "directly, without a custom lookup or guessed DATA_DIRS subfolder. "

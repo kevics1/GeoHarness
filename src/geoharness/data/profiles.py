@@ -114,6 +114,9 @@ def make_profile(detail: dict[str, Any], *, kind: str) -> dict[str, Any] | None:
     if bbox is not None:
         profile["bbox"] = bbox
     if kind == "vector":
+        for field in ("encoding", "encoding_source", "encoding_status"):
+            if field in detail:
+                profile[field] = str(detail[field])[:_MAX_TEXT]
         geometry_type = detail.get("geometry_type")
         if geometry_type and geometry_type != "unknown":
             profile["geometry_type"] = str(geometry_type)[:_MAX_TEXT]
