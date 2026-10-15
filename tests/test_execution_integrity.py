@@ -63,6 +63,11 @@ gpd.GeoDataFrame(attrs, geometry=frame.geometry.values, crs=frame.crs).to_file('
     assert 'Entity/geometry mismatch' in bad['stderr']
     assert all(f['state'] == 'failed' for f in bad['files'])
     assert json.loads(open(bad['manifest_path'], encoding='utf-8').read())['status'] == 'failed'
+    partial = __import__('pathlib').Path(bad['run_dir']) / 'partial.csv'
+    consumed = await execute_python(
+        code=f'import pandas as pd\npd.read_csv({str(partial)!r})', **kwargs)
+    assert consumed['status'] == 'failed'
+    assert 'partial outputs are inspection-only' in consumed['stderr']
 
 
 @pytest.mark.asyncio

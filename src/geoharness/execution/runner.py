@@ -424,11 +424,26 @@ def _install_guards(spec: dict[str, Any], tracker: Any = None) -> None:
     # GDAL performs native I/O without Python open audit events. Wrap the supported
     # public entry points in addition to the Python-level checks.
     import geopandas
+    import pandas
     import rasterio
     import rasterio.shutil
 
     original_read = geopandas.read_file
     original_to_file = geopandas.GeoDataFrame.to_file
+
+    def guarded_table_reader(original):
+        @wraps(original)
+        def read(filepath_or_buffer, *args, **kwargs):
+            if isinstance(filepath_or_buffer, (str, os.PathLike)):
+                filepath_or_buffer = checked_native_path(filepath_or_buffer)
+                _artifact_contracts().assert_usable_artifact(filepath_or_buffer)
+            # In-memory buffers remain usable for explicit diagnostic inspection.
+            return original(filepath_or_buffer, *args, **kwargs)
+
+        return read
+
+    pandas.read_csv = guarded_table_reader(pandas.read_csv)
+    pandas.read_table = guarded_table_reader(pandas.read_table)
     original_raster_open = rasterio.open
 
     def checked_native_path(
