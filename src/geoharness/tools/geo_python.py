@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_python_render
 from geoharness.config.settings import CartographyConfig, ExecutionConfig, GeoConfig
@@ -98,10 +98,33 @@ def registered_review_files(
 
 def python_recovery_hints(code: str, stderr: str) -> list[str]:
     hints = []
+    if any(text in stderr for text in ('FileNotFoundError', 'does not exist in the file system',
+                                      'No such file or directory')):
+        hints.append('Use exact DATA_REFS/returned paths, preserving Unicode punctuation. '
+                     'For prior outputs set input_refs and read INPUTS[alias]; each call has '
+                     'a new working directory. Do not reconstruct filenames or run timestamps.')
+    if 'Entity/geometry mismatch' in stderr:
+        hints.append('Keep attributes and geometry in one GeoDataFrame while sorting/filtering. '
+                     'Join new statistics with entity_join(source, table, key="unique_id"). '
+                     'Do not reconstruct geometry by positional .values.')
+    if 'cannot convert float NaN to integer' in stderr:
+        hints.append('Check empty geometries and finite bounds before window/index conversion. '
+                     'For point sampling use sample_raster_points; Point.buffer(0) is empty.')
+    if 'ModuleNotFoundError' in stderr:
+        hints.append('Use installed libraries or the native QGIS tools; unavailable optional '
+                     'packages must not be assumed or installed by the analysis script.')
+    if 'KeyError:' in stderr or 'not in index' in stderr:
+        hints.append('Inspect the actual schema of this intermediate table, including merge '
+                     'suffixes and selected columns. A source field need not survive every step.')
+    if 'CRS mismatch' in stderr:
+        hints.append('Transform an existing GeoDataFrame with to_crs(target); do not assign a '
+                     'different crs to a CRS-bearing GeometryArray. Never relabel projected '
+                     'coordinates as longitude/latitude.')
     if "NameError:" in stderr and "is not defined" in stderr:
         hints.append("Each geo_python call starts fresh: define/import every function and "
-                     "variable in this script. Only resolve_data, read_vector, native_layer "
-                     "and mask_raster are injected GIS helpers; earlier scripts do not "
+                     "variable in this script. resolve_data, read_vector, native_layer, "
+                     "mask_raster, entity_join, score_risk and sample_raster_points are injected; "
+                     "earlier scripts do not "
                      "supply definitions to this run.")
         if "name 'print_stats' is not defined" in stderr:
             hints.append("print_stats is not provided. Call geo_raster_data action=stats as "
@@ -175,6 +198,22 @@ class GeoPythonInput(BaseModel):
     timeout_seconds: float | None = Field(
         default=None, gt=0, description="Optional timeout no greater than the configured maximum."
     )
+    input_refs: dict[str, str] = Field(default_factory=dict, max_length=64,
+        description="Named exact DATA_REFS IDs or returned artifact paths. Injected as "
+        "INPUTS[name]: Path; use for CSV/GeoPackage dependencies across fresh runs.")
+    expected_outputs: list[str] = Field(default_factory=list, max_length=64,
+        description="Relative output files required for stage success; missing files fail.")
+    stage_id: str = Field(default='', pattern=r'^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63})?$',
+        description="Stable analysis step ID, reused after fixes; stores trusted completion.")
+    depends_on: list[str] = Field(default_factory=list, max_length=32,
+        description="Prior successful stage IDs whose unchanged artifacts this step requires.")
+
+    @field_validator('expected_outputs')
+    @classmethod
+    def output_paths(cls, value):
+        from geoharness.execution.stages import validate_expected_outputs
+
+        return validate_expected_outputs(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -214,12 +253,15 @@ class GeoPythonTool(BaseTool):
         "Use read_vector('a unique registered name') directly, without a custom name lookup. "
         "read_vector applies each layer's registered encoding; do not force one encoding "
         "across shapefiles. Each call starts a fresh Python process: import/define everything "
-        "used. The injected GIS helpers are resolve_data, read_vector, native_layer and "
-        "mask_raster; print_stats does not exist. Use geo_raster_data action=stats as a "
+        "used. Injected helpers include resolve_data, read_vector, native_layer, "
+        "mask_raster, entity_join, score_risk and sample_raster_points. "
+        "print_stats does not exist. Use geo_raster_data action=stats as a "
         "separate tool or implement statistics with imported rasterio/numpy. "
         "Stable IDs bind measured sources and actual producer outputs; "
         "resolve_data(ref) returns their original Path and read_vector(ref, target_crs=None) "
         "reads vectors with optional CRS transformation. Unique registered names/paths work; "
+        "read_vector adds a Python-only stable __geoh_id column for key-based joins; "
+        "it does not change original files or native_layer's source schema. "
         "unknown, ambiguous, changed or deleted refs are rejected. native_layer(ref, "
         "derivation=None, name=None, style=None, label_field=None, label_style=None, "
         "layer_name=None) creates a native layer specification retaining its original source "
@@ -241,6 +283,14 @@ class GeoPythonTool(BaseTool):
         "for other installed GIS operations use geo_qgis search then help then run. "
         "Use relative output filenames or RUN_DIR / filename. Network and subprocesses "
         "are unavailable. Returns script, manifest, stdout/stderr and generated file paths. "
+        "Use input_refs={alias: exact_ref_or_path}, then INPUTS[alias] for cross-run CSV/files. "
+        "Declare expected_outputs, stage_id and depends_on for analysis steps. "
+        "entity_join(source, table, key='id') joins attributes safely. "
+        "score_risk(frame,key='id',components=[{field,weight,minimum,maximum,direction}], "
+        "missing_policy='error'|'unknown') computes an explicit assumed weighted score; "
+        "weights sum to 1, direction is higher/lower; no scientific validity is implied. "
+        "sample_raster_points(path, points, band=1) transforms CRS and returns values/NaN; "
+        "use it instead of Point.buffer(0). "
         "Inspect results and send generated PNG maps to geo_map_review before delivery. "
         "Application guards are not an OS sandbox; run only trusted analysis code."
     )
@@ -273,6 +323,28 @@ class GeoPythonTool(BaseTool):
             return ToolResult(
                 output="Error: Python execution is disabled or unconfigured.", is_error=True
             )
+        from geoharness.data.artifacts import assert_usable_artifact
+        from geoharness.data.task_context import resolve_registered_path
+        from geoharness.execution.stages import prepare_stage
+
+        inputs, stage_fingerprint = {}, ''
+        try:
+            if arguments.depends_on and not arguments.stage_id:
+                raise ValueError('depends_on requires stage_id')
+            for alias, value in arguments.input_refs.items():
+                value = resolve_registered_path(value, context.metadata,
+                                                cwd=Path(context.cwd), config=config)
+                path = Path(value)
+                path = (path if path.is_absolute() else context.cwd / path).resolve()
+                assert_usable_artifact(path)
+                inputs[alias] = str(path)
+            if arguments.stage_id:
+                stage_fingerprint = prepare_stage(context.metadata,
+                    stage_id=arguments.stage_id, dependencies=arguments.depends_on,
+                    code=arguments.code, inputs=inputs, expected_outputs=arguments.expected_outputs)
+        except (OSError, ValueError) as exc:
+            return ToolResult(output=f'Precondition failed; no script executed: {exc}',
+                              is_error=True, metadata={'script_executed': False})
         timeout = arguments.timeout_seconds or execution.timeout_seconds
         if timeout > execution.timeout_seconds:
             return ToolResult(
@@ -345,6 +417,8 @@ class GeoPythonTool(BaseTool):
                 data_profiles=profiles,
                 data_refs=references,
                 previous_outputs=tuple(Path(item["path"]) for item in outputs),
+                input_artifacts=inputs,
+                expected_outputs=tuple(arguments.expected_outputs),
             )
         except (OSError, ValueError) as exc:
             if reserved:
@@ -360,6 +434,12 @@ class GeoPythonTool(BaseTool):
             else ("succeeded" if result["exit_code"] == 0 else "failed")
         )
         result = {"status": status, **result}
+        if arguments.stage_id:
+            from geoharness.execution.stages import finish_stage
+
+            result['stage'] = finish_stage(context.metadata, stage_id=arguments.stage_id,
+                                           fingerprint=stage_fingerprint, result=result,
+                                           dependencies=arguments.depends_on)
         result["execution_contract"] = {
             "SOURCE_CWD": "Path", "RUN_DIR": "Path", "DATA_DIRS": "list[Path]",
             "DATA_DIRS_environment": "str separated by os.pathsep",
@@ -372,6 +452,8 @@ class GeoPythonTool(BaseTool):
             "DATA_REFS": "Same frozen ref records provided to the model; stale refs rejected",
             "resolve_data": "ref -> original Path; stable ID or unique registered name/path",
             "read_vector": "ref, target_crs=None -> GeoDataFrame; no guessed source CRS",
+            "INPUTS": "dict[alias, Path] from verified input_refs; use across calls",
+            "entity_join": "source, table, key=... -> key-joined GeoDataFrame; never positional",
             "projection": "Reproject GeoDataFrame/GeoSeries, not iterrows() pandas Series rows",
             "native_layer": "ref, derivation=None -> layer retaining original source/provenance",
             "mask_raster": "CRS-aware GeoSeries/GeoDataFrame masking -> (array, Affine transform); "
@@ -383,6 +465,9 @@ class GeoPythonTool(BaseTool):
             lines = result["stderr"].strip().splitlines()
             result["error_summary"] = lines[-1][:500] if lines else status
             result["recovery_hints"] = python_recovery_hints(arguments.code, result["stderr"])
+            from geoharness.execution.stages import classify_failure
+
+            result['failure'] = classify_failure(result['stderr'])
         # Keep the actual cause visible before long run paths/tracebacks are collapsed.
         visible = result if status == "succeeded" else {
             key: result[key] for key in ("status", "error_summary", "recovery_hints")

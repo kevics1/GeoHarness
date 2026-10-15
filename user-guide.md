@@ -4,6 +4,22 @@
 
 本版本保留本地矢量/栅格及 QGIS 分析制图能力；暂不提供在线天地图瓦片下载工具。
 
+## 分析、引用与制图的执行契约
+
+数据加载返回的 `data:` 引用包含实际路径、生产者、内容版本、状态及已测的 schema/CRS。不同运行的 `result` 不可混用；优先使用精确引用或完整返回路径。已知失败、超时或部分完成运行的文件可用于排错，但不能作为已完成的分析成果进入制图或交付。普通原始数据不要求具有生产者清单。
+
+`geo_python` 每次运行仍是独立进程。跨步骤文件使用 `input_refs={"residents":"实际返回的引用或路径"}`，脚本通过 `INPUTS["residents"]` 读取。`expected_outputs=["risk.csv"]` 声明必须实际生成的相对文件。可用稳定 `stage_id` 与 `depends_on=["上一步ID"]` 建立依赖；前置失败、文件被修改或依赖版本变化会拒绝后续步骤。修复代码后复用原阶段名，不需要重跑无关的成功分析。运行、日志、文件存在与科学分析正确是不同的检查维度。
+
+执行前会检查语法及直接顶层导入的依赖；这不是对任意 Python 的完整静态验证。写出矢量时检查 CRS、有限有效几何及可识别的 ID/名称与源几何的对应关系。`read_vector` 为 Python 数据副本补充稳定的 `__geoh_id` 行标识，不修改源文件，也不改变 `native_layer` 引用的原始字段。排序时保留 GeoDataFrame 的几何列；需要合并统计时，使用 `entity_join(source, table, key="__geoh_id")` 或已有唯一ID，不要将排序后的属性与旧 `geometry.values` 按位置拼接。无法识别稳定键或几何已派生时，对象关联保持未验证；只覆盖部分对象时明确记录部分检查。GeoPandas 的 GeoJSON 写出统一转换到 EPSG:4326；需要保存米制坐标时使用 GeoPackage。原始输入不会被转换覆盖。
+
+`sample_raster_points(path, points, band=1)` 用带 CRS 的点图层采样，返回数值或 NaN；不要用 `Point.buffer(0)` 构造采样窗口。`score_risk(frame, key="id", components=[...], missing_policy="error")` 提供显式的加权评分：每项填写 `field/weight/minimum/maximum/direction`，方向为 `higher` 或 `lower`，权重和必须为1。缺失值可显式选择 `unknown`，不会当作零风险。该函数保留对象几何，只验证计算约束，不证明权重、人口估算或风险模型具有科学有效性。
+
+`geo_accessibility` 提供道路网络可达性分析。输入道路、居民点、避难所及各自唯一非空 ID 字段；明确双向道路假设，或提供方向字段及每种取值的 `forward/reverse/both/closed` 映射，同时明确速度、最大吸附距离与米制投影。可选择具体时次的危险区域，排除与危险区域相交的路段、端点和连接线。输出逐居民点状态、原因、可达避难所数、完整路线和方法假设；距离包括端点连接线，时间分别使用道路与连接线速度。仅连接具有相同 XY 顶点的道路，不自动处理未打断交叉线或猜测桥梁层级。当前目标是最短总距离，容量保留为属性，不进行容量分配或最短时间优化。
+
+QGIS 地图可以分步配置：先 `geo_qgis_project(action="spec", title="专题图")` 保存草案，再用返回的 `spec_ref` 与 `patches=[{"path":["layers",0],"value":{"file_path":"实际路径","style":{"color":"#cc3300"}}}]` 逐层增加或修改。补全后以 `action="preflight", spec_ref=...` 进行实际数据和布局检查，再仅用 `action="create", plan_ref=...` 创建。不要在 `plan_ref` 创建时再次提交标题、格式或地图ID；改变配置需重新预检。
+
+同一地图框的显式范围与 `focus_layers` 自动聚焦互斥。名单表的 `fields[0]` 必须是唯一非空键；`columns` 指并排的完整表格数，而不是属性字段数。只显示前N项时必须明确 `top_n` 与 `sort_by`，也可用 `keys` 精确选择；不选择则保留全部。`placement="auto"` 在实测空间不足时自动增添名单页，`pages` 直接分页，`inline` 要求全部放在主页面。完整名单另存 `roster_full.csv`，名单页保留在可编辑工程中并导出页预览；主地图 PNG 对应工程的第1页。空间不足会返回实际行数、容量和尺寸，不通过静默删行解决。地图生成仍无版数上限；相同失败输入不变时应先修正，不机械重复执行。
+
 ## 配置与启动
 
 `config.example.yaml` 使用本轮已验证的服务：

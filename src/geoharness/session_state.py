@@ -486,6 +486,8 @@ def _checkpoint(metadata: dict[str, Any], cwd: Path, config: GeoConfig) -> dict[
         "map_deterministic_errors": _errors(metadata.get("map_deterministic_errors"), secrets),
         "geo_request_failures": _request_failures(metadata.get("geo_request_failures"), secrets),
         "geo_query_recovery": _query_mode(metadata.get("geo_query_recovery"), config),
+        "analysis_workflow_state": _analysis_stages(
+            metadata.get("analysis_workflow_state"), secrets),
     }
     serialized = json.dumps(result, ensure_ascii=False, allow_nan=False)
     if any(secret in serialized for secret in secrets):
@@ -494,6 +496,22 @@ def _checkpoint(metadata: dict[str, Any], cwd: Path, config: GeoConfig) -> dict[
         raise ValueError("Geo checkpoint contains a credential in an identity")
     if len(serialized.encode()) > MAX_CHECKPOINT_BYTES:
         raise ValueError("Geo session checkpoint exceeds its size limit")
+    return result
+
+
+def _analysis_stages(value: Any, secrets: tuple[str, ...]) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for name, record in list(value.items())[-64:]:
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', name)
+                or not isinstance(record, dict) or not _digest(record.get('fingerprint'))
+                or record.get('status') not in {'succeeded', 'failed', 'timed_out'}):
+            continue
+        copied = _safe_json(record, secrets)
+        if isinstance(copied, dict):
+            # Dependency use rechecks the actual producer and every file hash.
+            result[name] = copied
     return result
 
 
@@ -533,6 +551,7 @@ def restore_geo_session_state(
         errors = _errors(checkpoint.get("map_deterministic_errors"), secrets)
         failures = _request_failures(checkpoint.get("geo_request_failures"), secrets)
         recovery = _query_mode(checkpoint.get("geo_query_recovery"), config)
+        analysis_stages = _analysis_stages(checkpoint.get('analysis_workflow_state'), secrets)
     except (ValueError, TypeError, OverflowError, RecursionError):
         return False
     # Commit only after validation; alias references inside workflow still point
@@ -543,6 +562,7 @@ def restore_geo_session_state(
     metadata["map_deterministic_errors"] = errors
     metadata["geo_request_failures"] = failures
     metadata["geo_query_recovery"] = recovery
+    metadata['analysis_workflow_state'] = analysis_stages
     return True
 
 

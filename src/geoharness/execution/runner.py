@@ -24,6 +24,34 @@ from typing import Any
 from uuid import uuid4
 
 
+def _contracts():
+    # The isolated child executes this file directly, without the source package
+    # on sys.path. Load only its adjacent trusted implementation before guards.
+    import importlib.util
+
+    name = "_geoharness_execution_contracts"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).with_name("contracts.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def _artifact_contracts():
+    import importlib.util
+
+    name = '_geoharness_artifact_contracts'
+    if name not in sys.modules:
+        path = Path(__file__).parent.parent / 'data' / 'artifacts.py'
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def _child_environment(run_dir: Path) -> dict[str, str]:
     """Pass only runtime essentials; never copy the parent's credential environment."""
     result = {
@@ -86,6 +114,8 @@ async def execute_python(
     data_profiles: dict[str, Any] | None = None,
     data_refs: dict[str, Any] | None = None,
     previous_outputs: tuple[Path, ...] = (),
+    input_artifacts: dict[str, str] | None = None,
+    expected_outputs: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Save and execute a script, returning and persisting its reproducibility record."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
@@ -101,6 +131,7 @@ async def execute_python(
     run_dir.mkdir()
     script = run_dir / "analysis.py"
     script.write_text(code, encoding="utf-8")
+    script_sha256 = hashlib.sha256(script.read_bytes()).hexdigest()
     read_roots = [str(cwd)]
     if data_dir is not None:
         data_dir = data_dir if data_dir.is_absolute() else cwd / data_dir
@@ -124,6 +155,8 @@ async def execute_python(
             {"run_dir": str(run_dir), "read_roots": read_roots, "source_cwd": str(cwd),
              "read_files": exact_files, "data_profiles": data_profiles or {},
              "data_refs": data_refs or {},
+             "input_artifacts": input_artifacts or {},
+             "expected_outputs": list(expected_outputs),
              "previous_outputs": [str(path) for path in previous_outputs]},
             ensure_ascii=False,
         ),
@@ -132,7 +165,13 @@ async def execute_python(
     stdout, stderr, timed_out, exit_code = "", "", False, None
     stdout_truncated = stderr_truncated = False
     process: asyncio.subprocess.Process | None = None
+    preflight = []
+    input_versions = {alias: {'path': value,
+                             'sha256': _artifact_contracts().sha256_file(Path(value)),
+                             'signature': _reference_signature(Path(value))}
+                      for alias, value in (input_artifacts or {}).items()}
     try:
+        preflight = _contracts().preflight_code(code)
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-I",
@@ -165,13 +204,22 @@ async def execute_python(
             out_task, err_task
         )
         exit_code = process.returncode
+    except (SyntaxError, ModuleNotFoundError) as exc:
+        stderr = f"{type(exc).__name__}: {exc}"
+        exit_code = 1
     except (OSError, RuntimeError) as exc:
         stderr = f"Could not start analysis interpreter: {exc}"
 
     (run_dir / "stdout.txt").write_text(stdout, encoding="utf-8")
     (run_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
     files = []
-    reserved = {"analysis.py", "manifest.json", "stdout.txt", "stderr.txt", ".execution.json"}
+    integrity_file = run_dir / 'integrity.json'
+    try:
+        integrity = json.loads(integrity_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        integrity = {}
+    reserved = {"analysis.py", "manifest.json", "stdout.txt", "stderr.txt", ".execution.json",
+                "integrity.json"}
     for path in sorted(run_dir.rglob("*")):
         relative = path.relative_to(run_dir)
         if not path.is_file() or relative.parts[0] == ".cache" or str(relative) in reserved:
@@ -179,10 +227,49 @@ async def execute_python(
         # Never follow a generated link into a source directory when enumerating artifacts.
         if not path.resolve().is_relative_to(run_dir.resolve()):
             continue
-        files.append({"path": str(path), "size_bytes": path.stat().st_size})
+        files.append(_contracts().artifact_metadata(
+            path, succeeded=exit_code == 0 and not timed_out))
+        binding = integrity.get('vector_writes', {}).get(str(path))
+        if isinstance(binding, dict):
+            files[-1]['entity_binding'] = binding.get('entity_binding', 'unverified')
+            files[-1]['identity_checks'] = binding.get('identity_checks', [])
+    invalid = [entry for entry in files if entry.get("validation_state") == "failed"]
+    if invalid and exit_code == 0:
+        exit_code = 1
+        stderr += "\nOutputContractError: " + "; ".join(
+            entry["error_summary"] for entry in invalid)
+        (run_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
+    missing = [name for name in expected_outputs if not (run_dir / name).is_file()]
+    if missing and exit_code == 0:
+        exit_code = 1
+        stderr += f"\nOutputContractError: declared outputs missing: {missing}"
+        (run_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
+    for version in input_versions.values():
+        path = Path(version['path'])
+        if (_reference_signature(path) != version['signature'] or not path.is_file()
+                or _artifact_contracts().sha256_file(path) != version['sha256']):
+            exit_code = 1
+            stderr += f"\nInputContractError: input changed during execution: {path}"
+            (run_dir / 'stderr.txt').write_text(stderr, encoding='utf-8')
+    status = "timed_out" if timed_out else "succeeded" if exit_code == 0 else "failed"
+    if status != "succeeded":
+        for entry in files:
+            entry["state"] = "failed"
     result = {
+        "status": status,
+        "execution_state": status,
+        "preflight_checks": preflight,
+        "validation_scope": "output geometry/CRS and observed entity bindings; "
+                            "scientific correctness remains unverified",
+        "inputs": input_artifacts or {},
+        "input_versions": input_versions,
+        "expected_outputs": list(expected_outputs),
         "run_dir": str(run_dir),
         "script_path": str(script),
+        "script_sha256": script_sha256,
+        "integrity_path": str(integrity_file) if integrity_file.is_file() else None,
+        "integrity_sha256": (_artifact_contracts().sha256_file(integrity_file)
+                             if integrity_file.is_file() else None),
         "manifest_path": str(run_dir / "manifest.json"),
         "source_cwd": str(cwd),
         "read_roots": read_roots,
@@ -202,7 +289,7 @@ async def execute_python(
     return result
 
 
-def _install_guards(spec: dict[str, Any]) -> None:
+def _install_guards(spec: dict[str, Any], tracker: Any = None) -> None:
     """Install Python audit checks and native GIS file checks in the child."""
     run_dir = Path(spec["run_dir"]).resolve()
     data_roots = [Path(value).resolve() for value in spec["read_roots"]]
@@ -397,16 +484,30 @@ def _install_guards(spec: dict[str, Any]) -> None:
                              "Use read_vector(name/ref) or resolve_data(name/ref) from DATA_REFS. "
                              "DATA_DIRS are read roots, not dataset file locations.")
         filename = checked_native_path(filename)
-        return original_read(filename, *args, **kwargs)
+        _artifact_contracts().assert_usable_artifact(filename)
+        frame = original_read(filename, *args, **kwargs)
+        return (tracker.record(filename, frame) if tracker is not None
+                and not Path(filename).resolve().is_relative_to(run_dir) else frame)
 
     @wraps(original_to_file)
     def vector_write(self: Any, filename: Any, *args: Any, **kwargs: Any) -> Any:
         filename = checked_native_path(filename, writing=True)
-        return original_to_file(self, filename, *args, **kwargs)
+        detail = tracker.check(self) if tracker is not None else None
+        # GeoJSON is exchanged as RFC 7946 longitude/latitude. Preserve the real
+        # CRS in GeoPackage when metric storage is required.
+        is_geojson = (str(filename).lower().endswith(".geojson")
+                      or str(kwargs.get("driver", "")).lower() == "geojson")
+        output = self.to_crs(4326) if is_geojson and self.crs is not None else self
+        result = original_to_file(output, filename, *args, **kwargs)
+        if tracker is not None:
+            tracker.writes[str(filename)] = {**detail, "output_crs": str(output.crs)}
+        return result
 
     @wraps(original_raster_open)
     def raster_open(fp: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
         fp = checked_native_path(fp, writing=mode != "r")
+        if mode == 'r':
+            _artifact_contracts().assert_usable_artifact(fp)
         if kwargs.get("opener") is not None:
             raise PermissionError("Custom native filesystem openers are unavailable")
         dataset = original_raster_open(fp, mode, *args, **kwargs)
@@ -610,7 +711,7 @@ def _reference_signature(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _data_helpers(references: dict[str, Any]) -> dict[str, Any]:
+def _data_helpers(references: dict[str, Any], tracker: Any = None) -> dict[str, Any]:
     """Resolve only frozen records; never enumerate folders or reconstruct job paths."""
     import geopandas as gpd
 
@@ -638,10 +739,9 @@ def _data_helpers(references: dict[str, Any]) -> dict[str, Any]:
                     if value in aliases:
                         matches.append(record)
         if not matches:
-            raise ValueError("Unknown data ref; use geo_vector_data list/inspect or "
-                             "geo_raster_data list/inspect to populate DATA_REFS")
+            _artifact_contracts().lookup_reference(value, records)
         if len(matches) != 1:
-            raise ValueError("Ambiguous data ref; use the stable DATA_REFS ID")
+            _artifact_contracts().lookup_reference(value, records)
         record = matches[0]
         path = Path(record["path"])
         if not isinstance(record.get("signature"), dict) or (
@@ -675,6 +775,15 @@ def _data_helpers(references: dict[str, Any]) -> dict[str, Any]:
         options = {"encoding": encoding} if encoding and encoding != "unknown" else {}
         frame = gpd.read_file(record["path"], **options)
         record_for(ref)  # A read must not attach old metadata to a changed file.
+        if '__geoh_id' not in frame:
+            # Python-only row identity. The original file and native-layer schema
+            # stay untouched. A changed source snapshot produces new identities.
+            version = json.dumps(record.get('signature'), sort_keys=True)
+            frame['__geoh_id'] = [hashlib.sha256(
+                f"{record['path']}|{version}|{index}".encode()).hexdigest()[:24]
+                for index in range(len(frame))]
+        if tracker is not None:
+            tracker.record(record['path'], frame)
         if target_crs is not None:
             if frame.crs is None:
                 raise ValueError("read_vector source CRS is unknown; "
@@ -738,7 +847,10 @@ def _child_main() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot  # noqa: F401
 
-    _install_guards(spec)
+    contracts = _contracts()
+    _artifact_contracts()
+    tracker = contracts.EntityTracker()
+    _install_guards(spec, tracker)
     data_refs = spec.get("data_refs", {})
     namespace = {
         "__name__": "__main__",
@@ -749,10 +861,23 @@ def _child_main() -> None:
         "GEO_DATA": spec.get("data_profiles", {}),
         "DATA_REFS": data_refs,
         "PREVIOUS_OUTPUTS": [Path(value) for value in spec.get("previous_outputs", [])],
+        "INPUTS": {key: Path(value) for key, value in spec.get("input_artifacts", {}).items()},
         "mask_raster": mask_raster,
-        **_data_helpers(data_refs),
+        "entity_join": contracts.entity_join,
+        "score_risk": contracts.score_risk,
+        "sample_raster_points": contracts.sample_raster_points,
+        **_data_helpers(data_refs, tracker),
     }
     exec(code, namespace)
+    # Raw JSON/native writes also need a read-back check. Keep failed partial
+    # files for diagnosis, but the parent never registers them as usable output.
+    import geopandas as gpd
+
+    for output in run_dir.rglob("*"):
+        if output.suffix.lower() in {".geojson", ".gpkg", ".shp"} and output.is_file():
+            frame = gpd.read_file(output)
+            tracker.writes.setdefault(str(output), tracker.check(frame))
+    contracts.write_contract_report(run_dir / "integrity.json", tracker)
 
 
 if __name__ == "__main__":

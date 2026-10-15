@@ -146,7 +146,12 @@ MCP timeout on large datasets.
 _TOOL_CATALOG = """\
 # Tool Catalog
 
-## Native Tools (8, plus 2 optional QGIS tools)
+## Native Tools (9, plus 2 optional QGIS tools)
+- **geo_accessibility**: Road-network accessibility with explicit direction mapping,
+  metric CRS, speed, maximum snap distance and selected hazard geometry. Prefer this
+  over rewriting routing in geo_python. Inspect every resident's status and the
+  safe graph components. Distances include endpoint connectors. Capacity allocation,
+  travel-time optimization and validated risk scoring are not implied.
 - **geo_qgis**: Discover and execute the installed QGIS Processing registry.
   - Actions: doctor, search, help, run, model. search(query='buffer') finds actual
     IDs; help(algorithm_id=...) returns exact parameters and enums; run receives
@@ -156,6 +161,17 @@ _TOOL_CATALOG = """\
     before distance/area operations. Keep algorithm parameters and output manifest.
     Results are local files in unique .geoharness/qgis tasks; inspect actual outputs.
 - **geo_qgis_project**: Create/inspect/export genuine QGIS projects and print layouts.
+  - Build a small draft with action=spec (layers can initially be empty), then add
+    layers/layout via spec_ref and patches=[{path:['layers',0],value:{...}}]. Paths
+    use actual schema keys: layer.style.color, layer.label_style.size_pt,
+    layout.width_mm/height_mm; do not invent color/type on a layer, paper_size or
+    page_width_mm. Array append uses the exact next index; existing styles stay stored.
+    Preflight the spec_ref. Create the frozen plan with ONLY action and plan_ref.
+  - Choose EXPLICIT extent OR focus_layers (FIT), never both for the same frame.
+    Label rosters use fields[0] as a unique nonnull key; columns counts parallel full
+    tables, not property fields. top_n requires sort_by; omit selection for all rows.
+    placement=auto may add roster pages; placement=pages requests them directly.
+    Keep the full roster CSV and page previews. Never remove subjects to bypass zoom.
   - Build projects from real local layers with declared styles/CRS. Export the actual
     saved layout to PNG/PDF. Re-export user-edited projects to a new artifact directory,
     preserving the edited original. Use returned project_dir and preview_path for
@@ -175,6 +191,17 @@ _TOOL_CATALOG = """\
   - Returns script, logs, manifest and artifact paths. Check exit_code and results.
     Supply complete code and a stable map_id for every version of a custom map.
     SOURCE_CWD/RUN_DIR are also environment variables; DATA_DIRS uses os.pathsep.
+  - Use input_refs={alias: returned_ref_or_path} and INPUTS[alias] for files from
+    earlier steps; expected_outputs declares the files that must actually exist.
+    Reuse stage_id for corrections, depends_on for successful prerequisite steps.
+    Failed partial artifacts are inspection-only. Never infer success from stdout.
+  - Sort/filter the GeoDataFrame with its geometry attached. Never reconstruct a
+    sorted attribute table with source.geometry.values. entity_join(source, table,
+    key='existing_unique_id') safely joins new attributes; require unique nonnull IDs.
+    GeoJSON writes are normalized to EPSG:4326; use GeoPackage for metric storage.
+    Data integrity checks do not validate a risk model. State risk weights, population
+    estimates, missing-data policy and velocity assumptions explicitly; no invented
+    certainty, no inference that all residents are reachable from a connected raw graph.
 - **geo_map_review**: Inspect an actual PNG/JPEG map produced by a Python script.
   - Provide file_path, task and evidence (expected layers, analysis/source summary).
   - Use the same map_id as geo_python. Consolidate concrete errors/warnings into

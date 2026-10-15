@@ -89,6 +89,9 @@ def _source(path: Path, roots: list[Path]) -> Path:
         raise ValueError("Credential files cannot be delivered.")
     if not path.is_file():
         raise ValueError(f"Delivery input is not an existing file: {path}")
+    from geoharness.data.artifacts import assert_usable_artifact
+
+    assert_usable_artifact(path)
     return path
 
 

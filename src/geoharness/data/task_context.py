@@ -6,8 +6,29 @@ import hashlib
 import heapq
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from geoharness.data.artifacts import (
+    artifact_entries,
+    artifact_succeeded,
+    assert_usable_artifact,
+    lookup_reference,
+    producer_kind,
+    producer_succeeded,
+    sha256_file,
+)
+
+
+@lru_cache(maxsize=128)
+def _source_digest(path: str, signature_json: str) -> str:
+    """Avoid rereading large source rasters on every model request.
+
+    The key includes measured size, mtime and ctime (and Shapefile sidecars).
+    Producer artifacts use independent digest checks rather than this source cache.
+    """
+    return sha256_file(Path(path))
 
 
 def _root(cwd: Path, value: str) -> Path:
@@ -56,20 +77,16 @@ def recent_outputs(cwd: Path, config: Any, *, limit: int = 24) -> list[dict[str,
             if not isinstance(document, dict) or manifest_signature is None \
                     or file_signature(manifest) != manifest_signature:
                 continue
-            paths = []
-            native = isinstance(document.get("paths"), dict) and document.get("action") in {
-                "buffer", "clip", "intersection", "distance", "count", "impact", "area",
-            }
-            if native:
-                paths = [(entry["geojson"], label, entry)
-                         for label, entry in document["paths"].items()
-                         if isinstance(label, str) and isinstance(entry, dict)
-                         and isinstance(entry.get("geojson"), str)]
-            elif Path(document.get("run_dir", "")).resolve() == job \
-                    and document.get("exit_code") == 0:
-                paths = [(entry["path"], "", entry) for entry in document.get("files", [])
-                         if isinstance(entry, dict) and isinstance(entry.get("path"), str)]
+            producer = producer_kind(document)
+            if not producer or not producer_succeeded(document):
+                continue
+            native = producer in {"geo_analysis", "geo_accessibility"}
+            if not native and Path(document.get("run_dir", "")).resolve() != job:
+                continue
+            paths = artifact_entries(document)
             for value, label, entry in paths:
+                if not artifact_succeeded(entry):
+                    continue
                 path = Path(value)
                 path = (path if path.is_absolute() else job / path).absolute()
                 if path in seen or not path.is_relative_to(job) or path.resolve() != path \
@@ -80,16 +97,32 @@ def recent_outputs(cwd: Path, config: Any, *, limit: int = 24) -> list[dict[str,
                     ".png", ".jpg", ".jpeg", ".webp", ".json",
                 }:
                     continue
-                record = {"path": str(path), "name": path.name,
-                          "producer": "geo_analysis" if native else "geo_python",
+                digest = sha256_file(path)
+                expected = entry.get("sha256")
+                if expected is not None and digest != expected:
+                    continue
+                record = {"path": str(path), "name": path.name, "producer": producer,
                           "manifest": str(manifest), "manifest_signature": manifest_signature,
-                          "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}
+                          "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                          "sha256": digest, "version": digest,
+                          "artifact_id": "artifact:" + hashlib.sha256(
+                              (str(manifest) + "\0" + str(path) + "\0" + digest).encode("utf-8")
+                          ).hexdigest()[:24],
+                          "state": "succeeded",
+                          "validation_state": entry.get("validation_state", "unverified")}
                 if native:
-                    record.update(output_label=label, action=document["action"],
-                                  analysis_manifest=str(manifest))
-                    for key in ("feature_count", "geojson_sha256", "schema"):
-                        if key in entry:
-                            record[key] = entry[key]
+                    record.update(output_label=label, action=document["action"])
+                    if producer == "geo_analysis":
+                        record["analysis_manifest"] = str(manifest)
+                    record["crs"] = entry.get("crs", document.get("export_crs"))
+                for key in ("feature_count", "schema", "crs", "geometry_type", "format",
+                            "entity_key", "lineage", "input_refs", "validation_state"):
+                    if key in entry:
+                        record[key] = entry[key]
+                if entry.get("format") == "geojson" and entry.get("geojson_sha256"):
+                    record["geojson_sha256"] = entry["geojson_sha256"]
+                if file_signature(manifest) != manifest_signature:
+                    continue
                 records.append(record)
                 seen.add(path)
                 if len(records) >= limit:
@@ -126,7 +159,9 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                 continue
             manifest = None
             if not source:
-                if item.get("producer") not in {"geo_analysis", "geo_python"}:
+                if item.get("producer") not in {"geo_analysis", "geo_python", "geo_accessibility"}:
+                    continue
+                if not artifact_succeeded(item):
                     continue
                 manifest = Path(item["manifest"]).absolute()
                 if manifest.resolve() != manifest or not manifest.is_file():
@@ -139,7 +174,7 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                 manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
                 if item.get("manifest_sha256", manifest_digest) != manifest_digest:
                     continue
-                expected = item.get("geojson_sha256")
+                expected = item.get("sha256", item.get("geojson_sha256"))
                 if expected is not None:
                     if not isinstance(expected, str) or len(expected) != 64:
                         continue
@@ -161,8 +196,18 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
             )
             record = {"ref": ref, "path": str(path), "kind": kind,
                       "name": item.get("name") or path.name, "signature": signature,
-                      "producer": "measured_source" if source else item["producer"]}
+                      "producer": "measured_source" if source else item["producer"],
+                      "state": "succeeded" if not source else "measured",
+                      "validation_state": item.get("validation_state", "unverified")}
             if source:
+                signature_json = json.dumps(signature, sort_keys=True, separators=(",", ":"))
+                digest = _source_digest(str(path), signature_json)
+                if file_signature(path) != signature:
+                    continue
+                record.update(sha256=digest, sha256_scope="primary_file",
+                              version=hashlib.sha256(
+                                  (digest + signature_json).encode("utf-8")).hexdigest(),
+                              version_basis="content_and_measured_file_signature")
                 for key in ("crs", "feature_count", "geometry_type", "schema",
                             "encoding", "encoding_source", "encoding_status", "requested_name"):
                     if key in item:
@@ -175,7 +220,9 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                     record["analysis_manifest"] = str(manifest)
                 if expected is not None:
                     record["sha256"] = expected
-                for key in ("output_label", "action", "feature_count", "schema"):
+                for key in ("output_label", "action", "feature_count", "schema", "crs",
+                            "geometry_type", "artifact_id", "version", "format", "entity_key",
+                            "lineage", "input_refs", "validation_state"):
                     if key in item:
                         record[key] = item[key]
             references[ref] = record
@@ -200,7 +247,12 @@ def resolve_registered_path(value: str, metadata: dict, *, cwd: Path, config: An
         return value
     from geoharness.data.profiles import file_signature
 
-    reference = data_ref_snapshot(metadata, cwd=cwd, config=config).get(value)
+    references = data_ref_snapshot(metadata, cwd=cwd, config=config)
+    try:
+        reference = lookup_reference(value, references)
+    except ValueError as exc:
+        raise ValueError("Unknown or changed data reference; inspect the source again. "
+                         f"{exc}") from exc
     if (not isinstance(reference, dict) or not isinstance(reference.get("path"), str)
             or file_signature(reference["path"]) != reference.get("signature")):
         raise ValueError("Unknown or changed data reference; inspect the source again")
@@ -226,6 +278,7 @@ def resolve_registered_path(value: str, metadata: dict, *, cwd: Path, config: An
         file_signature(manifest_path) != reference["manifest_signature"]
     ):
         raise ValueError("Registered producer manifest is stale; inspect the output again")
+    assert_usable_artifact(reference["path"])
     return reference["path"]
 
 
@@ -285,6 +338,10 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
     data = {"profiles": compact, "existing_outputs": records, "qgis_jobs": qgis_jobs,
             "data_refs": references,
             "data_root": str(_root(cwd, config.data.file_dir or "."))}
+    data['analysis_stages'] = {name: {key: record.get(key) for key in
+        ('status', 'manifest_path', 'failure')} for name, record in
+        list(metadata.get('analysis_workflow_state', {}).items())[-8:]
+        if isinstance(record, dict)}
     state = metadata.get("map_workflow_state", {})
     data["render_budget"] = {"successful_versions_per_request": None, "generation_unlimited": True,
         "used": {key: entry.get("renders", 0) for key, entry in
@@ -322,7 +379,11 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
         "each raster CRS; geo_python exposes mask_raster(path, GeoDataFrame, crop=True), "
         "returning (array, Affine transform); unpack it before using array.shape/stats. "
         "Each geo_python call has a NEW RUN_DIR; earlier inputs use existing_outputs paths "
-        "or PREVIOUS_OUTPUTS, never guessed dates. Native analysis manifests bind only to "
+        "or PREVIOUS_OUTPUTS, never guessed dates. Artifacts expose producer/state/version/sha256; "
+        "succeeded means the producing process completed, while validation_state=unverified "
+        "does not certify data integrity or scientific correctness. Failed/partial outputs are "
+        "inspection-only even when their files exist. Multiple outputs named result require "
+        "their exact ref/path, not the shared output label. Native analysis manifests bind only to "
         "their actual mapped output or layer.derivation. Use geo_qgis_project inspect/result "
         "paths for layout diagnosis, not global tool_artifacts or directory enumeration.\n"
         + json.dumps(data, ensure_ascii=False, separators=(",", ":"))

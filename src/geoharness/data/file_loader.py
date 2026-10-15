@@ -333,6 +333,9 @@ class FileLoader:
         path = self._find_file(name)
         if path is None:
             raise ValueError(f"File not found: {name!r}")
+        from geoharness.data.artifacts import assert_usable_artifact
+
+        assert_usable_artifact(path)
         gdf = gpd.read_file(path, **vector_read_options(source_encoding(path)))
         if not isinstance(gdf, gpd.GeoDataFrame):
             raise ValueError(

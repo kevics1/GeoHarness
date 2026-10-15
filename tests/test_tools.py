@@ -589,7 +589,7 @@ class TestBuildGeoToolRegistry:
         assert "web_search" not in tool_names
 
     def test_registry_tool_count(self):
-        """Registry should have 8 native + 2 QGIS + 5 whitelist = 15 tools
+        """Registry should have 9 native + 2 QGIS + 5 whitelist = 16 tools
         (without MCP).
         """
         from geoharness.tools import build_geo_tool_registry
@@ -597,7 +597,7 @@ class TestBuildGeoToolRegistry:
         registry = build_geo_tool_registry()
         tools = registry.list_tools()
 
-        assert len(tools) == 15
+        assert len(tools) == 16
 
     def test_qgis_tools_can_be_disabled(self):
         from geoharness.config.settings import GeoConfig, QgisConfig
@@ -606,7 +606,7 @@ class TestBuildGeoToolRegistry:
         registry = build_geo_tool_registry(config=GeoConfig(qgis=QgisConfig(enabled=False)))
         names = {tool.name for tool in registry.list_tools()}
         assert "geo_qgis" not in names and "geo_qgis_project" not in names
-        assert len(names) == 13
+        assert len(names) == 14
 
     def test_registry_with_mock_mcp(self):
         """Registry with mock MCP manager should register MCP tools."""

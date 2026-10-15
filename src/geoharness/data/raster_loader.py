@@ -261,6 +261,9 @@ class RasterLoader:
         path = self.resolve_path(name)
         if path is None:
             raise ValueError(f"Raster not found: {name!r}")
+        from geoharness.data.artifacts import assert_usable_artifact
+
+        assert_usable_artifact(path)
         with rasterio.open(path) as ds:
             if band < 1 or band > ds.count:
                 raise ValueError(

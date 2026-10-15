@@ -1004,7 +1004,7 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
     footer_y = height - margin - footer_height
     map_height = footer_y - gap - top
     table = spec.get("label_table")
-    if table:
+    if table and table.get("placement") != "pages":
         map_height -= table.get("height_mm", 50) + gap
     has_detail = spec.get("detail_extent") is not None or spec.get("detail_frame") is not None
     sidebar = spec.get("legend", True) or has_detail
@@ -1018,7 +1018,7 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
     }
     if title:
         regions["title"] = [margin, margin, inner_width, title_height]
-    if table:
+    if table and table.get("placement") != "pages":
         count = table.get("columns", 3)
         column_width = (inner_width - gap * (count - 1)) / count
         for index in range(count):
@@ -1130,7 +1130,8 @@ def _create_layout(
         from geoharness.qgis.layout_table import add_label_tables
 
         add_label_tables(layout, layers, spec["label_table"], regions,
-                         _text_format(font, spec["label_table"].get("font_size_pt", 8)))
+                         _text_format(font, spec["label_table"].get("font_size_pt", 8)),
+                         page_spec=spec, context=context)
     if title:
         label = QgsLayoutItemLabel(layout)
         label.setText(title)
@@ -1242,9 +1243,24 @@ def _create_layout(
 
     tables = label_table_facts(layout)
     if any(table["visible_rows"] < table["rows"] for table in tables):
+        if (spec["label_table"].get("placement", "auto") == "auto"
+                and not payload.get("_consume_plan")):
+            resized = {**spec, "label_table": {**spec["label_table"], "placement": "pages"}}
+            return _create_layout(project, layers, extent, {**payload, "layout": resized},
+                context, _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
+                _adaptations=[*adaptations, {"parameter": "label_table.placement",
+                    "before": "auto", "after": "pages", "reason": "measured roster overflow",
+                    "source_tables": tables}])
         if (_fit_attempt >= 12 or payload.get("_consume_plan")
-                or not spec.get("legend_auto_fit", True)):
-            raise ValueError("label_table does not fit: increase height_mm, columns or page size")
+                or not spec.get("legend_auto_fit", True)
+                or spec["label_table"].get("placement") == "inline"):
+            error = ValueError("label_table does not fit; use label_table.placement='pages' "
+                               "or an explicit top_n+sort_by selection")
+            error.diagnostics = {"code": "roster_overflow", "tables": tables,
+                "page_mm": [width, height],
+                "font_size_pt": spec["label_table"].get("font_size_pt", 8),
+                "remedies": [{"path": ["layout", "label_table", "placement"], "value": "pages"}]}
+            raise error
         required = max(table.totalSize().height() for table in layout.multiFrames()
                        if isinstance(table, QgsLayoutItemAttributeTable)) + 0.5
         resized = {**spec, "label_table": {**spec["label_table"],
@@ -1252,8 +1268,13 @@ def _create_layout(
         extra = resized["label_table"]["height_mm"] - spec["label_table"].get("height_mm", 50)
         resized["height_mm"] = height + extra
         if resized["label_table"]["height_mm"] > 400 or resized["height_mm"] > 2000:
-            raise ValueError("label_table exceeds supported page/table dimensions; "
-                             "use more columns or a separate roster page")
+            error = ValueError("label_table exceeds supported dimensions; "
+                               "set label_table.placement='pages'")
+            error.diagnostics = {"code": "roster_overflow", "tables": tables,
+                "required_table_height_mm": required,
+                "proposed_page_height_mm": resized["height_mm"],
+                "limits": {"table_height_mm": 400, "page_height_mm": 2000}}
+            raise error
         return _create_layout(project, layers, extent, {**payload, "layout": resized},
             context, _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
             _adaptations=[*adaptations, {
@@ -1534,12 +1555,18 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
     user_items = {}
     problems = []
     content_metrics = {}
+    roster_pages = {}
     for item in layout.items():
         if not isinstance(item, QgsLayoutItem) or isinstance(item, QgsLayoutItemPage):
             continue
         name = item.id() or item.uuid()
         rect = item.mapRectToScene(item.rect())
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+        if name.startswith("label_table_") and item.page() > 0:
+            roster_page = layout.pageCollection().page(item.page())
+            local = [x - roster_page.pos().x(), y - roster_page.pos().y(), w, h]
+            roster_pages.setdefault(item.page(), {})[name] = local
+            continue
         if name not in {*regions, "scale_bar", "footer_text"}:
             # User annotations, north arrows and inset decorations legitimately
             # overlap maps. Preserve them; pixel review assesses their placement.
@@ -1572,9 +1599,15 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
             ):
                 problems.append(f"{name}: label text exceeds its reserved rectangle")
     problems.extend(_rectangle_problems(rectangles, page.width(), page.height()))
+    for number, items in roster_pages.items():
+        roster_page = layout.pageCollection().page(number)
+        size = roster_page.pageSize()
+        problems.extend(f"page {number + 1}: {problem}" for problem in
+                        _rectangle_problems(items, size.width(), size.height()))
     return {
         "checked": True, "valid": not problems, "problems": problems,
         "items": rectangles, "user_items": user_items, "content_metrics": content_metrics,
+        "roster_pages": roster_pages,
     }
 
 
@@ -1696,6 +1729,8 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
     return {
         "name": layout.name(), "pages": layout.pageCollection().pageCount(), "map_frames": maps,
         "label_tables": label_table_facts(layout),
+        "roster_selection": json.loads(layout.customProperty(
+            "geoharness/roster_selection", "null")),
         "map_extents": {item["id"]: item["extent"] for item in maps},
         "scale_bars": scale_bars,
         "legends": legends,
@@ -1908,6 +1943,19 @@ def _export_layout(
         raise ValueError("QGIS did not write the layout preview")
     labels = _export_label_facts(layout, exporter)
     native_facts = _export_geometry_facts(layout, labels, image_settings.dpi)
+    native_facts["roster_previews"] = []
+    for index in range(1, layout.pageCollection().pageCount()):
+        path = Path(context.output_path(None, f"roster_page_{index + 1}.png"))
+        image_settings.pages = [index]
+        status = exporter.exportToImage(str(path), image_settings)
+        if status != QgsLayoutExporter.Success:
+            raise ValueError(f"QGIS roster-page PNG export failed: {exporter.errorMessage()}")
+        numbered = path.with_stem(path.stem + f"_{index + 1}")
+        if not path.is_file() and numbered.is_file():
+            numbered.rename(path)
+        if not path.is_file():
+            raise ValueError("QGIS did not write the roster-page preview")
+        native_facts["roster_previews"].append(str(path))
     if payload.get("strict_layout", False):
         _validate_layout_bounds(layout)
     output_format = payload.get("output_format", "png")
@@ -2026,6 +2074,9 @@ def _save_package(
         # Native save/read normalizes floating coordinates and scale-bar metrics.
         # Export the saved layout so preview pixels correspond to the delivered QGS.
         preview, output, native_facts = _export_layout(saved_layout, payload, context)
+        from geoharness.qgis.layout_table import export_full_roster
+
+        export_full_roster(saved_layout, context)
         layout_info = _layout_metadata(saved_layout)
         if payload.get("_consume_plan") and layout_plan is not None:
             for name, frame in native_facts["frames"].items():
@@ -2056,6 +2107,10 @@ def _save_package(
     )
     manifest_path = Path(context.output_path(None, "project.json"))
     files = [project_path, preview, output, readme, manifest_path]
+    roster = context.run_dir / 'roster_full.csv'
+    if roster.is_file():
+        files.append(roster)
+    files.extend(Path(path) for path in native_facts.get('roster_previews', []))
     for directory in (
         context.run_dir / "data",
         context.run_dir / "styles",

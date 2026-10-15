@@ -43,9 +43,13 @@ def _from_file(path_or_name: str, catalog: Any) -> Any:
 
     import geopandas as gpd
 
+    from geoharness.data.artifacts import assert_usable_artifact
+    from geoharness.data.encoding import source_encoding, vector_read_options
+
     candidate = Path(path_or_name).expanduser()
     if candidate.exists():
-        return gpd.read_file(candidate)
+        assert_usable_artifact(candidate)
+        return gpd.read_file(candidate, **vector_read_options(source_encoding(candidate)))
 
     if candidate.suffix.lower() == ".csv":
         raise ValueError(
@@ -62,7 +66,8 @@ def _from_file(path_or_name: str, catalog: Any) -> Any:
                 resolved = resolver(path_or_name)
                 break
         if resolved is not None:
-            return gpd.read_file(resolved)
+            assert_usable_artifact(resolved)
+            return gpd.read_file(resolved, **vector_read_options(source_encoding(resolved)))
 
     raise ValueError(
         f"File source not found: {path_or_name!r}. Pass an existing "

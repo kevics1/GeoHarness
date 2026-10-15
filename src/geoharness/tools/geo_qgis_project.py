@@ -228,7 +228,8 @@ class QgisMapFrameSpec(BaseModel):
 
     focus_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
         default=None, min_length=1, max_length=64,
-        description="0-based layer indices whose bounds define the subject; excludes backgrounds.",
+        description="FIT mode: 0-based subject layer indices; excludes backgrounds. Omit when "
+                    "using EXPLICIT mode (map_extent for main, detail_extent for detail).",
     )
     render_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
         default=None, min_length=1, max_length=64,
@@ -284,9 +285,44 @@ class QgisLabelTable(BaseModel):
     ))
     headers: dict[str, str] = Field(default_factory=dict, max_length=8,
                                    description="Optional display headings for existing fields.")
-    columns: int = Field(default=3, ge=1, le=4)
+    columns: int = Field(default=3, ge=1, le=4, description=(
+        "Number of parallel complete tables on a page, NOT the number of attribute fields. "
+        "Each parallel table repeats all fields and headings."
+    ))
     height_mm: float = Field(default=50, ge=15, le=400)
     font_size_pt: float = Field(default=8, ge=5, le=20)
+    placement: Literal["auto", "inline", "pages"] = Field(default="auto", description=(
+        "auto keeps a fitting roster under the map and paginates overflow onto separate "
+        "editable QGIS pages. pages always uses roster pages; inline fails with measured "
+        "capacity if it cannot fit. No records are silently removed."
+    ))
+    top_n: int | None = Field(default=None, ge=1, description=(
+        "Explicitly select the first N records after sort_by (required); full source roster "
+        "is retained as CSV. Omit to include every record."
+    ))
+    sort_by: str = Field(default="", description="Existing field for deterministic roster order.")
+    descending: bool = False
+    keys: list[str | int | float] | None = Field(default=None, min_length=1, description=(
+        "Explicit first-field values to include. Mutually exclusive with top_n."
+    ))
+    field_widths: dict[str, float] = Field(default_factory=dict, description=(
+        "Positive relative field widths, e.g. {name:3, risk:1}; unlisted fields use 1."
+    ))
+    precision: dict[str, int] = Field(default_factory=dict, description=(
+        "Optional numeric decimal places (0..10) by field; changes display, not source values."
+    ))
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if self.top_n is not None and (not self.sort_by or self.keys is not None):
+            raise ValueError("top_n requires sort_by and cannot be combined with keys")
+        if any(key not in self.fields or not math.isfinite(value) or value <= 0
+               for key, value in self.field_widths.items()):
+            raise ValueError("field_widths requires positive finite weights for displayed fields")
+        if any(key not in self.fields or value < 0 or value > 10
+               for key, value in self.precision.items()):
+            raise ValueError("precision requires displayed numeric fields and 0..10 decimal places")
+        return self
 
 
 class QgisProjectLayout(BaseModel):
@@ -353,10 +389,26 @@ class QgisProjectLayout(BaseModel):
         return self
 
 
+class QgisSpecPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: list[str | Annotated[int, Field(strict=True, ge=0)]] = Field(min_length=1)
+    operation: Literal["set", "remove"] = "set"
+    value: Any = None
+
+
 class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["create", "inspect", "export", "preflight"]
+    action: Literal["create", "inspect", "export", "preflight", "spec"]
+    spec_ref: str = Field(default="", description=(
+        "Returned immutable qgis-spec reference. action=spec saves/edits a draft; "
+        "action=preflight checks it. Use only action+spec_ref+optional patches."
+    ))
+    patches: list[QgisSpecPatch] = Field(default_factory=list, max_length=64, description=(
+        "Small draft edits: [{path:[layers,0,style,color],value:#ff0000}] or "
+        "{path:[layout,detail_extent],operation:remove}. Use JSON strings for keys/colors. "
+        "Preflight the edited spec, then create with only returned action+plan_ref."
+    ))
     plan_ref: str = Field(default="", description=(
         "Returned preflight plan_ref. create accepts only action+plan_ref; it carries checked "
         "map_id/title/output_format already. Do not repeat those fields; sources are revalidated."
@@ -371,7 +423,10 @@ class GeoQgisProjectInput(BaseModel):
     )
     title: str = ""
     crs: str = Field(default="", description="Explicit project CRS, e.g. EPSG:3857.")
-    map_extent: list[float] | QgisExtent | None = None
+    map_extent: list[float] | QgisExtent | None = Field(default=None, description=(
+        "EXPLICIT main extent [xmin,ymin,xmax,ymax] in project crs. Mutually exclusive "
+        "with layout.main_frame.focus_layers (FIT mode). QGIS preserves full coverage."
+    ))
     layout: QgisProjectLayout | None = None
     layout_name: str = Field(
         default="", description="Saved layout to export; required if ambiguous."
@@ -414,6 +469,15 @@ class GeoQgisProjectInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
+        if self.spec_ref:
+            if self.action not in {"spec", "preflight"} or self.model_fields_set - {
+                "action", "spec_ref", "patches"
+            }:
+                raise ValueError("spec_ref accepts only action=spec/preflight, "
+                                 "spec_ref and patches")
+            return self
+        if self.patches:
+            raise ValueError("patches require a returned spec_ref")
         if self.plan_ref:
             if self.action != "create" or self.model_fields_set - {"action", "plan_ref"}:
                 extra = sorted(self.model_fields_set - {"action", "plan_ref"})
@@ -421,7 +485,13 @@ class GeoQgisProjectInput(BaseModel):
                                  f"remove extra fields {extra}; map_id/title/output_format are "
                                  "already in the checked plan. Preflight changes first")
             return self
-        if self.action in {"create", "preflight"}:
+        if self.action == 'spec':
+            # A draft can be assembled a layer at a time. Completeness and
+            # cross-field constraints are enforced when it is preflighted.
+            if self.project_path:
+                raise ValueError('spec describes a new map; existing projects use inspect/export')
+            return self
+        if self.action in {"create", "preflight", "spec"}:
             if not self.layers:
                 raise ValueError("create requires at least one local layer")
             if self.project_path:
@@ -474,6 +544,9 @@ class GeoQgisProjectTool(BaseTool):
     description = (
         "Preflight map data/fields/CRS/extents without rendering, create an editable QGIS "
         "project, inspect one, or export a user-edited saved layout. "
+        "For iterative design, save layers/layout once with action=spec; edit its returned "
+        "spec_ref using short patches with key/index array paths. Preflight spec_ref then "
+        "create using only action+returned plan_ref. Do not repeat the full layer stack. "
         "QGIS runs offscreen in a separate process. Create accepts local vector/raster layers, "
         "explicit category colors/fields, labels, CRS and extent; layer order is bottom first. "
         "Create/export packages snapshots as GPKG/TIFF and writes a new project plus a PNG "
@@ -511,6 +584,34 @@ class GeoQgisProjectTool(BaseTool):
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        spec_reference = ""
+        if arguments.action == "spec" or arguments.spec_ref:
+            from geoharness.qgis.specification import load_spec, patch_spec, save_spec
+
+            try:
+                parameters = (load_spec(arguments.spec_ref, cwd=context.cwd, settings=config.qgis)
+                    if arguments.spec_ref else arguments.model_dump(exclude={
+                        "action", "plan_ref", "spec_ref", "patches"}, exclude_unset=True))
+                parameters = patch_spec(parameters,
+                    [patch.model_dump() for patch in arguments.patches])
+                checked = GeoQgisProjectInput.model_validate({**parameters,
+                    "action": 'spec' if arguments.action == 'spec' else 'preflight'})
+                parameters = checked.model_dump(
+                    exclude={"action", "plan_ref", "spec_ref", "patches"}, exclude_unset=True)
+                parameters.setdefault('layers', [])
+                reference, path = save_spec(parameters, cwd=context.cwd, settings=config.qgis)
+                spec_reference = reference
+                if arguments.action == "spec":
+                    return ToolResult(output=json.dumps({"status": "draft_saved",
+                        "spec_ref": reference, "spec_path": path,
+                        "preflight_call": {"action": "preflight", "spec_ref": reference},
+                        "note": "Draft schema checked; data/native layout have not been checked."},
+                        ensure_ascii=False), metadata={"spec_ref": reference,
+                                                       "render_executed": False})
+                arguments = checked
+            except (OSError, ValueError) as exc:
+                return ToolResult(output=f"Error: map specification failed: {exc}", is_error=True,
+                                  metadata={"deterministic_error": True, "render_executed": False})
         if arguments.plan_ref:
             from geoharness.qgis.prepared import load_preflight
 
@@ -531,6 +632,12 @@ class GeoQgisProjectTool(BaseTool):
             for layer in arguments.layers:
                 path = resolve_registered_path(layer.file_path, context.metadata,
                                                cwd=Path(context.cwd), config=config)
+                from geoharness.data.artifacts import assert_usable_artifact
+
+                source_path = Path(path.split("|", 1)[0])
+                if not source_path.is_absolute():
+                    source_path = Path(context.cwd) / source_path
+                assert_usable_artifact(source_path)
                 record = references.get(layer.file_path, {})
                 if record.get("producer") == "geo_analysis" and record.get("analysis_manifest"):
                     bound_manifests.append(record["analysis_manifest"])
@@ -548,9 +655,17 @@ class GeoQgisProjectTool(BaseTool):
         ):
             # Inputs remain alive through worker shutdown, including cancellation.
             with TemporaryDirectory(prefix="geoh-qgis-inputs-") as directory:
-                return await self._execute(arguments, context, Path(directory).resolve(),
-                                           source_bindings=_source_bindings)
-        return await self._execute(arguments, context, source_bindings=_source_bindings)
+                result = await self._execute(arguments, context, Path(directory).resolve(),
+                                             source_bindings=_source_bindings)
+        else:
+            result = await self._execute(arguments, context, source_bindings=_source_bindings)
+        if spec_reference and not result.is_error:
+            visible = json.loads(result.output)
+            visible["spec_ref"] = spec_reference
+            result = ToolResult(output=json.dumps(visible, ensure_ascii=False, indent=2),
+                                is_error=result.is_error,
+                                metadata={**result.metadata, 'spec_ref': spec_reference})
+        return result
 
     async def _execute(self, arguments, context, snapshot_directory=None,
                        *, source_bindings=None) -> ToolResult:
@@ -670,9 +785,6 @@ class GeoQgisProjectTool(BaseTool):
                                        "reason": "QGIS is disabled"}
             from geoharness.qgis.prepared import save_preflight, summary
 
-            if arguments.layout is None and len(json.dumps(preflight, ensure_ascii=False)) <= 6000:
-                return ToolResult(output=json.dumps(preflight, ensure_ascii=False, indent=2),
-                                  metadata={"preflight": preflight, "render_executed": False})
             if preflight.get("layout_plan"):
                 requested.setdefault("layout", {})["layout_plan"] = preflight["layout_plan"]
             try:
@@ -900,9 +1012,27 @@ class GeoQgisProjectTool(BaseTool):
             key = frame[table.fields[0]]
             if key.isna().any() or key.duplicated().any():
                 raise ValueError("label_table first field must be a unique non-null roster key")
+            from geoharness.qgis.layout_table import select_roster
+
+            select_roster(frame.drop(columns=frame.geometry.name).to_dict("records"),
+                          table.model_dump())
         planned_frames = bool(arguments.layout and (
             arguments.layout.main_frame is not None or arguments.layout.detail_frame is not None
         ))
+        # Native frame visibility is measured later, but explicit coordinates must
+        # obey the very same CRS/range contract as the simple-map path now.
+        if planned_frames and (arguments.map_extent is not None or arguments.layout.detail_extent):
+            from pyproj import CRS
+
+            from geoharness.cartography.preflight import _bounds, _geographic_bounds
+
+            display_crs = CRS.from_user_input(arguments.crs)
+            for name, bounds in (("map_extent", arguments.map_extent),
+                                 ("detail_extent", arguments.layout.detail_extent.model_dump()
+                                  if arguments.layout.detail_extent else None)):
+                if bounds is not None:
+                    values = list(bounds.values()) if isinstance(bounds, dict) else bounds
+                    _geographic_bounds(_bounds(values, name=name), display_crs, name=name)
         report = validate_frames(
             frames, map_crs=arguments.crs,
             map_extent=None if planned_frames else arguments.map_extent,
