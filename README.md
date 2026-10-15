@@ -45,7 +45,12 @@ GeoHarness 是基于 OpenHarness 构建的地理空间智能体系统。它将�
 
 GeoHarness 在独立配置下组装 OpenHarness 的运行时、工具注册表、会话后端和查询引擎，不修改上游包源码。系统的逻辑结构如下。
 
-```mermaid
+![GeoHarness 系统架构：数据、计算、QGIS 制图、审查与交付](docs/assets/geoharness-architecture.svg)
+
+<details>
+<summary>查看架构图源代码（Mermaid）</summary>
+
+```text
 flowchart TB
     U["自然语言任务与工作目录"] --> H["GeoHarness 执行组织层<br/>模型调用 · 工具调度 · 数据上下文 · 会话状态"]
     H --> D["数据接入<br/>本地矢量 · 本地栅格 · 可选 PostGIS"]
@@ -60,6 +65,8 @@ flowchart TB
     V -->|"通过，或保留草稿状态"| E["工作区交付<br/>地图 · 工程 · 数据 · 回执"]
     H -. "按配置接入" .-> M["外部 MCP 服务"]
 ```
+
+</details>
 
 上述结构按职责划分为四个部分：
 
