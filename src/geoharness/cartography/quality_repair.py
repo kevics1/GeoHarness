@@ -6,11 +6,11 @@ import copy
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from geoharness.cartography.quality import MapIssue, MapReview
+from geoharness.cartography.quality import MapIssue, MapReview, resolve_issue_roi
 from geoharness.config.settings import GeoConfig
 
 
@@ -25,6 +25,8 @@ class RepairPlan:
     digest: str
     issue_ids: list[str]
     strategy: str
+    binding: dict = field(default_factory=dict)
+    rejected: list[dict] = field(default_factory=list)
 
 
 def _sha(path: Path) -> str:
@@ -90,23 +92,10 @@ def verified_package(
 
 
 def _roi(issue: MapIssue, review: MapReview) -> dict:
-    rois = review.diagnostics.get("review_rois", [])
-    roi = next(
-        (
-            r
-            for r in rois
-            if r.get("roi_ref") == issue.roi_ref
-            and r.get("frame_id") == issue.frame_id
-            and not r.get("resampled")
-        ),
-        None,
-    )
-    if not issue.issue_id or roi is None or issue.bbox is None:
-        raise RepairUnavailable("Repair needs a concrete issue ID, frame and original-pixel ROI.")
-    left, top, right, bottom = issue.bbox
-    if left >= right or top >= bottom:
-        raise RepairUnavailable("Issue ROI rectangle has no positive area.")
-    return roi
+    try:
+        return resolve_issue_roi(issue, review.diagnostics.get("review_rois", []))
+    except ValueError as exc:
+        raise RepairUnavailable(str(exc)) from exc
 
 
 def _issue_extent(issue: MapIssue, review: MapReview, frame: dict) -> list[float]:
@@ -241,6 +230,82 @@ def _nullable_dict(container: dict, key: str) -> dict:
     return value
 
 
+def _apply_layer_patch(raw: dict, suggestion: Any, related: list[MapIssue],
+                       manifest: dict, review: MapReview, frames: dict, config: GeoConfig) -> None:
+    index = suggestion.layer_index
+    layer = raw["layers"][index]
+    if suggestion.style:
+        updates = suggestion.style.model_dump(exclude_none=True)
+        if updates.get("fill_opacity", 1) < 1:
+            pair = next(
+                (
+                    _covering_pair(manifest, i, review)
+                    for i in related
+                    if _covering_pair(manifest, i, review)
+                ),
+                None,
+            )
+            if pair is None or pair[1] != index or updates["fill_opacity"] != 0:
+                raise RepairUnavailable(
+                    "Hollow fill needs an actual covering single circle."
+                )
+            from PIL import ImageColor
+
+            stroke = updates.get("outline_color", layer.get("style", {}).get("color"))
+            try:
+                opaque = (
+                    int(stroke[1:3], 16) == 255
+                    if isinstance(stroke, str)
+                    and stroke.startswith("#")
+                    and len(stroke) == 9
+                    else ImageColor.getcolor(stroke, "RGBA")[3] == 255
+                )
+            except (ValueError, TypeError):
+                opaque = False
+            width = updates.get("width_mm", layer.get("style", {}).get("width_mm", 0.3))
+            size = updates.get("size_mm", layer.get("style", {}).get("size_mm", 3))
+            lower_sizes = [
+                p.get("symbol", {}).get("size_mm", math.inf)
+                for i in related
+                for p in frames[i.frame_id].get("points", [])
+                if p.get("layer_index") == pair[0]
+            ]
+            if not opaque or width <= 0 or size - 2 * width < max(lower_sizes):
+                raise RepairUnavailable(
+                    "Hollow ring must remain visible around the capacity symbol."
+                )
+            updates["outline_color"] = stroke
+        if "size_mm" in updates and layer.get("style", {}).get("renderer") in {
+            "categorized",
+            "graduated",
+        }:
+            current_size = layer.get("style", {}).get("size_mm", 3)
+            if updates["size_mm"] > current_size:
+                raise RepairUnavailable("Do not increase all classified point symbols.")
+        if "width_mm" in updates:
+            spans = [
+                b.get("minimum_span_mm")
+                for i in related
+                for b in frames[i.frame_id].get("layer_bboxes", [])
+                if b.get("layer_index") == index
+            ]
+            spans = [s for s in spans if isinstance(s, (int, float)) and s > 0]
+            if not spans or 2 * updates["width_mm"] / min(spans) > getattr(
+                config.map_review, "max_border_fraction", 0.08
+            ):
+                raise RepairUnavailable("Stroke lacks safe measured paper-span evidence.")
+        if updates.get("opacity", 1) < 1 and layer.get("style", {}).get("renderer") in {
+            "categorized",
+            "graduated",
+        }:
+            raise RepairUnavailable("Repair must preserve classified point encoding.")
+        layer.setdefault("style", {}).update(updates)
+    if suggestion.label_style:
+        layer.setdefault("label_style", {}).update(
+            suggestion.label_style.model_dump(exclude_none=True)
+        )
+
+
 def build_repair_plan(
     image: Path, review: MapReview, receipt: dict, *, config: GeoConfig, cwd: Path
 ) -> RepairPlan:
@@ -253,6 +318,20 @@ def build_repair_plan(
     spec = manifest.get("creation_spec")
     if not isinstance(spec, dict):
         raise RepairUnavailable("Saved or edited project has no reproducible creation spec.")
+    binding = {
+        "image_sha256": package["image_sha256"],
+        "primary_image_sha256": package["image_sha256"], "page_index": 0,
+        "map_id": receipt["job_id"], "version": package["version"]["version"],
+        "manifest_sha256": package["recorded"][(root / "project.json").resolve()],
+        "source_bindings_sha256": hashlib.sha256(json.dumps(
+            spec.get("source_bindings", []), sort_keys=True,
+            ensure_ascii=False).encode()).hexdigest(),
+    }
+    declared = review.diagnostics.get("review_binding") or {}
+    if any(key in declared and declared[key] is not None and declared[key] != value
+           for key, value in binding.items()):
+        raise RepairUnavailable(
+            "Visual review belongs to a different map version or source package.")
     raw = copy.deepcopy(spec.get("parameters"))
     sources = copy.deepcopy(spec.get("source_bindings"))
     if not isinstance(raw, dict) or not isinstance(raw.get("layers"), list):
@@ -265,9 +344,18 @@ def build_repair_plan(
     layout.pop("layout_plan", None)
     if len(sources) != len(raw["layers"]):
         raise RepairUnavailable("Creation source bindings do not match the complete layer array.")
-    for layer in raw["layers"]:
+    from geoharness.qgis.layer_identity import stable_layer_key
+
+    by_index = {layer.get("source_index", index): layer for index, layer in
+                enumerate(manifest.get("layers", []))}
+    for index, layer in enumerate(raw["layers"]):
         if not isinstance(layer, dict) or not isinstance(layer.get("file_path"), str):
             raise RepairUnavailable("Creation layers need packaged file paths.")
+        if not layer.get("layer_key"):
+            source = sources[index]
+            layer["layer_key"] = by_index.get(index, {}).get("layer_key") or stable_layer_key(
+                layer.get("kind", "vector"), layer.get("name", source.get("label", "")),
+                source.get("file_path", layer["file_path"]), source.get("layer_name", ""))
         if layer.get("kind", "vector") == "vector":
             _nullable_dict(layer, "style")
         path = (root / layer["file_path"]).resolve()
@@ -292,36 +380,52 @@ def build_repair_plan(
     if len(issues) != len([i for i in review.issues if i.severity in {"warning", "error"}]):
         raise RepairUnavailable("Actionable issues require unique identifiers.")
     patch, strategy = review.qgis_patch, review.next_strategy
-    all_ids = {i.issue_id for i in review.issues}
-    proposed = [*(patch.issue_ids if patch else []), *(strategy.issue_ids if strategy else [])]
-    if any(i not in all_ids for i in proposed):
-        raise RepairUnavailable("Presentation proposal references unknown issue identifiers.")
-    patch_ids = [i for i in patch.issue_ids if i in issues] if patch else []
-    strategy_ids = [i for i in strategy.issue_ids if i in issues] if strategy else []
+    original_issues = {issue.issue_id: issue for issue in review.issues}
+    info_ids = {key for key, issue in original_issues.items() if issue.severity == "info"}
+    proposed = list(dict.fromkeys([*(patch.issue_ids if patch else []),
+                                  *(strategy.issue_ids if strategy else [])]))
+    frames = manifest["native_facts"].get("frames", {})
+    rejected = []
+    for key in proposed:
+        if key in info_ids:
+            continue
+        issue = issues.get(key)
+        try:
+            if issue is None:
+                raise RepairUnavailable("Presentation proposal references an unknown issue.")
+            _roi(issue, review)
+            planned = (manifest.get("layout_plan") or {}).get("frames", {}).get(issue.frame_id, {})
+            if frames.get(issue.frame_id, {}).get("page_index", planned.get("page_index", 0)):
+                raise RepairUnavailable("Issue frame is not on the reviewed PNG page.")
+            if issue.native_assertion != "none":
+                raise RepairUnavailable("A native assertion alone cannot authorize visual repair.")
+            if any(index >= len(raw["layers"]) for index in issue.source_indices):
+                raise RepairUnavailable("Issue references unknown original source indices.")
+            if issue.frame_id in frames:
+                if not set(issue.source_indices) <= set(frames[issue.frame_id].get(
+                    "source_indices", [])):
+                    raise RepairUnavailable("Issue sources are not drawn in the native frame.")
+            elif issue.frame_id == "legend":
+                rows = (manifest.get("layout", {}).get("legends", {}).get("legend", {}).get(
+                    "rows", []))
+                if not set(issue.source_indices) <= {row.get("layer_index") for row in rows}:
+                    raise RepairUnavailable("Legend issue sources have no actual legend nodes.")
+            elif issue.frame_id != "footer" or issue.source_indices:
+                raise RepairUnavailable(
+                    "Non-map ROI only supports its measured layout presentation.")
+        except RepairUnavailable as exc:
+            issues.pop(key, None)
+            rejected.append({"issue_id": key, "reason": str(exc)})
+    patch_ids = [key for key in patch.issue_ids if key in issues] if patch else []
+    strategy_ids = [key for key in strategy.issue_ids if key in issues] if strategy else []
+    if strategy and any(key not in issues for key in strategy.issue_ids if key not in info_ids):
+        rejected.append({"unit": "strategy", "reason": "Coupled strategy has invalid issues."})
+        strategy_ids = []
     identifiers = list(dict.fromkeys([*patch_ids, *strategy_ids]))
     if not identifiers:
-        raise RepairUnavailable("Presentation proposal is not bound to concrete issues.")
-    selected = [issues[i] for i in identifiers]
-    frames = manifest["native_facts"].get("frames", {})
-    for issue in selected:
-        _roi(issue, review)
-        if issue.native_assertion != "none":
-            raise RepairUnavailable("A native assertion alone cannot authorize visual repair.")
-        if any(i >= len(raw["layers"]) for i in issue.source_indices):
-            raise RepairUnavailable("Issue references unknown original source indices.")
-        if any(type(i) is not int or i < 0 for i in issue.source_indices):
-            raise RepairUnavailable("Source references must be actual nonnegative integers.")
-        if issue.frame_id in frames:
-            if not set(issue.source_indices) <= set(
-                frames[issue.frame_id].get("source_indices", [])
-            ):
-                raise RepairUnavailable("Issue sources are not drawn in the native frame.")
-        elif issue.frame_id == "legend":
-            rows = (manifest.get("layout", {}).get("legends", {}).get("legend", {}).get("rows", []))
-            if not set(issue.source_indices) <= {row.get("layer_index") for row in rows}:
-                raise RepairUnavailable("Legend issue sources have no actual legend nodes.")
-        elif issue.frame_id != "footer" or issue.source_indices:
-            raise RepairUnavailable("Non-map ROI only supports its measured layout presentation.")
+        reason = rejected[-1]["reason"] if rejected else "No concrete presentation issues."
+        raise RepairUnavailable(reason)
+    selected = [issues[key] for key in identifiers]
     mode = strategy.strategy if strategy_ids else None
     identity_report = {"source_bindings": sources, "layers": manifest.get("layers", [])}
     if any(_repeat(i, receipt, package["image_sha256"],
@@ -365,9 +469,9 @@ def build_repair_plan(
         main = _nullable_dict(layout, "main_frame")
         if main.get("render_layers") is None:
             main["render_layers"] = original
-        detail = {
-            "render_layers": list(main["render_layers"]),
-        }
+        detail = copy.deepcopy(layout.get("detail_frame") or {})
+        detail["render_layers"] = list(main["render_layers"])
+        detail.pop("focus_layers", None)
         if mode == "split_maps":
             pair = _covering_pair(manifest, issue, review)
             if pair is None:
@@ -411,89 +515,81 @@ def build_repair_plan(
             raise RepairUnavailable("Detail/split would omit required layer content.")
     elif patch is not None:
         mode = "adjust_presentation"
-        if patch.layout:
-            layout.update(patch.layout.model_dump(exclude_none=True))
-        if patch.dpi is not None:
-            raw["dpi"] = patch.dpi
+        used = set()
+        accepted_layers = set()
+        original_layout = copy.deepcopy(layout)
+        original_dpi = raw.get("dpi")
+        unknown = any(key not in original_issues for key in patch.issue_ids)
+        # Layout/DPI are coupled across frames. A bad supporting issue blocks this unit only.
+        if not any(key not in issues for key in patch.issue_ids if key not in info_ids):
+            if patch.layout:
+                updates = patch.layout.model_dump(exclude_none=True)
+                if "detail_minimum_zoom" in updates:
+                    if (layout.get("detail_minimum_zoom") is not None and
+                            layout.get("detail_zoom_policy", "hard") == "hard"):
+                        updates.pop("detail_minimum_zoom")
+                    else:
+                        updates["detail_zoom_policy"] = "advisory"
+                if updates:
+                    layout.update(updates)
+                    used.update(patch_ids)
+            if patch.dpi is not None:
+                raw["dpi"] = patch.dpi
+                used.update(patch_ids)
+        elif patch.layout or patch.dpi is not None:
+            rejected.append({"unit": "layout",
+                             "reason": "Coupled page changes have invalid issues."})
+        page_used = set(used)
+        units = []
         for suggestion in patch.layers:
             index = suggestion.layer_index
-            related = [i for i in selected if index in i.source_indices and i.frame_id in frames]
-            if not related and any(i.severity == "info" and i.issue_id in patch.issue_ids
-                                   and index in i.source_indices for i in review.issues):
+            related = [issues[key] for key in patch_ids if index in issues[key].source_indices
+                       and issues[key].frame_id in frames]
+            invalid_related = any(key in original_issues and key not in issues
+                                  and index in original_issues[key].source_indices
+                                  for key in patch.issue_ids if key not in info_ids)
+            if unknown or index >= len(raw["layers"]) or not related or invalid_related:
+                rejected.append({"layer_index": index,
+                                 "reason": "Layer repair has no independent bound native issue."})
                 continue
-            if index >= len(raw["layers"]) or not related:
-                raise RepairUnavailable("Layer repair has no matching native frame/ROI issue.")
-            layer = raw["layers"][index]
-            if suggestion.style:
-                updates = suggestion.style.model_dump(exclude_none=True)
-                if updates.get("fill_opacity", 1) < 1:
-                    pair = next(
-                        (
-                            _covering_pair(manifest, i, review)
-                            for i in related
-                            if _covering_pair(manifest, i, review)
-                        ),
-                        None,
-                    )
-                    if pair is None or pair[1] != index or updates["fill_opacity"] != 0:
-                        raise RepairUnavailable(
-                            "Hollow fill needs an actual covering single circle."
-                        )
-                    from PIL import ImageColor
-
-                    stroke = updates.get("outline_color", layer.get("style", {}).get("color"))
-                    try:
-                        opaque = (
-                            int(stroke[1:3], 16) == 255
-                            if isinstance(stroke, str)
-                            and stroke.startswith("#")
-                            and len(stroke) == 9
-                            else ImageColor.getcolor(stroke, "RGBA")[3] == 255
-                        )
-                    except (ValueError, TypeError):
-                        opaque = False
-                    width = updates.get("width_mm", layer.get("style", {}).get("width_mm", 0.3))
-                    size = updates.get("size_mm", layer.get("style", {}).get("size_mm", 3))
-                    lower_sizes = [
-                        p.get("symbol", {}).get("size_mm", math.inf)
-                        for i in related
-                        for p in frames[i.frame_id].get("points", [])
-                        if p.get("layer_index") == pair[0]
-                    ]
-                    if not opaque or width <= 0 or size - 2 * width < max(lower_sizes):
-                        raise RepairUnavailable(
-                            "Hollow ring must remain visible around the capacity symbol."
-                        )
-                    updates["outline_color"] = stroke
-                if "size_mm" in updates and layer.get("style", {}).get("renderer") in {
-                    "categorized",
-                    "graduated",
-                }:
-                    current_size = layer.get("style", {}).get("size_mm", 3)
-                    if updates["size_mm"] > current_size:
-                        raise RepairUnavailable("Do not increase all classified point symbols.")
-                if "width_mm" in updates:
-                    spans = [
-                        b.get("minimum_span_mm")
-                        for i in related
-                        for b in frames[i.frame_id].get("layer_bboxes", [])
-                        if b.get("layer_index") == index
-                    ]
-                    spans = [s for s in spans if isinstance(s, (int, float)) and s > 0]
-                    if not spans or 2 * updates["width_mm"] / min(spans) > getattr(
-                        config.map_review, "max_border_fraction", 0.08
-                    ):
-                        raise RepairUnavailable("Stroke lacks safe measured paper-span evidence.")
-                if updates.get("opacity", 1) < 1 and layer.get("style", {}).get("renderer") in {
-                    "categorized",
-                    "graduated",
-                }:
-                    raise RepairUnavailable("Repair must preserve classified point encoding.")
-                layer.setdefault("style", {}).update(updates)
-            if suggestion.label_style:
-                layer.setdefault("label_style", {}).update(
-                    suggestion.label_style.model_dump(exclude_none=True)
-                )
+            units.append((suggestion, related))
+        # Layer changes sharing a visual issue form one atomic unit (for example, a hollow ring).
+        groups = []
+        for suggestion, related in units:
+            identifiers_for_unit = {issue.issue_id for issue in related}
+            members = [(suggestion, related)]
+            for group in list(groups):
+                if identifiers_for_unit.intersection(group[0]):
+                    identifiers_for_unit.update(group[0])
+                    members.extend(group[1])
+                    groups.remove(group)
+            groups.append((identifiers_for_unit, members))
+        for group_ids, members in groups:
+            candidate = copy.deepcopy(raw)
+            try:
+                for suggestion, related in members:
+                    _apply_layer_patch(candidate, suggestion, related, manifest, review,
+                                       frames, config)
+                GeoQgisProjectInput.model_validate(candidate)
+            except ValueError as exc:
+                rejected.append({"issue_ids": sorted(group_ids), "reason": str(exc)})
+                if page_used.intersection(group_ids):
+                    # A page edit and a rejected layer edit citing the same issue are coupled.
+                    raw["layout"] = copy.deepcopy(original_layout)
+                    if original_dpi is None:
+                        raw.pop("dpi", None)
+                    else:
+                        raw["dpi"] = original_dpi
+                    page_used.clear()
+                    used = set(accepted_layers)
+            else:
+                raw = candidate
+                accepted_layers.update(group_ids)
+                used.update(group_ids)
+        identifiers = [key for key in identifiers if key in used]
+        if not identifiers:
+            reason = rejected[-1]["reason"] if rejected else "No independent bound change remains."
+            raise RepairUnavailable(reason)
     else:
         raise RepairUnavailable("Review contains no executable presentation proposal.")
     parameters = GeoQgisProjectInput.model_validate(raw)
@@ -518,4 +614,4 @@ def build_repair_plan(
     digest = hashlib.sha256(
         json.dumps(material, sort_keys=True, ensure_ascii=False, default=str).encode()
     ).hexdigest()
-    return RepairPlan(parameters, sources, digest, identifiers, mode)
+    return RepairPlan(parameters, sources, digest, identifiers, mode, binding, rejected)

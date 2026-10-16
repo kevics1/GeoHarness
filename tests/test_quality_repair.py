@@ -3,6 +3,7 @@
 import hashlib
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -232,6 +233,166 @@ def test_info_reference_does_not_discard_an_independent_valid_patch(tmp_path):
     plan = build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
     assert plan.parameters.layers[1].style.fill_opacity == 0
     assert plan.issue_ids == ["capacity-covered"]
+
+
+def test_bad_footer_binding_preserves_independent_layer_fixes_but_not_page_changes(tmp_path):
+    from geoharness.cartography.quality import MapIssue, QgisPresentationPatch
+    from geoharness.cartography.quality_repair import build_repair_plan
+
+    image, receipt, _, _ = package(tmp_path)
+    review = overlapping_review()
+    first = review.issues[0]
+    first.source_indices = [1]
+    second = first.model_copy(update={"issue_id": "I4", "source_indices": [0]})
+    review.issues.extend([second, MapIssue(issue_id="I5", severity="warning",
+        description="Footer density", frame_id="whole", roi_ref="footer", bbox=[0, 0, 1, 1])])
+    review.diagnostics["review_rois"].append({
+        "roi_ref": "footer", "frame_id": "footer", "pixel_bbox": [0, 90, 100, 100],
+        "region_bbox": [0, 90, 100, 100], "original_size": [100, 100], "resampled": False})
+    review.qgis_patch = QgisPresentationPatch.model_validate({
+        "issue_ids": [first.issue_id, "I4", "I5"], "layout": {"footer_height_mm": 30},
+        "layers": [{"layer_index": 1, "label_style": {"size_pt": 9}},
+                   {"layer_index": 0, "label_style": {"priority": 8}}]})
+    plan = build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+    assert plan.parameters.layers[1].label_style.size_pt == 9
+    assert plan.parameters.layers[0].label_style.priority == 8
+    assert plan.parameters.layout.footer_height_mm != 30
+    assert plan.issue_ids == [first.issue_id, "I4"]
+    assert any(item.get("issue_id") == "I5" for item in plan.rejected)
+
+
+def test_coupled_layer_and_page_changes_rollback_together(tmp_path):
+    from geoharness.cartography.quality import QgisPresentationPatch
+    from geoharness.cartography.quality_repair import RepairUnavailable, build_repair_plan
+
+    image, receipt, _, _ = package(tmp_path)
+    review = overlapping_review()
+    review.qgis_patch = QgisPresentationPatch.model_validate({
+        "issue_ids": ["capacity-covered"], "layout": {"width_mm": 120},
+        "layers": [{"layer_index": 1, "style": {"size_mm": 4}},
+                   {"layer_index": 0, "style": {"size_mm": 10}}]})
+    with pytest.raises(RepairUnavailable, match="classified"):
+        build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+
+
+@pytest.mark.parametrize("key,value", [("image_sha256", "old"), ("version", 99),
+                                        ("source_bindings_sha256", "different")])
+def test_repair_cannot_retarget_a_review_to_another_map_or_source(tmp_path, key, value):
+    from geoharness.cartography.quality_repair import RepairUnavailable, build_repair_plan
+
+    image, receipt, _, _ = package(tmp_path)
+    review = overlapping_review()
+    review.diagnostics["review_binding"] = {key: value}
+    with pytest.raises(RepairUnavailable, match="different map version or source"):
+        build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+
+
+@pytest.mark.parametrize("hard", [False, True, "legacy"])
+def test_review_zoom_is_advisory_and_keeps_explicit_user_hard_requirement(tmp_path, hard):
+    from geoharness.cartography.quality import QgisPresentationPatch
+    from geoharness.cartography.quality_repair import build_repair_plan
+
+    image, receipt, metadata, manifest = package(tmp_path)
+    layout = manifest["creation_spec"]["parameters"]["layout"]
+    layout.update(detail_extent={"xmin": 40, "ymin": 40, "xmax": 60, "ymax": 60})
+    if hard:
+        layout["detail_minimum_zoom"] = 2
+        if hard is True:
+            layout["detail_zoom_policy"] = "hard"
+    (image.parent / "project.json").write_text(json.dumps(manifest), encoding="utf-8")
+    receipt = record_map_version(receipt["job_id"], metadata, cwd=tmp_path, config=GeoConfig(),
+        image_path=image, preflight=None, layout=manifest["layout"], project_dir=image.parent)
+    review = overlapping_review()
+    review.qgis_patch = QgisPresentationPatch.model_validate({"issue_ids": ["capacity-covered"],
+        "layout": {"detail_minimum_zoom": 10, "width_mm": 120}})
+    plan = build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+    assert plan.parameters.layout.detail_minimum_zoom == (2 if hard else 10)
+    assert plan.parameters.layout.detail_zoom_policy == ("hard" if hard else "advisory")
+
+
+async def test_registered_detail_page_uses_its_pixels_and_does_not_create_a_map_version(tmp_path):
+    import copy
+
+    from openharness.tools.base import ToolExecutionContext
+    from test_map_review_evidence import Reviewer
+
+    from geoharness.tools.geo_map_review import (
+        GeoMapReviewInput,
+        GeoMapReviewTool,
+        _verified_render_evidence,
+    )
+
+    image, receipt, metadata, manifest = package(tmp_path)
+    detail = image.parent / "detail_page_2.png"
+    Image.new("RGB", (100, 100), "blue").save(detail)
+    frame = copy.deepcopy(manifest["native_facts"]["frames"]["main_map"])
+    frame.update(page_index=1, rect_mm=[10, 210, 80, 70], rect_page_mm=[10, 10, 80, 70])
+    manifest["native_facts"]["frames"]["detail_map"] = frame
+    manifest["native_facts"]["page_previews"] = [
+        {"page_index": 0, "path": str(image), "frames": ["main_map"]},
+        {"page_index": 1, "path": str(detail), "frames": ["detail_map"]}]
+    manifest["files"].append(detail.name)
+    (image.parent / "project.json").write_text(json.dumps(manifest), encoding="utf-8")
+    receipt = record_map_version(receipt["job_id"], metadata, cwd=tmp_path, config=GeoConfig(),
+        image_path=image, preflight=None, layout=manifest["layout"], project_dir=image.parent)
+    reviewer = Reviewer()
+    metadata.update(geoharness_config=GeoConfig(), map_review_client=reviewer)
+    context = ToolExecutionContext(cwd=tmp_path, metadata=metadata)
+    first = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(image), map_id=receipt["job_id"], task="Check actual detail"), context)
+    assert first.metadata["review_status"] == "unverified"
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(detail), map_id=receipt["job_id"], task="Check actual detail"),
+        context)
+    assert result.metadata["review_page_index"] == 1
+    assert len(result.metadata["map_receipt"]["versions"]) == 1
+    assert result.metadata["map_receipt"]["stages"]["visual_checked"]["status"] == "passed"
+    assert result.metadata["map_receipt"]["stages"]["visual_checked"]["scope"] == (
+        "all_native_map_pages")
+    report = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
+    diagnostics = report["diagnostics"]
+    assert diagnostics["page_visual_status"] == "passed"
+    assert diagnostics["review_binding"]["page_index"] == 1
+    assert diagnostics["review_binding"]["primary_image_sha256"] == manifest["preview_sha256"]
+    assert [roi["roi_ref"] for roi in diagnostics["review_rois"]] == ["whole", "detail_map"]
+    assert diagnostics["review_rois"][1]["pixel_bbox"] == [10, 10, 90, 80]
+    Image.new("RGB", (100, 100), "red").save(detail)
+    assert _verified_render_evidence(detail, hashlib.sha256(detail.read_bytes()).hexdigest(),
+        receipt, [tmp_path])["backend"] == "unknown"
+
+
+@pytest.mark.parametrize("status", ["passed", "issues"])
+async def test_only_clean_cached_pixels_can_rebind_to_a_new_native_package(
+    tmp_path, monkeypatch, status,
+):
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+    first, receipt, metadata, _ = package(tmp_path)
+    image, _, _, _ = package(tmp_path, metadata, name="new-package", map_id=receipt["job_id"],
+                              project_content=b"changed saved project with equal preview pixels")
+    assert first.read_bytes() == image.read_bytes()
+    review = (MapReview(status="passed", summary="Readable") if status == "passed"
+              else overlapping_review())
+    review.diagnostics["review_binding"] = {"version": 1, "manifest_sha256": "old-package"}
+    async def cached(*args, **kwargs):
+        return review, {"review_cached": True, "review_budget_exhausted": False,
+                       "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                       "visual_review_status": status}
+    monkeypatch.setattr("geoharness.tools.geo_map_review.review_with_budget", cached)
+    metadata["geoharness_config"] = GeoConfig()
+    result = await GeoMapReviewTool()._review_one(GeoMapReviewInput(
+        file_path=str(image), map_id=receipt["job_id"], task="Check"),
+        ToolExecutionContext(cwd=tmp_path, metadata=metadata))
+    report = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
+    if status == "passed":
+        assert report["diagnostics"]["review_binding"]["version"] == 2
+        assert report["diagnostics"]["pixel_pass_rebound_to_current_package"] is True
+    else:
+        assert report["diagnostics"]["review_binding"]["version"] == 1
+        assert report["qgis_patch"] is None
+        assert report["diagnostics"]["repair_binding_status"] == "stale_cached_package"
 
 
 def test_strategy_uses_its_own_issues_instead_of_first_whitespace_patch(tmp_path):
@@ -532,6 +693,9 @@ def test_detail_uses_only_native_features_inside_roi_without_trimming_main(tmp_p
     image, receipt, metadata, manifest = package(tmp_path)
     manifest["native_facts"]["frames"]["main_map"]["points"].append(
         {"layer_index": 1, "feature_id": 99, "x": 95, "y": 95, "symbol": {}})
+    manifest["creation_spec"]["parameters"]["layout"]["detail_frame"] = {
+        "purpose": "Local capacity subjects", "requirements": [{"layer_index": 0,
+            "coverage": "complete", "key_field": "cap", "feature_keys": [40000]}]}
     (image.parent / "project.json").write_text(json.dumps(manifest), encoding="utf-8")
     receipt = record_map_version(receipt["job_id"], metadata, cwd=tmp_path, config=GeoConfig(),
         image_path=image, preflight=None, layout=manifest["layout"], project_dir=image.parent)
@@ -546,6 +710,9 @@ def test_detail_uses_only_native_features_inside_roi_without_trimming_main(tmp_p
     assert detail.ymin < 50 < detail.ymax < 95
     assert plan.parameters.layout.detail_frame.focus_layers is None
     assert plan.parameters.layout.detail_frame.render_layers == [0, 1]
+    assert plan.parameters.layout.detail_frame.purpose == "Local capacity subjects"
+    assert plan.parameters.layout.detail_frame.requirements[0].feature_keys == [40000]
+    assert plan.parameters.layout.detail_frame.requirements[0].coverage == "complete"
 
 
 def test_equal_pixel_copy_requires_explicit_version_and_actual_same_package(tmp_path):

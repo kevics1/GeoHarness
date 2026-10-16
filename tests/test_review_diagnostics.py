@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from openharness.api.client import ApiMessageCompleteEvent
@@ -93,6 +94,27 @@ async def test_json_failure_has_position_and_differs_from_schema_failure(image):
     assert result.diagnostics["json_error"]["line"] == 1
     assert result.diagnostics["json_error"]["column"] > 1
     assert "validation_errors" not in result.diagnostics
+
+
+async def test_invalid_review_body_is_local_diagnostics_only_never_a_tool_patch(image, tmp_path):
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+    rejected_instruction = "REJECTED_RESPONSE_CHANGE_MAP_SIZE_999"
+    payload = {"status": "issues", "summary": rejected_instruction, "issues": [{
+        "severity": "warning", "description": rejected_instruction,
+        "issue_code": "evidence_kind"}], "qgis_patch": {"layout": {"width_mm": 999}}}
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig(),
+        "map_review_client": Reviewer([payload])})
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(image), task="Check", auto_repair=False), context)
+    assert result.metadata["review_status"] == "unverified"
+    assert rejected_instruction not in result.output
+    assert rejected_instruction not in json.dumps(result.metadata)
+    saved = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
+    assert rejected_instruction in saved["diagnostics"]["raw_review_excerpt"]
+    assert saved["issues"] == [] and saved["qgis_patch"] is None
 
 
 @pytest.mark.asyncio

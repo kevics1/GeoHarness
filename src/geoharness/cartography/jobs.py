@@ -634,6 +634,62 @@ def record_map_selection(
         return _receipt(job, index, artifact=image, selected_version=version["version"])
 
 
+def _map_page_files(version: dict) -> dict[int, dict]:
+    """Read page membership only from the hash-recorded native project manifest."""
+    package = version.get("stages", {}).get("packaged", {})
+    manifest_path = package.get("manifest_path")
+    if not manifest_path:
+        return {}
+    files = {entry.get("path"): entry.get("sha256") for entry in package.get("files", [])}
+    manifest_hash = files.get(manifest_path)
+    if not manifest_hash or _sha(Path(manifest_path)) != manifest_hash:
+        return {}
+    manifest = _read(Path(manifest_path), {})
+    if manifest.get("backend") != "qgis":
+        return {}
+    entries = (manifest.get("native_facts") or {}).get("page_previews", [])
+    root = Path(manifest_path).parent.resolve()
+    pages = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        index, locator = entry.get("page_index"), entry.get("path")
+        if type(index) is not int or index < 0 or not entry.get("frames") or not locator:
+            continue  # Roster pages have native layout checks, no map-pixel acceptance.
+        path = Path(locator)
+        path = (path if path.is_absolute() else root / path).resolve()
+        if not path.is_relative_to(root) or str(path) not in files or index in pages:
+            raise ValueError("Native page preview is not a unique recorded package member")
+        pages[index] = {"path": str(path), "sha256": files[str(path)],
+                        "manifest_sha256": manifest_hash, "frames": entry["frames"]}
+    return pages
+
+
+def _aggregate_page_reviews(version: dict, pages: dict[int, dict]) -> None:
+    if len(pages) <= 1:
+        return
+    recorded = version.get("page_reviews", {})
+    summaries = []
+    for index, page in sorted(pages.items()):
+        review = recorded.get(str(index), {})
+        status = review.get("status", "unverified")
+        if review.get("image_sha256") != page["sha256"]:
+            status = "unverified"
+        reference = review.get("report_reference")
+        if (_sha(Path(page["path"])) != page["sha256"] or
+                isinstance(reference, dict) and _sha(Path(reference["path"])) !=
+                reference.get("sha256")):
+            status = "stale"
+        summaries.append({"page_index": index, "status": status, **page})
+    statuses = {page["status"] for page in summaries}
+    status = ("stale" if "stale" in statuses else "issues" if "issues" in statuses
+              else "passed" if statuses == {"passed"} else "unverified")
+    primary = recorded.get("0", {})
+    version["stages"]["visual_checked"] = {**primary, "status": status,
+        "image_sha256": version["image_sha256"], "page_reviews": summaries,
+        "scope": "all_native_map_pages"}
+
+
 def record_map_review(
     job_id: str,
     metadata: dict[str, Any],
@@ -651,15 +707,41 @@ def record_map_review(
         index = _index(directory)
         image = _path(image_path, cwd)
         version = _matching_version(job, image)
+        raw_diagnostics = review.get("diagnostics", {})
+        diagnostics = raw_diagnostics if isinstance(raw_diagnostics, dict) else {}
+        binding = diagnostics.get("review_binding") or {}
+        binding = binding if isinstance(binding, dict) else {}
+        page_index = binding.get("page_index", 0)
+        if type(page_index) is not int or page_index < 0:
+            raise ValueError("Page review requires an actual nonnegative page index")
+        if version is None and type(page_index) is int and page_index > 0:
+            version = next((item for item in job.get("versions", [])
+                if item.get("version") == binding.get("version") and
+                item.get("image_sha256") == binding.get("primary_image_sha256")), None)
+            pages = _map_page_files(version) if version else {}
+            page = pages.get(page_index)
+            if not page or page["path"] != str(image) or page["sha256"] != _sha(image) or \
+                    page["manifest_sha256"] != binding.get("manifest_sha256"):
+                version = None
         if version is None:
             return _receipt(job, index, artifact=image)
         digest = version["image_sha256"]
-        bound = review.get("image_sha256") == digest
+        pages = _map_page_files(version)
+        if page_index != 0:
+            page = pages.get(page_index)
+            if (not page or binding.get("version") != version.get("version") or
+                    binding.get("primary_image_sha256") != version["image_sha256"] or
+                    binding.get("manifest_sha256") != page["manifest_sha256"] or
+                    str(image) != page["path"]):
+                raise ValueError("Page review does not bind this recorded map version")
+        page_digest = pages.get(page_index, {}).get("sha256", digest)
+        bound = review.get("image_sha256") == page_digest == _sha(image)
         status = review.get("visual_review_status", review.get("status", "unverified"))
-        diagnostics = review.get("diagnostics", {})
+        if len(pages) > 1 and diagnostics.get("page_visual_status") in {"passed", "issues"}:
+            status = diagnostics["page_visual_status"]
         incomplete = (
             not bound
-            or not isinstance(diagnostics, dict)
+            or not isinstance(raw_diagnostics, dict)
             or diagnostics.get("failure_stage")
             or diagnostics.get("finish_reason") in {"length", "content_filter"}
         )
@@ -674,12 +756,17 @@ def record_map_review(
             status = "unverified"
         elif issue or patch or status == "issues":
             status = "issues"
-        version["stages"]["visual_checked"] = {
+        stage = {
             "status": status,
-            "image_sha256": digest,
+            "image_sha256": page_digest,
             **_report(review, cwd, config),
         }
-        if measured_layout is not None:
+        if pages:
+            version.setdefault("page_reviews", {})[str(page_index)] = stage
+        if page_index == 0:
+            version["stages"]["visual_checked"] = stage
+        _aggregate_page_reviews(version, pages)
+        if measured_layout is not None and page_index == 0:
             version["stages"]["layout_checked"] = {
                 "status": _layout_status(measured_layout, digest, {}),
                 "image_sha256": digest,
@@ -690,7 +777,7 @@ def record_map_review(
             version["stages"]["layout_checked"]["status"] = layout_status
         _save(directory, job, index)
         _sync_state(metadata, cwd, directory, index)
-        return _receipt(job, index, artifact=image)
+        return _receipt(job, index, artifact=Path(version["image_path"]))
 
 
 def record_map_delivery(
@@ -782,6 +869,7 @@ def _receipt(
     if version is None:
         stages = {key: {"status": "unverified"} for key in _STAGES}
     else:
+        _aggregate_page_reviews(version, _map_page_files(version))
         stages = version["stages"]
         selected_path = artifact if artifact is not None else Path(version["image_path"])
         image_changed = (

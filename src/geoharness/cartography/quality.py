@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
 import io
 import json
 import math
@@ -161,6 +162,124 @@ class MapReview(BaseModel):
 
 class _IncompleteReview(Exception):
     """A known provider completion condition with a safe diagnostic."""
+
+
+def resolve_issue_roi(issue: MapIssue, rois: list[dict]) -> dict:
+    """Resolve a measured original-pixel crop; strings alone are not evidence."""
+    matches = [roi for roi in rois if isinstance(roi, dict)
+               and roi.get("roi_ref") == issue.roi_ref
+               and roi.get("frame_id") == issue.frame_id
+               and roi.get("resampled") is False]
+    if not issue.issue_id or issue.bbox is None or len(matches) != 1:
+        raise ValueError("Repair needs a concrete issue ID, frame and original-pixel ROI.")
+    roi = matches[0]
+    if issue.bbox[0] >= issue.bbox[2] or issue.bbox[1] >= issue.bbox[3]:
+        raise ValueError("Issue ROI rectangle has no positive area.")
+    crop, region, size = (roi.get(key) for key in
+                          ("pixel_bbox", "region_bbox", "original_size"))
+    def rectangle(value: Any) -> bool:
+        return (isinstance(value, list) and len(value) == 4
+                and all(type(x) in {int, float} and math.isfinite(x) for x in value)
+                and value[0] < value[2] and value[1] < value[3])
+    if (not rectangle(crop) or not rectangle(region)
+            or not isinstance(size, list) or len(size) != 2
+            or any(type(x) is not int or x <= 0 for x in size)
+            or not (0 <= region[0] <= crop[0] < crop[2] <= region[2] <= size[0]
+                    and 0 <= region[1] <= crop[1] < crop[3] <= region[3] <= size[1])):
+        raise ValueError("Issue ROI has no valid original-image geometry.")
+    return roi
+
+
+def review_execution_payload(value: Any) -> Any:
+    """Keep rejected provider text in local diagnostics, outside agent tool results."""
+    private = {"raw_review_excerpt", "ignored_qgis_patch", "ignored_layout_patch",
+               "ignored_next_strategy", "ignored_qgis_layer_patches",
+               "ignored_qgis_layer_fields"}
+    if isinstance(value, dict):
+        return {key: review_execution_payload(item) for key, item in value.items()
+                if key not in private}
+    if isinstance(value, list):
+        return [review_execution_payload(item) for item in value]
+    return value
+
+
+def _bind_qgis_issues(result: MapReview, evidence: dict, diagnostics: dict) -> None:
+    """Quarantine bad bindings without discarding unrelated layer adjustments."""
+    metadata = evidence.get("render_metadata") or {}
+    facts = metadata.get("native_facts") or {}
+    page_index = metadata.get("review_page_index", 0)
+    if not facts.get("frames"):
+        return  # Suggestions without native facts remain non-executable at the compiler.
+    disputed = {item["issue_id"] for item in diagnostics.get("disputed_native_assertions", [])}
+    issues = {issue.issue_id: issue for issue in result.issues}
+    counts = {key: sum(issue.issue_id == key for issue in result.issues) for key in issues}
+    invalid = {}
+    for identifier, issue in issues.items():
+        if issue.severity not in {"warning", "error"}:
+            continue
+        try:
+            if counts[identifier] != 1:
+                raise ValueError("Issue identifiers must be unique.")
+            resolve_issue_roi(issue, diagnostics.get("review_rois", []))
+            if identifier in disputed or issue.native_assertion != "none":
+                raise ValueError("A native assertion cannot authorize a visual repair.")
+            frame = facts["frames"].get(issue.frame_id)
+            if frame is not None:
+                planned = (metadata.get("layout_plan") or {}).get("frames", {}).get(
+                    issue.frame_id, {})
+                if frame.get("page_index", planned.get("page_index", 0)) != page_index:
+                    raise ValueError("Issue frame is not on the reviewed PNG page.")
+                if not set(issue.source_indices) <= set(frame.get("source_indices", [])):
+                    raise ValueError("Issue sources are not drawn in the native frame.")
+            elif issue.frame_id == "legend":
+                rows = [row for legend in (metadata.get("layout") or {}).get(
+                    "legends", {}).values() for row in legend.get("rows", [])]
+                if not set(issue.source_indices) <= {row.get("layer_index") for row in rows}:
+                    raise ValueError("Legend issue sources have no actual legend nodes.")
+            elif issue.frame_id != "footer" or issue.source_indices:
+                raise ValueError("Non-map ROI only supports its measured layout presentation.")
+        except ValueError as exc:
+            invalid[identifier] = str(exc)
+    patch = result.qgis_patch
+    if patch is not None:
+        bad = [key for key in patch.issue_ids if key not in issues or key in invalid]
+        unknown = any(key not in issues for key in patch.issue_ids)
+        valid = [key for key in patch.issue_ids if key in issues and key not in invalid
+                 and issues[key].severity in {"warning", "error"}]
+        if bad:
+            # Page geometry and DPI affect every frame, so retain them only as a unit.
+            patch.layout = None
+            patch.dpi = None
+        patch.layers = [layer for layer in patch.layers
+                        if not unknown and any(layer.layer_index in issues[key].source_indices
+                                               for key in valid)
+                        and not any(key in issues and layer.layer_index in
+                                    issues[key].source_indices for key in bad)]
+        patch.issue_ids = valid
+        if not valid or not (patch.layers or patch.layout or patch.dpi is not None):
+            result.qgis_patch = None
+    strategy = result.next_strategy
+    if strategy is not None and (not strategy.issue_ids or any(
+        key not in issues or key in invalid or issues[key].severity not in {"warning", "error"}
+        for key in strategy.issue_ids
+    )):
+        result.next_strategy = None
+    if invalid:
+        diagnostics["issue_binding_errors"] = [
+            {"issue_id": key, "reason": reason} for key, reason in invalid.items()]
+
+
+def _unreviewed_pages(metadata: dict) -> list[int]:
+    pages = {entry.get("page_index", 0) for entry in metadata.get("page_previews", [])
+             if isinstance(entry, dict) and entry.get("frames", ["legacy_map_page"])}
+    pages.update(frame.get("page_index", 0) for frame in
+                 (metadata.get("layout_plan") or {}).get("frames", {}).values())
+    layout = metadata.get("layout") or {}
+    parameters = layout.get("creation_parameters") or layout.get("effective_parameters") or {}
+    if parameters.get("detail_placement") == "page":
+        pages.add(1)
+    return sorted(page for page in pages if type(page) is int and page >= 0
+                  and page != metadata.get("review_page_index", 0))
 
 
 def _validate_review(payload: Any) -> tuple[MapReview, list[list]]:
@@ -375,21 +494,31 @@ def _review_images(path: Path, evidence: dict[str, Any], settings: Any) -> tuple
     blocks, catalog = [], []
     metadata = evidence.get("render_metadata") or {}
     layout = metadata.get("layout") or {}
-    regions = dict(layout.get("regions") or {})
+    page_index = metadata.get("review_page_index", 0)
+    regions = dict(layout.get("regions") or {}) if page_index == 0 else {}
     native_frames = (metadata.get("native_facts") or {}).get("frames") or {}
     for name, frame in native_frames.items():
-        if isinstance(frame, dict) and isinstance(frame.get("rect_mm"), list):
-            regions[name] = frame["rect_mm"]
+        planned = (metadata.get("layout_plan") or {}).get("frames", {}).get(name, {})
+        if (isinstance(frame, dict)
+                and frame.get("page_index", planned.get("page_index", 0)) != page_index):
+            regions.pop(name, None)
+        elif isinstance(frame, dict):
+            rect = frame.get("rect_page_mm", frame.get("rect_mm"))
+            if isinstance(rect, list):
+                regions[name] = rect
         else:
             regions.pop(name, None)
     for name, legend in (layout.get("legends") or {}).items():
-        if isinstance(legend.get("rect_mm"), list):
-            regions[name] = legend["rect_mm"]
+        rect = legend.get("rect_page_mm", legend.get("rect_mm"))
+        if legend.get("page_index", 0) == page_index and isinstance(rect, list):
+            regions[name] = rect
         else:
             regions.pop(name, None)
     if metadata.get("creation_spec_available") is False:
         regions.pop("footer", None)  # Legacy custom-property regions may describe an older layout.
     page = layout.get("effective_parameters") or layout.get("creation_parameters") or {}
+    if page_index == 0 and page.get("detail_placement") == "page":
+        regions.pop("detail_map", None)
     max_rois = getattr(settings, "max_rois", 5)
     max_side = getattr(settings, "roi_max_side", 2048)
     with Image.open(path) as opened:
@@ -484,13 +613,7 @@ def _reconcile_native_assertions(result: MapReview, evidence: dict, diagnostics:
                         "reason": "Native focus is centred; occupancy remains separate."})
     if disputed:
         diagnostics["disputed_native_assertions"] = disputed
-        ids = {item["issue_id"] for item in disputed}
-        if result.qgis_patch and ids.intersection(result.qgis_patch.issue_ids):
-            diagnostics["ignored_qgis_patch"] = result.qgis_patch.model_dump(exclude_none=True)
-            result.qgis_patch = None
-        if result.next_strategy and ids.intersection(result.next_strategy.issue_ids):
-            diagnostics["ignored_next_strategy"] = result.next_strategy.model_dump()
-            result.next_strategy = None
+        # The binding pass removes only dependent changes; unrelated fixes may survive.
 
 
 async def review_map(
@@ -750,6 +873,33 @@ async def review_map(
         ):
             result.status = "issues"
         _reconcile_native_assertions(result, evidence, diagnostics)
+        if backend == "qgis":
+            _bind_qgis_issues(result, evidence, diagnostics)
+            metadata = evidence.get("render_metadata") or {}
+            page_index = metadata.get("review_page_index", 0)
+            unreviewed = _unreviewed_pages(metadata)
+            diagnostics["review_scope"] = {"reviewed_page_indices": [page_index],
+                                            "unreviewed_page_indices": unreviewed}
+            if (result.status == "passed" and not actionable and result.qgis_patch is None
+                    and not result.layout_patch.model_dump(exclude_none=True)):
+                diagnostics["page_visual_status"] = "passed"
+            elif result.status == "issues":
+                diagnostics["page_visual_status"] = "issues"
+            if unreviewed and result.status == "passed" and page_index == 0:
+                result.status = "unverified"
+                result.summary = "The primary PNG was reviewed; additional layout pages remain " \
+                                 "unreviewed. Review their actual PNG previews before acceptance."
+        supplied = evidence.get("review_binding") or {}
+        diagnostics["review_binding"] = {
+            **{key: supplied[key] for key in ("map_id", "version", "manifest_sha256",
+                "source_bindings_sha256", "page_index", "primary_image_sha256") if key in supplied},
+            "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        if result.status == "unverified":
+            # Even a well-formed suggestion is not authorized by an incomplete review.
+            result.qgis_patch = None
+            result.next_strategy = None
+            result.layout_patch = LayoutPatch()
         return result
     except asyncio.CancelledError:
         raise

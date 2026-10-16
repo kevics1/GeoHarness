@@ -68,6 +68,47 @@ async def test_review_sends_whole_and_original_native_region_pixels(tmp_path):
     assert result.status == "passed"
 
 
+async def test_separate_detail_page_is_not_cropped_from_page_zero_or_accepted(tmp_path):
+    path = tmp_path / "map.png"
+    Image.new("RGB", (100, 100), "white").save(path)
+    result = await review_map(path, config=GeoConfig(), task="Read", client=Reviewer(), evidence={
+        "backend": "qgis", "render_metadata": {
+            "page_previews": [{"page_index": 0}, {"page_index": 1}],
+            "layout_plan": {"frames": {"detail_map": {"page_index": 1}}},
+            "native_facts": {"frames": {"detail_map": {"rect_mm": [10, 10, 80, 80]}}},
+            "layout": {"effective_parameters": {"width_mm": 100, "height_mm": 100},
+                       "regions": {"detail_map": [10, 10, 80, 80]}},
+        }})
+    assert result.status == "unverified"
+    assert result.diagnostics["review_scope"]["unreviewed_page_indices"] == [1]
+    assert [roi["roi_ref"] for roi in result.diagnostics["review_rois"]] == ["whole"]
+
+
+async def test_bad_frame_roi_binding_quarantines_only_dependent_patch(tmp_path):
+    path = tmp_path / "map.png"
+    Image.new("RGB", (100, 100), "white").save(path)
+    common = {"severity": "warning", "description": "Crowded", "bbox": [0, 0, 1, 1]}
+    response = {"status": "issues", "summary": "Crowded labels and footer", "issues": [
+        {**common, "issue_id": "I2", "frame_id": "main_map", "roi_ref": "main_map",
+         "source_indices": [0]},
+        {**common, "issue_id": "I5", "frame_id": "whole", "roi_ref": "footer"}],
+        "qgis_patch": {"issue_ids": ["I2", "I5"], "layout": {"footer_height_mm": 30},
+                       "layers": [{"layer_index": 0, "label_style": {"size_pt": 9}}]}}
+    result = await review_map(path, config=GeoConfig(), task="Read", client=Reviewer(response),
+        evidence={"backend": "qgis", "render_metadata": {
+            "layers": [{"kind": "vector", "geometry_type": "Point"}],
+            "native_facts": {"frames": {"main_map": {"rect_mm": [0, 0, 100, 80],
+                                                     "source_indices": [0]}}},
+            "layout": {"effective_parameters": {"width_mm": 100, "height_mm": 100},
+                       "regions": {"footer": [0, 80, 100, 20]}},
+        }})
+    assert result.qgis_patch.issue_ids == ["I2"]
+    assert result.qgis_patch.layout is None
+    assert result.qgis_patch.layers[0].label_style.size_pt == 9
+    assert result.diagnostics["issue_binding_errors"][0]["issue_id"] == "I5"
+    assert len(result.issues) == 2
+
+
 async def test_native_centred_focus_disputes_offset_claim_without_proving_pixel_readability(
     tmp_path,
 ):

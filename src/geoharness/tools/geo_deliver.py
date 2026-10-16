@@ -335,6 +335,9 @@ class GeoDeliverTool(BaseTool):
                 config=config,
                 artifact_path=primary or (preview if project_files else None),
             )
+            visual_stage = receipt.get("stages", {}).get("visual_checked", {})
+            if visual_stage.get("scope") == "all_native_map_pages":
+                review_status = visual_stage["status"]
             packaged = receipt.get("stages", {}).get("packaged", {})
             package_matches = not project_files or (
                 packaged.get("status") == "passed"

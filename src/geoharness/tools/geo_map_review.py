@@ -11,7 +11,13 @@ from typing import Any
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
-from geoharness.cartography.quality import MapIssue, MapReview, save_review
+from geoharness.cartography.quality import (
+    MapIssue,
+    MapReview,
+    _unreviewed_pages,
+    review_execution_payload,
+    save_review,
+)
 from geoharness.cartography.review_context import build_review_iteration_context
 from geoharness.cartography.workflow import review_with_budget
 
@@ -45,71 +51,107 @@ def _verified_render_evidence(
     """Bind backend identity to the actual image, never a caller's backend claim."""
     from geoharness.cartography.jobs import _matching_version
 
-    candidates: dict[Path, str | None] = {}
-    matching = _matching_version(receipt, path) if receipt.get("versions") else None
-    for version in [matching] if matching else []:
+    candidates = {}
+    recorded_versions = receipt.get("versions")
+    recorded_versions = recorded_versions if isinstance(recorded_versions, list) else []
+    matching = _matching_version(receipt, path) if recorded_versions else None
+    versions = ([matching] if matching else []) + list(reversed(recorded_versions))
+    for version in versions:
         if not isinstance(version, dict):
             continue
-        if version.get("image_sha256") != digest:
+        stages = version.get("stages")
+        stage = stages.get("packaged", {}) if isinstance(stages, dict) else {}
+        if not isinstance(stage, dict) or not isinstance(stage.get("manifest_path"), str):
             continue
-        stages = version.get("stages", {})
-        packaged = stages.get("packaged", {}) if isinstance(stages, dict) else {}
-        if not isinstance(packaged, dict):
-            continue
-        manifest = packaged.get("manifest_path")
-        if isinstance(manifest, str):
-            try:
-                manifest_path = Path(manifest).resolve()
-            except (OSError, ValueError):
-                continue
-            files = packaged.get("files", [])
-            recorded_hash = next((file.get("sha256") for file in (
-                                      files if isinstance(files, list) else []
-                                  )
-                                  if isinstance(file, dict)
-                                  and file.get("path") == str(manifest_path)), None)
-            candidates[manifest_path] = recorded_hash
-    candidates.setdefault((path.parent / "project.json").resolve(), None)
-    for manifest_path, recorded_hash in candidates.items():
-        manifest_path = manifest_path.resolve()
+        manifest_path = Path(stage["manifest_path"]).resolve()
+        files = stage.get("files")
+        recorded = {Path(item["path"]).resolve(): item.get("sha256")
+                    for item in (files if isinstance(files, list) else []) if isinstance(item, dict)
+                    and isinstance(item.get("path"), str)}
+        candidates.setdefault(manifest_path, (recorded, version))
+    candidates.setdefault((path.parent / "project.json").resolve(), ({}, None))
+    for manifest_path, (recorded, version) in candidates.items():
         if not any(manifest_path.is_relative_to(root) for root in roots):
             continue
         try:
             if manifest_path.stat().st_size > 1024 * 1024:
                 continue
             raw = manifest_path.read_bytes()
+            recorded_hash = recorded.get(manifest_path)
             if recorded_hash and hashlib.sha256(raw).hexdigest() != recorded_hash:
                 continue
             manifest = json.loads(raw)
-            if not isinstance(manifest, dict) or manifest.get("preview_sha256") != digest:
+            if not isinstance(manifest, dict) or not isinstance(manifest.get("preview"), str):
                 continue
-            preview = manifest.get("preview")
-            if not isinstance(preview, str) or not preview:
+            primary = (manifest_path.parent / manifest["preview"]).resolve()
+            if not primary.is_relative_to(manifest_path.parent):
                 continue
-            bound_image = (manifest_path.parent / preview).resolve()
-            if not bound_image.is_relative_to(manifest_path.parent):
-                continue
-            if hashlib.sha256(bound_image.read_bytes()).hexdigest() != digest:
+            primary_digest = hashlib.sha256(primary.read_bytes()).hexdigest()
+            if primary_digest != manifest.get("preview_sha256"):
                 continue
             backend = manifest.get("backend")
-            if backend not in {"matplotlib", "qgis"}:
+            if backend not in {"matplotlib", "qgis"} or backend == "qgis" and not recorded_hash:
                 continue
-            if backend == "qgis" and not recorded_hash:
-                # An adjacent JSON file written by a script is not native engineering proof.
+            previews = manifest.get("page_previews") or (manifest.get("native_facts") or {}).get(
+                "page_previews", [])
+            page_index = 0
+            if path != primary:
+                page = next((item for item in previews if isinstance(item, dict)
+                    and isinstance(item.get("path"), str)
+                    and (manifest_path.parent / item["path"]).resolve() == path), None)
+                if (page is None or not path.is_relative_to(manifest_path.parent)
+                        or recorded.get(path) != digest
+                        or type(page.get("page_index")) is not int):
+                    continue
+                page_index = page["page_index"]
+            elif primary_digest != digest:
                 continue
+            completed_pages = []
+            for item in previews:
+                page = item.get("page_index")
+                page_path = (manifest_path.parent / item.get("path", "")).resolve()
+                previous = (version or {}).get("page_reviews", {}).get(str(page), {})
+                if previous.get("status") != "passed" or not page_path.is_relative_to(
+                        manifest_path.parent) or recorded.get(page_path) != previous.get(
+                            "image_sha256"):
+                    continue
+                if hashlib.sha256(page_path.read_bytes()).hexdigest() != previous["image_sha256"]:
+                    continue
+                reference = previous.get("report_reference")
+                if isinstance(reference, dict):
+                    reference_path = Path(reference["path"]).resolve()
+                    if not any(reference_path.is_relative_to(root) for root in roots):
+                        continue
+                    report_digest = hashlib.sha256(reference_path.read_bytes()).hexdigest()
+                    if report_digest != reference.get("sha256"):
+                        continue
+                completed_pages.append(page)
             return {
-                "backend": backend,
+                "backend": backend, "review_page_index": page_index,
+                "reviewed_page_indices": completed_pages,
+                "review_binding": {
+                    "map_id": receipt.get("job_id"),
+                    "version": version.get("version") if version else None,
+                    "page_index": page_index, "image_sha256": digest,
+                    "primary_image_sha256": primary_digest,
+                    "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+                    "source_bindings_sha256": hashlib.sha256(json.dumps(
+                        (manifest.get("creation_spec") or {}).get("source_bindings", []),
+                        sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+                },
                 "backend_proof": {"manifest_path": str(manifest_path), "image_sha256": digest,
                                   "manifest_sha256": hashlib.sha256(raw).hexdigest()},
                 "render_metadata": {
                     "creation_spec_available": isinstance(manifest.get("creation_spec"), dict),
-                    **{key: manifest[key] for key in (
-                    "layers", "layout", "crs", "extent", "analysis", "layout_plan",
-                    "native_facts", "frame_checks", "composition",
-                ) if key in manifest}},
+                    **{key: manifest[key] for key in ("layers", "layout", "crs", "extent",
+                        "analysis", "layout_plan", "native_facts", "frame_checks", "composition")
+                        if key in manifest},
+                    "page_previews": previews, "review_page_index": page_index,
+                },
             }
         except (OSError, ValueError, TypeError):
             continue
+
     return {"backend": "unknown"}
 
 
@@ -155,7 +197,7 @@ class GeoMapReviewTool(BaseTool):
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
         first = await self._review_one(arguments, context)
-        if first.is_error:
+        if first.is_error or first.metadata.get("review_page_index", 0):
             return first
         identity = first.metadata["map_id"]
         async with repair_loop_lock(context.metadata, identity):
@@ -164,6 +206,7 @@ class GeoMapReviewTool(BaseTool):
             repaired = 0
             stop = "review_complete"
             repair_failure = None
+            repair_plans = []
             first_image = Path(first.metadata["image_path"])
             first_digest = hashlib.sha256(first_image.read_bytes()).hexdigest()
             seen_images = {first_digest}
@@ -173,6 +216,10 @@ class GeoMapReviewTool(BaseTool):
                 # Recovery is review-only; a service outage must not cause a new map.
                 enabled = False
             while True:
+                if current.metadata.get("review_page_index", 0):
+                    stop = ("Additional page review is review-only; "
+                            "repair the registered main package.")
+                    break
                 if current.metadata.get("review_status") != "issues" or not enabled:
                     stop = (
                         "visual_review_unverified" if enabled and current.metadata.get(
@@ -201,10 +248,15 @@ class GeoMapReviewTool(BaseTool):
                         stop = "Visual evidence changed; prior candidate retained."
                         break
                     report = json.loads(report_path.read_text(encoding="utf-8"))
+                    if report.get("image_sha256") != hashlib.sha256(image.read_bytes()).hexdigest():
+                        raise RepairUnavailable("Visual report belongs to a different map image.")
                     review = MapReview.model_validate({k: v for k, v in report.items()
                                                        if k in MapReview.model_fields})
                     plan = build_repair_plan(image, review, receipt,
                                              config=config, cwd=context.cwd)
+                    repair_plans.append({"issue_ids": getattr(plan, "issue_ids", []),
+                        "binding": getattr(plan, "binding", {}),
+                        "rejected": getattr(plan, "rejected", [])})
                     if not claim_repair_attempt(context.metadata, plan.digest):
                         stop = "This presentation plan was already attempted; issues retained."
                         break
@@ -282,6 +334,7 @@ class GeoMapReviewTool(BaseTool):
                 "latest_render": latest_render, "repair_count": repaired,
                 "repair_stop_reason": stop,
                 "repair_failure": repair_failure,
+                "repair_plans": repair_plans,
                 "selected_candidate": candidate, "final_render": final_render,
                 "image_path": selected_image, "review_status": selected_review,
                 "image_sha256": selected.get("image_sha256"), "review_path": selected_review_path,
@@ -290,7 +343,8 @@ class GeoMapReviewTool(BaseTool):
                               + "\nSelected map: " + selected_image
                               + f"\nSelected visual status: {selected_review}; quality: "
                               + selected.get("quality_status", "draft"),
-                              is_error=current.is_error, metadata=metadata)
+                              is_error=current.is_error,
+                              metadata=review_execution_payload(metadata))
 
     async def _review_one(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         assert isinstance(arguments, GeoMapReviewInput)
@@ -335,9 +389,10 @@ class GeoMapReviewTool(BaseTool):
                 map_id=identity,
                 artifact_path=path,
             )
-            if not any(
-                version.get("image_sha256") == digest for version in existing.get("versions", [])
-            ):
+            page_evidence = _verified_render_evidence(path, digest, existing, roots)
+            if not any(version.get("image_sha256") == digest
+                       for version in existing.get("versions", [])) and not page_evidence.get(
+                           "review_page_index"):
                 registered = await asyncio.to_thread(
                     track_render_result,
                     ToolResult(output="Existing map retained", metadata={"output_path": str(path)}),
@@ -350,6 +405,7 @@ class GeoMapReviewTool(BaseTool):
             return ToolResult(output=f"Error: map receipt unavailable: {exc}", is_error=True)
         evidence = dict(arguments.evidence)
         verified = _verified_render_evidence(path, digest, existing, roots)
+        evidence.pop("review_binding", None)
         evidence["backend"] = verified["backend"]
         evidence.update(build_review_iteration_context(
             context.metadata, identity, config, receipt=existing, image_sha256=digest,
@@ -358,6 +414,7 @@ class GeoMapReviewTool(BaseTool):
         if "render_metadata" in verified:
             evidence["render_metadata"] = verified["render_metadata"]
             evidence["backend_proof"] = verified["backend_proof"]
+            evidence["review_binding"] = verified.get("review_binding", {})
         else:
             evidence.pop("render_metadata", None)
             evidence.pop("backend_proof", None)
@@ -439,6 +496,45 @@ class GeoMapReviewTool(BaseTool):
                 map_id=identity,
                 client=context.metadata.get("map_review_client"),
             )
+        # Cached conclusions predate newer layouts too; page-zero pixels cannot accept page one.
+        page_index = verified.get("review_page_index", 0)
+        unreviewed = [page for page in _unreviewed_pages(verified.get("render_metadata") or {})
+                      if page not in verified.get("reviewed_page_indices", [])]
+        current_binding = verified.get("review_binding")
+        if budget.get("review_cached") and current_binding:
+            clean_pixels = (result.status == "passed" or result.diagnostics.get(
+                "page_visual_status") == "passed") and (
+                not result.diagnostics.get("failure_stage")
+                and not any(issue.severity in {"warning", "error"} for issue in result.issues)
+                and result.qgis_patch is None and result.next_strategy is None
+                and not result.layout_patch.model_dump(exclude_none=True))
+            if clean_pixels:
+                # Only a completed pixel pass is reusable across verified package versions.
+                result.diagnostics["review_binding"] = dict(current_binding)
+                result.diagnostics["page_visual_status"] = "passed"
+                result.diagnostics["pixel_pass_rebound_to_current_package"] = True
+                if not unreviewed or page_index != 0:
+                    result.status = "passed"
+                    budget["visual_review_status"] = "passed"
+            elif result.diagnostics.get("review_binding") != current_binding:
+                result.qgis_patch = None
+                result.next_strategy = None
+                result.diagnostics["repair_binding_status"] = "stale_cached_package"
+        result.diagnostics["review_scope"] = {"reviewed_page_indices": [page_index],
+                                             "unreviewed_page_indices": unreviewed}
+        if (not unreviewed and result.diagnostics.get("page_visual_status") == "passed"
+                and not result.diagnostics.get("failure_stage")
+                and not any(issue.severity in {"warning", "error"} for issue in result.issues)
+                and result.qgis_patch is None and result.next_strategy is None
+                and not result.layout_patch.model_dump(exclude_none=True)):
+            result.status = "passed"
+            budget["visual_review_status"] = "passed"
+        if unreviewed:
+            if result.status == "passed" and page_index == 0:
+                result.status = "unverified"
+                result.summary = "Additional layout pages have no completed pixel review."
+                budget["visual_review_status"] = "unverified"
+                budget["visual_review_completed"] = False
         report = save_review(
             path,
             {
@@ -465,8 +561,9 @@ class GeoMapReviewTool(BaseTool):
                     **result.model_dump(),
                     "visual_review_status": budget.get("visual_review_status", result.status),
                 },
-                layout_status=layout_status if layout_status != "unverified" else None,
-                measured_layout=measured_layout,
+                layout_status=(layout_status if page_index == 0 and layout_status != "unverified"
+                               else None),
+                measured_layout=measured_layout if page_index == 0 else None,
             )
         except (OSError, ValueError) as exc:
             return ToolResult(
@@ -476,7 +573,8 @@ class GeoMapReviewTool(BaseTool):
             )
         return ToolResult(
             output=(
-                result.model_dump_json(indent=2)
+                json.dumps(review_execution_payload(result.model_dump()),
+                           ensure_ascii=False, indent=2)
                 + f"\nReport: {report}\nMap receipt: "
                 + json.dumps(receipt_summary(receipt), ensure_ascii=False)
                 + "\n"
@@ -492,8 +590,10 @@ class GeoMapReviewTool(BaseTool):
                     else ""
                 )
             ),
-            metadata={
+            metadata=review_execution_payload({
                 "review_status": result.status,
+                "review_page_index": page_index,
+                "review_binding": result.diagnostics.get("review_binding", {}),
                 "backend": verified["backend"],
                 "review_path": str(report),
                 "image_path": str(path),
@@ -501,5 +601,5 @@ class GeoMapReviewTool(BaseTool):
                 "map_id": identity,
                 "map_receipt": receipt,
                 **budget,
-            },
+            }),
         )
