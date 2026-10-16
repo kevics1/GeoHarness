@@ -124,6 +124,12 @@ def assert_usable_artifact(path: str | Path) -> dict[str, Any] | None:
             raise ValueError("Artifact producer did not succeed; "
                              "partial outputs are inspection-only: "
                              f"{target}. Inspect {manifest} and rerun only the failed stage.")
+        if (producer_kind(document) in {"geo_analysis", "geo_accessibility"}
+                and target == manifest.absolute()):
+            return {"producer": producer_kind(document), "manifest": str(manifest),
+                    "path": str(target), "sha256": sha256_file(target),
+                    "state": "succeeded", "validation_state": "unverified",
+                    "role": "reproducibility_record"}
         for value, label, entry in artifact_entries(document):
             candidate = Path(value)
             candidate = (candidate if candidate.is_absolute() else directory / candidate).absolute()

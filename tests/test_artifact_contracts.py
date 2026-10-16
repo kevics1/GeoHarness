@@ -95,5 +95,24 @@ def test_accessibility_output_is_registered_with_method_producer(tmp_path):
     }), encoding="utf-8")
     record = next(iter(data_references({}, recent_outputs(tmp_path, GeoConfig())).values()))
     assert record["producer"] == "geo_accessibility" and record["crs"] == "EPSG:4326"
-    assert "analysis_manifest" not in record
+    assert record["analysis_manifest"] == str(job / "manifest.json")
     assert assert_usable_artifact(output)["producer"] == "geo_accessibility"
+
+
+@pytest.mark.parametrize("producer,action", [("geo_analysis", "area"),
+                                           ("geo_accessibility", "accessibility")])
+def test_native_success_manifest_can_be_delivered_as_a_record_only(tmp_path, producer, action):
+    path = tmp_path / "manifest.json"
+    document = {"status": "succeeded", "producer": producer, "action": action, "paths": {}}
+    path.write_text(json.dumps(document), encoding="utf-8")
+    record = assert_usable_artifact(path)
+    assert record["role"] == "reproducibility_record"
+    assert record["validation_state"] == "unverified"
+    unrelated = tmp_path / "not-published.json"
+    unrelated.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a published output"):
+        assert_usable_artifact(unrelated)
+    document["status"] = "failed"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="did not succeed"):
+        assert_usable_artifact(path)
