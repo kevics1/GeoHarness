@@ -90,23 +90,6 @@ def _projection(roads: Any, target_crs: str) -> Any:
     return value
 
 
-def _add_edge(graph: Any, start: tuple, end: tuple, length: float, road_id: str) -> None:
-    existing = graph.get_edge_data(start, end)
-    # Coincident parallel segments need only their minimum distance. No capacity,
-    # road-specific speed or turn penalty is implied by this distance-only graph.
-    if existing is None or length < existing["weight"]:
-        graph.add_edge(start, end, weight=length, road_id=road_id)
-
-
-def _connect_segment(
-    graph: Any, start: tuple, end: tuple, length: float, direction: str, road_id: str
-) -> None:
-    if direction in {"both", "forward"}:
-        _add_edge(graph, start, end, length, road_id)
-    if direction in {"both", "reverse"}:
-        _add_edge(graph, end, start, length, road_id)
-
-
 def compute_accessibility(
     roads: Any,
     residents: Any,
@@ -125,21 +108,19 @@ def compute_accessibility(
     hazards: Any = None,
     hazard_buffer_m: float = 0,
     routes_per_resident: int = 1,
+    objective: str = "distance",
+    compare: bool = False,
     deadline: float = math.inf,
     cancelled: Event | None = None,
 ) -> dict[str, Any]:
     """Compute nearest shelters on a hazard-filtered, directed metric graph.
 
-    Every resident has a result and reason, including failed snaps and disconnected
-    networks. Routes minimize total distance, including both endpoint connectors.
-    Estimated time uses explicit constant road/connector speeds, without capacity
-    allocation, traffic, elevation, turn restrictions or emergency certification.
+    Every resident retains a result/reason. All eligible original-road access
+    candidates are frozen before hazard filtering. The selected distance/time
+    objective includes both endpoint connectors. compare=True enforces common
+    candidate/weight inputs and deletion-only objective monotonicity.
     """
-    import geopandas as gpd
-    import networkx as nx
-    import numpy as np
-    from shapely import STRtree, union_all
-    from shapely.geometry import LineString, Point
+    from shapely import union_all
 
     cancelled = cancelled or Event()
 
@@ -147,6 +128,10 @@ def compute_accessibility(
         _check_deadline(deadline, cancelled)
 
     check()
+    if objective not in {"distance", "time"}:
+        raise AccessibilityContractError("invalid_objective", "objective must be distance or time")
+    if compare and hazards is None:
+        raise AccessibilityContractError("hazard_contract", "compare requires hazards")
     for name, value, allow_zero in (
         ("speed_kmh", speed_kmh, False),
         ("connector_speed_kmh", connector_speed_kmh, False),
@@ -243,276 +228,87 @@ def compute_accessibility(
             )
         directions = [direction_values[value] for value in values]
 
-    original = nx.DiGraph()
-    segments = []
-    blocked_segments = 0
-    closed_segments = 0
-    for geometry, road_id, direction in zip(metric["roads"].geometry, road_ids, directions):
-        check()
-        parts = list(geometry.geoms) if geometry.geom_type == "MultiLineString" else [geometry]
-        for part_index, part in enumerate(parts):
-            for vertex_index, (start, end) in enumerate(zip(part.coords, list(part.coords)[1:])):
-                start, end = tuple(start), tuple(end)
-                if start == end:
-                    continue
-                line = LineString([start, end])
-                if direction == "closed":
-                    closed_segments += 1
-                    continue
-                _connect_segment(original, start, end, line.length, direction, road_id)
-                if hazard is not None and hazard.intersects(line):
-                    blocked_segments += 1
-                    continue
-                segments.append(
-                    {
-                        "geometry": line,
-                        "road_id": road_id,
-                        "direction": direction,
-                        "token": (road_id, part_index, vertex_index),
-                    }
-                )
-    segments.sort(key=lambda item: item["token"])
-    tree = STRtree([segment["geometry"] for segment in segments]) if segments else None
-    attachments: dict[tuple[str, str], dict] = {}
-    splits: dict[int, list[float]] = {}
-
-    def snap(point: Any) -> dict:
-        if hazard is not None and hazard.intersects(point):
-            return {"status": "inside_hazard", "reason": "endpoint intersects buffered hazards"}
-        if tree is None:
-            return {"status": "no_safe_network", "reason": "no traversable safe road segment"}
-        query = point.buffer(max_snap_distance_m).envelope if max_snap_distance_m else point
-        candidates = []
-        for index in tree.query(query):
-            index = int(index)
-            line = segments[index]["geometry"]
-            distance = point.distance(line)
-            if distance <= max_snap_distance_m + 1e-8:
-                candidates.append((distance, index))
-        if not candidates:
-            nearest = int(tree.nearest(point))
-            return {
-                "status": "snap_too_far",
-                "reason": "nearest safe road exceeds snap limit",
-                "snap_distance_m": float(point.distance(segments[nearest]["geometry"])),
-            }
-        for distance, index in sorted(candidates):
-            line = segments[index]["geometry"]
-            position = line.project(point)
-            if math.isclose(position, 0, abs_tol=1e-8):
-                position = 0.0
-            elif math.isclose(position, line.length, rel_tol=0, abs_tol=1e-8):
-                position = line.length
-            on_road = line.interpolate(position)
-            connector = LineString([point.coords[0], on_road.coords[0]]) if distance else point
-            if hazard is not None and hazard.intersects(connector):
-                continue
-            splits.setdefault(index, []).append(position)
-            return {
-                "status": "connected",
-                "reason": "safe endpoint connector",
-                "snap_distance_m": float(point.distance(on_road)),
-                "node": tuple(on_road.coords[0]),
-                "segment": index,
-            }
-        return {
-            "status": "connector_blocked",
-            "reason": "all candidate connectors intersect hazards",
-        }
-
-    for label, ids in (("residents", resident_ids), ("shelters", shelter_ids)):
-        for key, point in zip(ids, metric[label].geometry):
-            check()
-            attachments[label, key] = snap(point)
-    graph = nx.DiGraph()
-    for index, segment in enumerate(segments):
-        check()
-        line = segment["geometry"]
-        positions = sorted(set([0.0, line.length, *splits.get(index, [])]))
-        for lower, upper in zip(positions, positions[1:]):
-            if upper == lower:
-                continue
-            start = tuple(line.interpolate(lower).coords[0])
-            end = tuple(line.interpolate(upper).coords[0])
-            _connect_segment(
-                graph, start, end, math.dist(start, end), segment["direction"], segment["road_id"]
-            )
-    safe_shelters = [
-        (key, row.geometry, attachments["shelters", key])
-        for key, (_, row) in zip(shelter_ids, metric["shelters"].iterrows())
-        if attachments["shelters", key]["status"] == "connected"
-    ]
-    resident_records, route_records, route_geometries = [], [], []
-    for key, (_, row) in zip(resident_ids, metric["residents"].iterrows()):
-        check()
-        attachment = attachments["residents", key]
-        record = {
-            "gh_resident_id": key,
-            "gh_status": attachment["status"],
-            "gh_reason": attachment["reason"],
-            "gh_reachable_shelters": 0,
-            "gh_shelter_id": None,
-            "gh_distance_m": None,
-            "gh_time_min": None,
-            "gh_snap_distance_m": attachment.get("snap_distance_m"),
-        }
-        resident_records.append(record)
-        if attachment["status"] != "connected":
-            continue
-        if not safe_shelters:
-            record.update(gh_status="no_available_shelters", gh_reason="no safe connected shelter")
-            continue
-        distances, paths = nx.single_source_dijkstra(graph, attachment["node"], weight="weight")
-        check()
-        candidates = []
-        for shelter_id, shelter_point, shelter_attachment in safe_shelters:
-            node = shelter_attachment["node"]
-            if node not in distances:
-                continue
-            connector_distance = (
-                attachment["snap_distance_m"] + shelter_attachment["snap_distance_m"]
-            )
-            total = distances[node] + connector_distance
-            candidates.append(
-                (
-                    total,
-                    shelter_id,
-                    shelter_point,
-                    shelter_attachment,
-                    connector_distance,
-                    distances[node],
-                    paths[node],
-                )
-            )
-        if not candidates:
-            record.update(
-                gh_status="network_unreachable",
-                gh_reason="no directed safe path to any connected shelter",
-            )
-            continue
-        candidates.sort(key=lambda item: (item[0], item[1]))
-        record.update(
-            gh_status="reachable",
-            gh_reason="shortest safe total distance",
-            gh_reachable_shelters=len(candidates),
-        )
-        for rank, candidate in enumerate(candidates[:routes_per_resident], start=1):
-            total, shelter_id, shelter_point, _, connector_distance, road_distance, nodes = (
-                candidate
-            )
-            coordinates = [tuple(row.geometry.coords[0]), *nodes, tuple(shelter_point.coords[0])]
-            coordinates = [
-                point
-                for index, point in enumerate(coordinates)
-                if index == 0 or point != coordinates[index - 1]
-            ]
-            geometry = LineString(coordinates) if len(coordinates) > 1 else Point(coordinates[0])
-            if not math.isclose(geometry.length, total, rel_tol=1e-9, abs_tol=1e-6):
-                raise RuntimeError("Route geometry length does not match reported distance")
-            if hazard is not None and hazard.intersects(geometry):
-                raise RuntimeError("Route unexpectedly intersects a blocked hazard")
-            minutes = road_distance / (speed_kmh * 1000 / 60) + connector_distance / (
-                connector_speed_kmh * 1000 / 60
-            )
-            route_records.append(
-                {
-                    "gh_resident_id": key,
-                    "gh_shelter_id": shelter_id,
-                    "gh_rank": rank,
-                    "gh_distance_m": total,
-                    "gh_road_distance_m": road_distance,
-                    "gh_connector_distance_m": connector_distance,
-                    "gh_time_min": minutes,
-                }
-            )
-            route_geometries.append(geometry)
-            if rank == 1:
-                record.update(gh_shelter_id=shelter_id, gh_distance_m=total, gh_time_min=minutes)
-
-    # Assignment stays in original row order; no positional join after sorting.
-    result = metric["residents"].copy().reset_index(drop=True)
-    import pandas as pd
-
-    result_fields = [
-        "gh_resident_id",
-        "gh_status",
-        "gh_reason",
-        "gh_reachable_shelters",
-        "gh_shelter_id",
-        "gh_distance_m",
-        "gh_time_min",
-        "gh_snap_distance_m",
-    ]
-    attributes = pd.DataFrame(resident_records, columns=result_fields)
-    for field in attributes:
-        result[field] = attributes[field].values
-    route_fields = [
-        "gh_resident_id",
-        "gh_shelter_id",
-        "gh_rank",
-        "gh_distance_m",
-        "gh_road_distance_m",
-        "gh_connector_distance_m",
-        "gh_time_min",
-    ]
-    routes = gpd.GeoDataFrame(
-        pd.DataFrame(route_records, columns=route_fields), geometry=route_geometries, crs=projection
+    from geoharness.analysis.accessibility_comparison import (
+        candidate_artifact,
+        compare_access_results,
+        prepare_access_network,
+        solve_access_scenario,
     )
-    shelter_result = metric["shelters"].copy().reset_index(drop=True)
-    shelter_result["gh_shelter_id"] = shelter_ids
-    for field in ("status", "reason", "snap_distance_m"):
-        shelter_result[f"gh_{field}"] = [
-            attachments["shelters", key].get(field) for key in shelter_ids
-        ]
-    if len(result) and not np.array_equal(
-        result.geometry.to_wkb(), metric["residents"].geometry.to_wkb()
-    ):
-        raise RuntimeError("Resident identity/geometry binding changed during accessibility")
-    statistics = {
-        "feature_count": len(result),
-        "resident_count": len(residents),
-        "shelter_count": len(shelters),
-        "safe_connected_shelters": len(safe_shelters),
-        "route_count": len(routes),
-        "resident_status_counts": {
-            str(key): int(value) for key, value in result.gh_status.value_counts().items()
-        },
-        "original_nodes": original.number_of_nodes(),
-        "original_edges": original.number_of_edges(),
-        "original_weak_components": nx.number_weakly_connected_components(original),
-        "safe_nodes": graph.number_of_nodes(),
-        "safe_edges": graph.number_of_edges(),
-        "safe_weak_components": nx.number_weakly_connected_components(graph),
-        "safe_strong_components": nx.number_strongly_connected_components(graph),
-        "hazard_blocked_segments": blocked_segments,
-        "closed_direction_segments": closed_segments,
+
+    prepared = prepare_access_network(
+        metric,
+        road_ids,
+        resident_ids,
+        shelter_ids,
+        directions,
+        max_snap_distance_m=max_snap_distance_m,
+        objective=objective,
+        speed_kmh=speed_kmh,
+        connector_speed_kmh=connector_speed_kmh,
+        check=check,
+    )
+    prepared["routes_per_resident"] = routes_per_resident
+    scenario = solve_access_scenario(prepared, hazard, check=check)
+    assumptions = {
+        "method_version": "shared-candidates-v2",
+        "topology": "Existing shared XY vertices only; crossings without a shared vertex "
+        "are not junctions. Supply correctly noded/grade-separated road data.",
+        "direction_mode": direction_mode,
+        "direction_field": direction_field,
+        "direction_values": direction_values or {},
+        "objective": objective,
+        "objective_unit": "m" if objective == "distance" else "min",
+        "access_policy": "All segment-projection candidates within the original-road connector "
+        "limit, frozen before hazard filtering; connectors are OD entry/exit only.",
+        "candidate_set_sha256": prepared["candidate_set_sha256"],
+        "road_speed_kmh": speed_kmh,
+        "connector_speed_kmh": connector_speed_kmh,
+        "time_model": "constant speeds; no traffic/elevation/turn restrictions",
+        "snap_limit_m": max_snap_distance_m,
+        "hazards": "Remove intersecting original vertex segments and unsafe terminal/access "
+        "connectors. Hazard boundary contact is blocked; no new candidates are added.",
+        "hazard_buffer_m": hazard_buffer_m,
+        "capacity_allocation": False,
+        "capacity_note": "Shelter capacity remains a source attribute; no demand allocation.",
+        "unverified_access": "Straight connectors lack pedestrian/river/wall/terrain validation. "
+        "snap_too_far only means no candidate under this data/parameter limit.",
+        "analysis_correctness": "unverified",
+        "data_integrity": "IDs, geometry binding, metric CRS, directions, endpoint connectors, "
+        "route lengths and objective weights checked",
     }
+    if compare:
+        baseline = solve_access_scenario(prepared, None, check=check)
+        comparison = compare_access_results(prepared, baseline, scenario)
+        artifacts = {"result": comparison["result"]}
+        for label, output in (("baseline", baseline), ("hazard", scenario)):
+            for name, frame in output["artifacts"].items():
+                artifacts[f"{label}_{name}"] = frame
+        artifacts["access_candidates"] = candidate_artifact(prepared, scenario)
+        return {
+            "artifacts": artifacts,
+            "metric_crs": projection.to_string(),
+            "statistics": {
+                "feature_count": len(residents),
+                "baseline": baseline["statistics"],
+                "hazard": scenario["statistics"],
+            },
+            "assumptions": assumptions,
+            "comparison": comparison["summary"],
+        }
+    scenario["artifacts"]["access_candidates"] = candidate_artifact(prepared, scenario)
     return {
-        "artifacts": {"result": result, "routes": routes, "shelters": shelter_result},
+        "artifacts": scenario["artifacts"],
         "metric_crs": projection.to_string(),
-        "statistics": statistics,
-        "assumptions": {
-            "topology": "Existing shared XY vertices only; crossings without a shared vertex "
-            "are not junctions. Supply correctly noded/grade-separated road data.",
-            "direction_mode": direction_mode,
-            "direction_field": direction_field,
-            "direction_values": direction_values or {},
-            "objective": "minimum total distance including both endpoint connectors",
-            "road_speed_kmh": speed_kmh,
-            "connector_speed_kmh": connector_speed_kmh,
-            "time_model": "constant speeds; no traffic/elevation/turn restrictions",
-            "snap_limit_m": max_snap_distance_m,
-            "hazards": "Remove intersecting road vertex segments; block hazard endpoints "
-            "and connectors. Hazard boundary contact is blocked.",
-            "hazard_buffer_m": hazard_buffer_m,
-            "capacity_allocation": False,
-            "capacity_note": "Shelter capacity is retained as a source attribute only; "
-            "routes do not allocate demand or guarantee available capacity.",
-            "analysis_correctness": "unverified",
-            "data_integrity": "validated IDs, geometry binding, metric CRS, endpoint "
-            "connectors, path directions and route-length consistency",
-        },
+        "statistics": scenario["statistics"],
+        "assumptions": assumptions,
     }
+
+
+def compute_accessibility_comparison(
+    roads: Any, residents: Any, shelters: Any, **kwargs: Any
+) -> dict[str, Any]:
+    """A baseline/hazard comparison sharing every original-road access candidate."""
+    return compute_accessibility(roads, residents, shelters, compare=True, **kwargs)
 
 
 def analyze_accessibility(
@@ -551,6 +347,8 @@ def analyze_accessibility(
             "routes_per_resident",
         )
     }
+    kwargs["objective"] = getattr(args, "objective", "distance")
+    action = getattr(args, "action", "route")
     computed = compute_accessibility(
         loaded["roads"],
         loaded["residents"],
@@ -559,6 +357,7 @@ def analyze_accessibility(
         target_crs=args.target_crs or metric_crs,
         deadline=deadline,
         cancelled=cancelled,
+        compare=action == "compare",
         **kwargs,
     )
     root = Path(outputs_dir).expanduser()
@@ -611,7 +410,7 @@ def analyze_accessibility(
             "metric_crs": computed["metric_crs"],
             "export_crs": "EPSG:4326",
             "sources": provenance,
-            "parameters": kwargs,
+            "parameters": {**kwargs, "action": action, "target_crs": args.target_crs or metric_crs},
             "assumptions": computed["assumptions"],
             "statistics": computed["statistics"],
             "paths": paths,
@@ -620,6 +419,8 @@ def analyze_accessibility(
             "preview_row_limit": 12,
             "manifest_path": str(directory / "manifest.json"),
         }
+        if "comparison" in computed:
+            manifest["comparison"] = computed["comparison"]
         (stage / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, allow_nan=False, indent=2),
             encoding="utf-8",
