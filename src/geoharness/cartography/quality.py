@@ -233,7 +233,8 @@ def _bind_qgis_issues(result: MapReview, evidence: dict, diagnostics: dict) -> N
                     raise ValueError("Issue sources are not drawn in the native frame.")
             elif issue.frame_id == "legend":
                 rows = [row for legend in (metadata.get("layout") or {}).get(
-                    "legends", {}).values() for row in legend.get("rows", [])]
+                    "legends", {}).values() if legend.get("page_index", 0) == page_index
+                    for row in legend.get("rows", [])]
                 if not set(issue.source_indices) <= {row.get("layer_index") for row in rows}:
                     raise ValueError("Legend issue sources have no actual legend nodes.")
             elif issue.frame_id != "footer" or issue.source_indices:
@@ -495,7 +496,9 @@ def _review_images(path: Path, evidence: dict[str, Any], settings: Any) -> tuple
     metadata = evidence.get("render_metadata") or {}
     layout = metadata.get("layout") or {}
     page_index = metadata.get("review_page_index", 0)
-    regions = dict(layout.get("regions") or {}) if page_index == 0 else {}
+    regions = dict((layout.get("page_regions") or {}).get(str(page_index), {}))
+    if not regions and page_index == 0:
+        regions = dict(layout.get("regions") or {})
     native_frames = (metadata.get("native_facts") or {}).get("frames") or {}
     for name, frame in native_frames.items():
         planned = (metadata.get("layout_plan") or {}).get("frames", {}).get(name, {})
@@ -508,12 +511,16 @@ def _review_images(path: Path, evidence: dict[str, Any], settings: Any) -> tuple
                 regions[name] = rect
         else:
             regions.pop(name, None)
+    page_legend = None
     for name, legend in (layout.get("legends") or {}).items():
         rect = legend.get("rect_page_mm", legend.get("rect_mm"))
         if legend.get("page_index", 0) == page_index and isinstance(rect, list):
             regions[name] = rect
+            page_legend = rect
         else:
             regions.pop(name, None)
+    if page_legend is not None:
+        regions["legend"] = page_legend
     if metadata.get("creation_spec_available") is False:
         regions.pop("footer", None)  # Legacy custom-property regions may describe an older layout.
     page = layout.get("effective_parameters") or layout.get("creation_parameters") or {}
@@ -587,6 +594,7 @@ def _reconcile_native_assertions(result: MapReview, evidence: dict, diagnostics:
     for issue in result.issues:
         if issue.native_assertion == "legend_node_absent":
             rows = [row for legend in (metadata.get("layout") or {}).get("legends", {}).values()
+                    if legend.get("page_index", 0) == metadata.get("review_page_index", 0)
                     for row in legend.get("rows", [])]
             present = any(row.get("layer_index") in issue.source_indices and row.get("text")
                           for row in rows)

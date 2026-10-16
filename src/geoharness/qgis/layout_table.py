@@ -51,6 +51,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
 
     layer = layers[spec["layer_index"]]
     fields = spec["fields"]
+    layout.setCustomProperty("geoharness/roster_key_field", json.dumps(fields[0]))
     if not isinstance(layer, QgsVectorLayer) or any(
         field not in layer.fields().names() for field in fields
     ) or len(set(fields)) != len(fields):
@@ -177,7 +178,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
 
 
 def label_table_facts(layout):
-    from qgis.core import QgsLayoutItemAttributeTable, QgsLayoutUtils
+    from qgis.core import QgsFeatureRequest, QgsLayoutItemAttributeTable, QgsLayoutUtils
 
     context = QgsLayoutUtils.createRenderContextForLayout(
         layout, None, layout.renderContext().dpi())
@@ -190,17 +191,58 @@ def label_table_facts(layout):
         table.refreshAttributes()
         contents = table.contents()
         capacity = table.rowsVisible(context, 0, 0, False)
+        # Row identity comes from source attributes. Precision and other display
+        # expressions may deliberately change the first visible cell.
+        request = QgsFeatureRequest()
+        if table.filterFeatures():
+            request.setFilterExpression(table.featureFilter())
+        request.setOrderBy(QgsFeatureRequest.OrderBy([
+            QgsFeatureRequest.OrderByClause(column.attribute(), int(column.sortOrder()) == 0)
+            for column in table.sortColumns()]))
+        request.setLimit(table.maximumNumberOfFeatures())
+        key_field = json.loads(layout.customProperty(
+            "geoharness/roster_key_field", '""'))
+        raw_keys = ([feature[key_field] for feature in table.vectorLayer().getFeatures(request)]
+                    if key_field else None)
         result.append({"id": table.customProperty("geoharness/table_id"),
             "page": int(table.customProperty("geoharness/page", 0)),
             "fields": [column.attribute() for column in table.columns()],
             "headers": [column.heading() for column in table.columns()],
             "rows": len(contents), "visible_rows": min(len(contents), capacity),
+            "source_keys": raw_keys,
             "required_height_mm": table.totalSize().height(),
             "available_mm": [[frame.rect().width(), frame.rect().height()]
                              for frame in table.frames()],
             "contents": [[value if type(value) in {str, int, float, bool} or value is None
                           else str(value) for value in row] for row in contents]})
     return sorted(result, key=lambda item: item["id"])
+
+
+def roster_selection_facts(layout):
+    """Check actual rendered row identities, not merely the number of rows."""
+    from collections import Counter
+
+    selected = json.loads(layout.customProperty("geoharness/roster_selection", "null"))
+    if selected is None:
+        return None
+    expected = selected.get("keys", [])
+    tables = label_table_facts(layout)
+    # Legacy layouts did not persist a raw identity field; leave membership
+    # explicitly unchecked rather than interpreting formatted cells as keys.
+    if any(table["source_keys"] is None for table in tables):
+        selected["membership_check"] = {"valid": None, "checked": False}
+        return selected
+    actual = [key for table in tables for key in table["source_keys"]]
+    wanted = Counter(json.dumps(value, sort_keys=True) for value in expected)
+    found = Counter(json.dumps(value, sort_keys=True) for value in actual)
+    missing = list((wanted - found).elements())
+    unexpected = list((found - wanted).elements())
+    selected["membership_check"] = {"valid": not missing and not unexpected
+        and all(len(table["source_keys"]) == table["rows"] for table in tables),
+        "checked": True,
+        "missing_keys": [json.loads(value) for value in missing],
+        "unexpected_keys": [json.loads(value) for value in unexpected]}
+    return selected
 
 
 def export_full_roster(layout, context):

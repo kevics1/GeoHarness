@@ -139,6 +139,9 @@ class QgisRasterStyle(BaseModel):
 
 class QgisProjectLayer(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    role: Literal["map", "table_only"] = Field(default="map",
+        description="table_only validates/packages vector records for a roster "
+                    "without drawing them.")
     _normalized_style_fields: tuple[str, ...] = PrivateAttr(default=())
 
     file_path: str = Field(min_length=1, description="Existing local vector/raster source.")
@@ -352,6 +355,8 @@ class QgisLabelTable(BaseModel):
 
 class QgisProjectLayout(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    detail_title: str = Field(default="", max_length=500,
+                             description="Visible detail caption; frame purpose is not drawn text.")
 
     name: str = "Map"
     width_mm: float = Field(default=297, ge=60, le=2000)
@@ -606,6 +611,10 @@ class GeoQgisProjectInput(BaseModel):
         if self.action in {"create", "preflight", "spec"}:
             if not self.layers:
                 raise ValueError("create requires at least one local layer")
+            if not any(layer.role == "map" for layer in self.layers):
+                raise ValueError("At least one map layer is required")
+            if any(layer.role == "table_only" and layer.kind != "vector" for layer in self.layers):
+                raise ValueError("table_only requires vector records")
             if self.project_path:
                 raise ValueError("create cannot replace an existing project; use export")
         elif not self.project_path:
@@ -629,6 +638,12 @@ class GeoQgisProjectInput(BaseModel):
         if self.layout and self.layout.detail_extent and not self.crs:
             raise ValueError("explicit detail_extent requires crs")
         if self.layout:
+            table_indices = {i for i, layer in enumerate(self.layers) if layer.role == "table_only"}
+            for frame in (self.layout.main_frame, self.layout.detail_frame):
+                if frame and any(index in table_indices for index in [
+                        *(frame.render_layers or []), *(frame.focus_layers or []),
+                        *(frame.label_layers or []), *(r.layer_index for r in frame.requirements)]):
+                    raise ValueError("table_only cannot be a rendered map subject")
             if self.map_extent is not None and self.layout.main_frame \
                     and self.layout.main_frame.focus_layers:
                 raise ValueError("map_extent conflicts with main_frame.focus_layers")
@@ -649,7 +664,7 @@ class GeoQgisProjectInput(BaseModel):
                             raise ValueError(f"{name} requirement references an unrendered layer")
                 rendered.update(frame.render_layers if frame and frame.render_layers is not None
                                 else range(len(self.layers)))
-            if any(layer.required and index not in rendered
+            if any(layer.role == "map" and layer.required and index not in rendered
                    for index, layer in enumerate(self.layers)):
                 raise ValueError("Required layer is omitted from every map frame")
             if self.layout.label_table and self.layout.label_table.layer_index >= len(self.layers):
@@ -1066,8 +1081,14 @@ class GeoQgisProjectTool(BaseTool):
             from geoharness.cartography.tracking import track_render_result
 
             analysis = (preflight or {}).get("analysis")
-            return await asyncio.to_thread(track_render_result, response, context, identity,
-                                           preflight=preflight, analysis=analysis)
+            registration = asyncio.create_task(asyncio.to_thread(
+                track_render_result, response, context, identity,
+                preflight=preflight, analysis=analysis))
+            try:
+                return await asyncio.shield(registration)
+            except asyncio.CancelledError:
+                await _drain_task(registration)
+                raise
         return response
 
     def is_read_only(self, arguments: BaseModel) -> bool:
@@ -1139,6 +1160,7 @@ class GeoQgisProjectTool(BaseTool):
         for index, layer in enumerate(arguments.layers):
             path, options = _local_source(layer.file_path, guard)
             common = {"label": layer.name or path.stem, "required": layer.required,
+                      "role": layer.role,
                       "expected_feature_count": layer.expected_feature_count,
                       "minimum_visible_features": layer.minimum_visible_features if layer.required
                       else (layer.minimum_visible_features

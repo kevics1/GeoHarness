@@ -65,6 +65,8 @@ def composition_risks(
     anchors = []
     total = 0
     for index, frame in enumerate(frames):
+        if frame.get("role") == "table_only":
+            continue
         if "gdf" not in frame or not frame.get("label_field"):
             continue
         gdf = frame["gdf"].to_crs(report["display_crs"])

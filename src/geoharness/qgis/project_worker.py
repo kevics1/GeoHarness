@@ -173,14 +173,22 @@ def _font_identities(layout: Any, layers: list[Any], context: Any) -> dict[str, 
     return result
 
 
-def _frame_selection(name: str, spec: dict[str, Any], count: int) -> tuple[list[int], list[int]]:
+def _map_indices(layers):
+    return [i for i, layer in enumerate(layers)
+            if layer.customProperty("geoharness/role", "map") != "table_only"]
+
+
+def _frame_selection(name: str, spec: dict[str, Any], count: int,
+                     eligible=None) -> tuple[list[int], list[int]]:
     frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
-    render = sorted(frame.get("render_layers") or range(count))
+    render = sorted(frame.get("render_layers") or (range(count) if eligible is None else eligible))
     focus = sorted(frame.get("focus_layers") or render)
     if any(index < 0 or index >= count for index in [*render, *focus]):
         raise ValueError("Map frame layer index is outside the original layer array")
     if not set(focus) <= set(render):
         raise ValueError("Map frame focus layers must be rendered in that frame")
+    if eligible is not None and not set(render) <= set(eligible):
+        raise ValueError("table_only cannot be rendered in a map frame")
     return render, focus
 
 
@@ -217,7 +225,7 @@ def _frame_extent(project: Any, layers: list[Any], name: str, payload: dict, ext
         return extent
     if name == "main_map" and payload.get("_explicit_map_extent"):
         return extent
-    _, focus = _frame_selection(name, spec, len(layers))
+    _, focus = _frame_selection(name, spec, len(layers), _map_indices(layers))
     bbox = _focus_bbox(project, layers, focus)
     policy = payload.get("_extent_policy") or {}
     minimum = policy.get("minimum_span_geographic" if project.crs().isGeographic()
@@ -248,7 +256,7 @@ def _plan_frames(layout: Any, project: Any, layers: list[Any], payload: dict) ->
         item = layout.itemById(name)
         if not isinstance(item, QgsLayoutItemMap):
             continue
-        render, focus = _frame_selection(name, spec, len(layers))
+        render, focus = _frame_selection(name, spec, len(layers), _map_indices(layers))
         expected_layers = [layers[index].id() for index in reversed(render)]
         if [layer.id() for layer in item.layers()] != expected_layers:
             raise ValueError(f"layout_plan frame {name} did not preserve its rendered layer order")
@@ -366,10 +374,13 @@ def _frame_evidence(
             frame_mm=frame["rect_mm"][2:])
     checks = []
     for index, (layer, source) in enumerate(zip(layers, payload.get("layers", []))):
-        required = source.get("required", True)
+        required = source.get("required", True) and source.get("role", "map") != "table_only"
         minimum = source.get("minimum_visible_features", 1 if required else 0)
+        if source.get("role") == "table_only":
+            minimum = 0
         valid = len(visible[index]) >= minimum and (bool(counts[index]) or not required)
         checks.append({"source_index": index,
+            "role": source.get("role", "map"),
             "layer_key": layer.customProperty("geoharness/layer_key", ""), "required": required,
             "visible_feature_count": len(visible[index]), "minimum_visible_features": minimum,
             "frames": counts[index], "valid": valid})
@@ -381,7 +392,7 @@ def _frame_evidence(
                         "source_index": check["source_index"],
                         "visible_feature_count": check["visible_feature_count"],
                         "minimum_visible_features": check["minimum_visible_features"]}
-                        for check in checks if not check["required"] and
+                        for check in checks if check["role"] == "map" and not check["required"] and
                         (not check["valid"] or check["visible_feature_count"] == 0)]}
     if not frame_checks["valid"]:
         error = ValueError("Required layer visibility failed across the rendered frame union")
@@ -1091,6 +1102,8 @@ def _extent(project: Any, layers: list[Any], requested: list[float] | None) -> A
         return QgsRectangle(*requested)
     combined = QgsRectangle()
     for layer in layers:
+        if layer.customProperty("geoharness/role", "map") == "table_only":
+            continue
         rect = QgsCoordinateTransform(
             layer.crs(),
             project.crs(),
@@ -1141,11 +1154,17 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
                 table.get("height_mm", 50)]
     sidebar_x = width - margin - sidebar_width
     if separate_detail:
-        regions["detail_map"] = [margin, margin, inner_width, height - 2 * margin]
+        detail_spec = {**spec, "detail_extent": None, "detail_frame": None, "label_table": None}
+        detail_title = spec.get("detail_title") or (title + " · 详图" if title else "详图")
+        regions["detail_map"] = _layout_regions(detail_spec, detail_title)["main_map"]
     elif has_detail:
         detail_height = (map_height * spec.get("detail_height_ratio", 0.4)
                          if spec.get("legend", True) else map_height)
-        regions["detail_map"] = [sidebar_x, top, sidebar_width, detail_height]
+        caption = spec.get("title_height_mm", 16) if spec.get("detail_title") else 0
+        if caption:
+            regions["detail_title"] = [sidebar_x, top, sidebar_width, caption]
+        regions["detail_map"] = [sidebar_x, top + caption + (gap if caption else 0),
+                                 sidebar_width, detail_height - caption - (gap if caption else 0)]
         top += detail_height + gap
     if spec.get("legend", True):
         legend_height = regions["main_map"][1] + map_height - top
@@ -1233,7 +1252,7 @@ def _create_layout(
 
             item.attemptMove(QgsLayoutPoint(*regions[name][:2]), False, False, 1)
         item.setCrs(project.crs())
-        render, _ = _frame_selection(name, spec, len(layers))
+        render, _ = _frame_selection(name, spec, len(layers), _map_indices(layers))
         item.setLayers([layers[index] for index in reversed(render)])
         item.setKeepLayerSet(True)
         frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
@@ -1268,69 +1287,108 @@ def _create_layout(
         add_label_tables(layout, layers, spec["label_table"], regions,
                          _text_format(font, spec["label_table"].get("font_size_pt", 8)),
                          page_spec=spec, context=context)
-    if title:
-        label = QgsLayoutItemLabel(layout)
-        label.setText(title)
-        label.setTextFormat(_text_format(font, spec.get("title_font_size_pt", 18)))
-        label.setMargin(0)
-        label.setVAlign(Qt.AlignVCenter)
-        _place_item(layout, label, "title", regions["title"])
-    if spec.get("legend", True):
-        legend = QgsLayoutItemLegend(layout)
-        legend.setTitle("图例")
-        legend.setLinkedMap(map_item)
-        legend.setResizeToContents(False)
-        legend.setAutoUpdateModel(False)
-        root = legend.model().rootGroup()
-        root.removeAllChildren()
-        for layer in reversed(layers):
-            root.addLayer(layer)
-        legend.setWrapString("\n")
-        legend_format = _text_format(font, spec.get("legend_font_size_pt")
-                                    or spec.get("body_font_size_pt", 9))
-        for component in (
-            Qgis.LegendComponent.Title, Qgis.LegendComponent.Group,
-            Qgis.LegendComponent.Subgroup, Qgis.LegendComponent.SymbolLabel,
-        ):
-            style = legend.style(component)
-            style.setTextFormat(legend_format)
-            legend.setStyle(component, style)
-        _place_item(layout, legend, "legend", regions["legend"])
+    def furniture(target_map, target_regions, text, *, prefix="", page_index=0):
+        def place(item, name, rectangle):
+            _place_item(layout, item, prefix + name, rectangle)
+            if page_index:
+                from qgis.core import QgsLayoutPoint
+
+                item.attemptMove(QgsLayoutPoint(*rectangle[:2]), False, False, page_index)
+
+        if text:
+            label = QgsLayoutItemLabel(layout)
+            label.setText(text)
+            label.setTextFormat(_text_format(font, spec.get("title_font_size_pt", 18)))
+            label.setMargin(0)
+            label.setVAlign(Qt.AlignVCenter)
+            place(label, "title", target_regions["title"])
+        if spec.get("legend", True):
+            legend = QgsLayoutItemLegend(layout)
+            legend.setTitle("图例")
+            legend.setLinkedMap(target_map)
+            legend.setResizeToContents(False)
+            legend.setAutoUpdateModel(False)
+            root = legend.model().rootGroup()
+            root.removeAllChildren()
+            for layer in target_map.layers():
+                root.addLayer(layer)
+            legend.setWrapString("\n")
+            legend_format = _text_format(font, spec.get("legend_font_size_pt")
+                                        or spec.get("body_font_size_pt", 9))
+            for component in (
+                Qgis.LegendComponent.Title, Qgis.LegendComponent.Group,
+                Qgis.LegendComponent.Subgroup, Qgis.LegendComponent.SymbolLabel,
+            ):
+                style = legend.style(component)
+                style.setTextFormat(legend_format)
+                legend.setStyle(component, style)
+            place(legend, "legend", target_regions["legend"])
+        footer = target_regions["footer"]
+        text_x = footer[0]
+        required_height = footer[3]
+        if spec.get("scale_bar", True):
+            scale = QgsLayoutItemScaleBar(layout)
+            scale.setStyle("Single Box")
+            scale.setLinkedMap(target_map)
+            scale.setUnits(Qgis.DistanceUnit.Kilometers)
+            scale.setNumberOfSegments(2)
+            scale.setNumberOfSegmentsLeft(0)
+            scale.applyDefaultSize(Qgis.DistanceUnit.Kilometers)
+            scale.setTextFormat(body_format)
+            target = target_map.scale() * 0.02 / 1000
+            magnitude = 10 ** math.floor(math.log10(target))
+            distance = max(value for value in (1, 2, 5) if value * magnitude <= target) * magnitude
+            scale.setUnitsPerSegment(distance)
+            numeric = QgsBasicNumericFormat()
+            numeric.setNumberDecimalPlaces(max(0, -math.floor(math.log10(distance))))
+            numeric.setShowTrailingZeros(False)
+            scale.setNumericFormat(numeric)
+            scale.setUnitLabel("km")
+            place(scale, "scale_bar", [footer[0], footer[1], 1, 1])
+            text_x += scale.rect().width() + spec.get("gap_mm", 5)
+            required_height = max(required_height, scale.rect().height() + 0.5)
+        if spec.get("footer_text"):
+            text_width = footer[0] + footer[2] - text_x
+            if text_width < 20:
+                raise ValueError("Scale bar leaves less than 20mm for footer_text")
+            label = QgsLayoutItemLabel(layout)
+            label.setTextFormat(body_format)
+            label.setMargin(0)
+            label.setVAlign(Qt.AlignTop)
+            label.setText(_wrap_label_text(label, spec["footer_text"], text_width))
+            required_height = max(required_height, label.sizeForText().height() + 0.5)
+            place(label, "footer_text", [text_x, footer[1], text_width, footer[3]])
+        return required_height
+
+    required_height = furniture(map_item, regions, title)
     footer = regions["footer"]
-    text_x = footer[0]
-    required_height = footer[3]
-    if spec.get("scale_bar", True):
-        scale = QgsLayoutItemScaleBar(layout)
-        scale.setStyle("Single Box")
-        scale.setLinkedMap(map_item)
-        scale.setUnits(Qgis.DistanceUnit.Kilometers)
-        scale.setNumberOfSegments(2)
-        scale.setNumberOfSegmentsLeft(0)
-        scale.applyDefaultSize(Qgis.DistanceUnit.Kilometers)
-        scale.setTextFormat(body_format)
-        target = map_item.scale() * 0.02 / 1000
-        magnitude = 10 ** math.floor(math.log10(target))
-        distance = max(value for value in (1, 2, 5) if value * magnitude <= target) * magnitude
-        scale.setUnitsPerSegment(distance)
-        numeric = QgsBasicNumericFormat()
-        numeric.setNumberDecimalPlaces(max(0, -math.floor(math.log10(distance))))
-        numeric.setShowTrailingZeros(False)
-        scale.setNumericFormat(numeric)
-        scale.setUnitLabel("km")
-        _place_item(layout, scale, "scale_bar", [footer[0], footer[1], 1, 1])
-        text_x += scale.rect().width() + spec.get("gap_mm", 5)
-        required_height = max(required_height, scale.rect().height() + 0.5)
-    if spec.get("footer_text"):
-        text_width = footer[0] + footer[2] - text_x
-        if text_width < 20:
-            raise ValueError("Scale bar leaves less than 20mm for footer_text")
+    requirements = {"0": ["main_map"]}
+    requirements["0"].extend(name for name, enabled in (
+        ("title", bool(title)), ("legend", spec.get("legend", True)),
+        ("scale_bar", spec.get("scale_bar", True))) if enabled)
+    if spec.get("detail_placement") == "page" and "detail_map" in regions:
+        detail_title = spec.get("detail_title") or (title + " · 详图" if title else "详图")
+        detail_spec = {**spec, "detail_extent": None, "detail_frame": None, "label_table": None}
+        detail_regions = _layout_regions(detail_spec, detail_title)
+        layout.setCustomProperty("geoharness/detail_regions", json.dumps(detail_regions))
+        required_height = max(required_height, furniture(layout.itemById("detail_map"),
+            detail_regions, detail_title, prefix="detail_", page_index=1))
+        requirements["1"] = ["detail_map", "detail_title"]
+        requirements["1"].extend(name for name, enabled in (
+            ("detail_legend", spec.get("legend", True)),
+            ("detail_scale_bar", spec.get("scale_bar", True))) if enabled)
+    elif "detail_title" in regions:
         label = QgsLayoutItemLabel(layout)
+        label.setText(spec["detail_title"])
         label.setTextFormat(body_format)
         label.setMargin(0)
-        label.setVAlign(Qt.AlignTop)
-        label.setText(_wrap_label_text(label, spec["footer_text"], text_width))
-        required_height = max(required_height, label.sizeForText().height() + 0.5)
-        _place_item(layout, label, "footer_text", [text_x, footer[1], text_width, footer[3]])
+        _place_item(layout, label, "detail_title", regions["detail_title"])
+        requirements["0"].append("detail_title")
+    layout.setCustomProperty("geoharness/page_requirements", json.dumps(requirements))
+    page_regions = {"0": regions}
+    if "1" in requirements:
+        page_regions["1"] = detail_regions
+    layout.setCustomProperty("geoharness/page_regions", json.dumps(page_regions))
     if required_height > footer[3]:
         if payload.get("_consume_plan"):
             raise ValueError("layout_plan is stale: measured footer changed; run preflight again")
@@ -1349,18 +1407,24 @@ def _create_layout(
                                   "after": required_height, "reason": "measured footer text",
                               }])
     if spec.get("legend", True) and spec.get("legend_auto_fit", True):
-        minimum = QgsLegendRenderer(legend.model(), legend.legendSettings()).minimumSize()
-        available = regions["legend"]
         resized = dict(spec)
-        if minimum.width() > available[2] + 0.05 and minimum.width() + 0.5 <= 500:
-            resized["sidebar_width_mm"] = minimum.width() + 0.5
-            # Keep the main map's width: widening the sidebar must not steal its paper area.
-            resized["width_mm"] = width + resized["sidebar_width_mm"] - available[2]
-        if minimum.height() > available[3] + 0.05:
-            ratio = spec.get("detail_height_ratio", 0.4) if "detail_map" in regions else 0
-            extra = (minimum.height() + 0.5 - available[3]) / (1 - ratio)
-            if height + extra <= 2000:
-                resized["height_mm"] = height + extra
+        for page_index, page_rects in page_regions.items():
+            legend = layout.itemById("legend" if page_index == "0" else "detail_legend")
+            minimum = QgsLegendRenderer(legend.model(), legend.legendSettings()).minimumSize()
+            available = page_rects["legend"]
+            if minimum.width() > available[2] + 0.05 and minimum.width() + 0.5 <= 500:
+                sidebar = max(resized.get("sidebar_width_mm", 0), minimum.width() + 0.5)
+                resized["sidebar_width_mm"] = sidebar
+                # Fit both pages without taking paper area from either map.
+                resized["width_mm"] = max(resized.get("width_mm", width),
+                                           width + sidebar - available[2])
+            if minimum.height() > available[3] + 0.05:
+                ratio = (spec.get("detail_height_ratio", 0.4)
+                         if page_index == "0" and spec.get("detail_placement") != "page"
+                         and "detail_map" in regions else 0)
+                extra = (minimum.height() + 0.5 - available[3]) / (1 - ratio)
+                if height + extra <= 2000:
+                    resized["height_mm"] = max(resized.get("height_mm", height), height + extra)
         if resized != spec and payload.get("_consume_plan"):
             raise ValueError("layout_plan is stale: measured legend changed; run preflight again")
         if resized != spec and _fit_attempt < 12 and resized.get("width_mm", width) <= 2000:
@@ -1598,6 +1662,7 @@ def _layer_metadata(layer: Any) -> dict[str, Any]:
 
     metadata = {
         "id": layer.id(),
+        "role": layer.customProperty("geoharness/role", "map"),
         "name": layer.name(),
         "provider": layer.providerType(),
         "crs": layer.crs().authid() or layer.crs().toWkt(),
@@ -1723,18 +1788,28 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
         name = item.id() or item.uuid()
         rect = item.mapRectToScene(item.rect())
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
-        if (name.startswith("label_table_") or name == "detail_map") and item.page() > 0:
+        secondary = item.page() > 0 and (name == "detail_map" or name.startswith("detail_"))
+        if (name.startswith("label_table_") or secondary) and item.page() > 0:
             roster_page = layout.pageCollection().page(item.page())
             local = [x - roster_page.pos().x(), y - roster_page.pos().y(), w, h]
             roster_pages.setdefault(item.page(), {})[name] = local
-            continue
-        if name not in {*regions, "scale_bar", "footer_text"}:
+            if not secondary:
+                continue
+            x, y = local[:2]
+        if not secondary and name not in {*regions, "scale_bar", "footer_text"}:
             # User annotations, north arrows and inset decorations legitimately
             # overlap maps. Preserve them; pixel review assesses their placement.
             user_items[name] = [x, y, w, h]
             continue
-        rectangles[name] = [x, y, w, h]
-        owner = regions.get("footer") if name in {"scale_bar", "footer_text"} else regions.get(name)
+        if not secondary:
+            rectangles[name] = [x, y, w, h]
+        own_regions = (json.loads(layout.customProperty("geoharness/detail_regions", "{}"))
+                       if secondary else regions)
+        own_name = name.removeprefix("detail_") if secondary else name
+        if secondary and name == "detail_map":
+            own_name = "main_map"
+        owner = (own_regions.get("footer") if own_name in {"scale_bar", "footer_text"}
+                 else own_regions.get(own_name))
         if owner is not None:
             ox, oy, width, height = owner
             if x < ox - 0.05 or y < oy - 0.05 or (
@@ -1765,11 +1840,23 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
         size = roster_page.pageSize()
         problems.extend(f"page {number + 1}: {problem}" for problem in
                         _rectangle_problems(items, size.width(), size.height()))
+    problems.extend(_page_completeness(layout)["problems"])
+    from geoharness.qgis.layout_table import roster_selection_facts
+
+    selection = roster_selection_facts(layout)
+    if selection and selection["membership_check"]["valid"] is False:
+        problems.append("label_table: actual roster membership differs from selected identities")
     return {
         "checked": True, "valid": not problems, "problems": problems,
         "items": rectangles, "user_items": user_items, "content_metrics": content_metrics,
         "roster_pages": roster_pages,
     }
+
+
+def _page_completeness(layout):
+    from geoharness.qgis.page_completeness import page_completeness
+
+    return page_completeness(layout)
 
 
 def _validate_layout_bounds(layout: Any) -> None:
@@ -1815,9 +1902,13 @@ def _legend_node_facts(legend: Any, layout: Any) -> dict[str, Any]:
             break
     rect = legend.mapRectToScene(legend.rect())
     scene = [rect.x(), rect.y(), rect.width(), rect.height()]
+    page = layout.pageCollection().page(legend.page())
+    local = [rect.x() - page.pos().x(), rect.y() - page.pos().y(), rect.width(), rect.height()]
     return {"scope": "actual_legend_node_model; not_pixel_legibility", "rows": rows,
             "row_count": len(rows), "layers": layers, "sample_limit": 256,
             "truncated": truncated, "rect_scene": scene, "layout_unit": layout.units().name,
+            "page_index": legend.page(),
+            "rect_page_mm": local if layout.units() == Qgis.LayoutUnit.Millimeters else None,
             "rect_mm": scene if layout.units() == Qgis.LayoutUnit.Millimeters else None}
 
 
@@ -1889,19 +1980,20 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                 "id": item.id(), "units": item.units().name,
                 "units_per_segment": item.unitsPerSegment(), "segments": item.numberOfSegments(),
             })
-    from geoharness.qgis.layout_table import label_table_facts
+    from geoharness.qgis.layout_table import label_table_facts, roster_selection_facts
 
     return {
         "name": layout.name(), "pages": layout.pageCollection().pageCount(), "map_frames": maps,
         "label_tables": label_table_facts(layout),
-        "roster_selection": json.loads(layout.customProperty(
-            "geoharness/roster_selection", "null")),
+        "roster_selection": roster_selection_facts(layout),
+        "page_completeness": _page_completeness(layout),
         "warnings": json.loads(layout.customProperty("geoharness/layout_warnings", "[]")),
         "map_extents": {item["id"]: item["extent"] for item in maps},
         "scale_bars": scale_bars,
         "legends": legends,
         "template": layout.customProperty("geoharness/template", ""),
         "regions": json.loads(layout.customProperty("geoharness/regions", "{}")),
+        "page_regions": json.loads(layout.customProperty("geoharness/page_regions", "{}")),
         "font": json.loads(layout.customProperty("geoharness/font", "{}")),
         "effective_parameters": effective,
         "creation_parameters": json.loads(layout.customProperty(
@@ -2044,7 +2136,7 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
                 bboxes.append({"layer_index": source_index, "bbox": _rect_values(bbox),
                     "minimum_span_mm": minimum, "sample_size": sampled, "sample_limit": 512,
                     "scope": "sampled_visible_polygon_feature_bboxes"})
-        frames[name] = {"extent": _rect_values(extent),
+        frames[name] = {"extent": _rect_values(extent), "render_layers": sorted(source_indices),
             "page_index": item.page(),
             "rect_page_mm": [rect.x() - layout.pageCollection().page(item.page()).pos().x(),
                              rect.y() - layout.pageCollection().page(item.page()).pos().y(),
@@ -2459,7 +2551,7 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             crs = (
                 QgsCoordinateReferenceSystem(payload["crs"])
                 if payload.get("crs")
-                else layers[0].crs()
+                else layers[_map_indices(layers)[0]].crs()
             )
             if not crs.isValid():
                 raise ValueError("Invalid project CRS")
@@ -2467,6 +2559,8 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             project.setTitle(payload.get("title", ""))
             for index, layer in enumerate(layers):
                 layer.setCustomProperty("geoharness/source_index", index)
+                layer.setCustomProperty("geoharness/role",
+                                        payload["layers"][index].get("role", "map"))
                 layer_key = payload["layers"][index].get("layer_key", "")
                 if not layer_key:
                     from geoharness.qgis.layer_identity import stable_layer_key
@@ -2483,6 +2577,8 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
                     layer.setCustomProperty("geoharness/business_fields",
                                             bindings[index]["business_fields"])
                 project.addMapLayer(layer)
+                if layer.customProperty("geoharness/role", "map") == "table_only":
+                    project.layerTreeRoot().findLayer(layer.id()).setItemVisibilityChecked(False)
             project.layerTreeRoot().setHasCustomLayerOrder(True)
             project.layerTreeRoot().setCustomLayerOrder(list(reversed(layers)))
             extent = _extent(project, layers, payload.get("map_extent"))

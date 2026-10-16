@@ -375,15 +375,22 @@ def validate_frames(
         layer = _vector(frame, label, required, coerce_numeric) if "gdf" in frame else (
             _raster(frame, label, required)
         )
+        layer["role"] = frame.get("role", "map")
         layers.append(layer)
     if map_crs:
         display_crs, crs_source = _crs(map_crs, name="Map"), "explicit_map_crs"
     else:
-        chosen = next((layer for layer in layers if layer["kind"] == "raster"), layers[0])
+        mapped = [layer for layer in layers if layer["role"] != "table_only"]
+        if not mapped:
+            raise ValueError("Map preflight requires a map layer")
+        chosen = next((layer for layer in mapped if layer["kind"] == "raster"), mapped[0])
         display_crs = chosen["_crs"]
         crs_source = f"first_{chosen['kind']}_layer:{chosen['label']}"
     all_bounds = []
     for layer in layers:
+        if layer["role"] == "table_only":
+            layer["display_bounds"] = None
+            continue
         label = layer["label"]
         if layer["kind"] == "vector":
             try:
@@ -400,7 +407,8 @@ def validate_frames(
             bounds = _transform_bounds(layer["bounds"], layer["_crs"], display_crs, label)
         if bounds is not None:
             _geographic_bounds(bounds, display_crs, name=f"Layer {label!r} display bounds")
-            all_bounds.append(bounds)
+            if layer["role"] != "table_only":
+                all_bounds.append(bounds)
         layer["display_bounds"] = bounds
     main = _bounds(map_extent, name="map_extent") if map_extent is not None else (
         _automatic_extent(all_bounds, display_crs, minimum_span_geographic if (
@@ -423,6 +431,10 @@ def validate_frames(
     warnings = []
     main_window, detail_window = box(*main), box(*detail) if detail is not None else None
     for layer in layers:
+        if layer["role"] == "table_only":
+            layer.update(visible_main=False, visible_detail=False,
+                         visible_feature_count=0, visibility_basis="table_only")
+            continue
         if layer["kind"] == "vector":
             geometry = layer["_aligned"].geometry
             in_main = geometry.intersects(main_window)

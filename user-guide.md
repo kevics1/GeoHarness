@@ -502,3 +502,11 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 新预检计划同时绑定当时地图版本与可编辑草案头。绘出新版本或草案被修改后，旧计划返回最新版本、`inspect_call/preflight_call`，需要对最新草案重新预检。旧版未包含绑定的计划保留兼容，创建回执明确标为 `legacy_unbound`。
 
 每次创建和自动修复返回 `latest_version/latest_spec_ref`，这是下一次编辑的依据；交付候选可以是不同的历史版本。`inspect(spec_ref=...)` 可查看 `mutation_state`，其中记录当前或最近操作、阶段、开始/结束和失败/取消状态。历史草案可以inspect，更新或预检过期草案会给出恢复入口。导出现有历史工程仍保留其实际样式，不自动套用最新草案。
+
+### 完整详图页与只用于名录的数据
+
+`layout.detail_title` 是实际绘出的详图标题，`detail_frame.purpose` 仍只说明分析用途。独立详图页复用主图的标题、图例、比例尺和页脚设置；未给独立标题时使用主标题加“详图”。`legend=false/scale_bar=false` 仍按显式开关执行。侧栏详图指定标题时会为标题预留空间。
+
+图层可设置 `role="table_only"`，默认仍为 `map`。table_only记录保留字段、几何、计数、快照和名录核验，但不扩大地图范围、不进入地图或图例，QGIS工程树中保持未勾选；不能将它用作地图框的render/focus/labels/requirements。无需使用0.01mm符号隐藏名录层。
+
+布局回执的 `page_completeness` 核对每个地图页的实际组件及关联地图，`roster_selection.membership_check` 比较实际表格中的对象身份集合和选中集合，区别于仅检查行数。它们不证明像素辨识度或分析结论正确。对旧工程export保留原布局，不自动补齐其页面元素。
