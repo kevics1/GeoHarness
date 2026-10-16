@@ -486,3 +486,11 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 帮助增加 `section="layer"` 和 `section="roster"`。简短帮助省略嵌套定义和较长说明，通过返回的 `detail_call` 或 `detail_path=["schema","properties","字段名"]` 读取完整定义；`help(section="edits")` 的完整结构可按 `schemas` 中的实际索引下钻。无需读取全局 `tool_artifacts`。
 
 视觉审核完成后，自动修复的证据、编译、原生生成或后续审核失败会保留先前报告，并返回 `repair_failure.stage/error_type`；不能将此解释成审核服务空响应。页脚与图例问题只进入对应的页面呈现策略，不能用于地理范围换算。
+
+### 可达性结果的场景、字段与解释
+
+`geo_accessibility` 返回实际应用的 `input_selection`、所选面合并及缓冲的 `hazard_scope`、方法参数和状态定义。未指定 `hazards.filters` 时使用全部传入面，不能称为只选最大或最严重时点。`hazard_scope` 分别记录未缓冲所选面与缓冲后危险区相交的居民点数；数量单位为点要素。
+
+结果图层保留英文状态码，并提供 `gh_status_label_zh`（比较表为 `gh_baseline_status_label_zh/gh_hazard_status_label_zh`）。默认中文含义使用“当前模型条件下可达”“位于所选危险范围及指定缓冲区内”等限定描述，不等同真实逃生、实际受火或避难所启用。速度、接驳距离和方向设定仍是显式模型条件，科学正确性保持 `unverified`。
+
+比较表新增实际求解结果的 `gh_baseline_time_min/gh_hazard_time_min` 和 `gh_baseline_distance_m/gh_hazard_distance_m`；不可达值为空。各产物的 `role/scenario/field_roles` 与完整schema保存在manifest，并传到注册数据引用；不要根据merge后缀猜字段。较大回执省略的部分列在 `deferred_sections`，使用返回的 `inspect_contract_call` 通过原生清单读取具体产物schema。`analysis.max_output_chars` 默认12000，完整内容仍保存在manifest。

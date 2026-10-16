@@ -21,6 +21,7 @@ class AnalysisConfig(BaseModel):
     outputs_dir: str = ".geoharness/analysis"
     metric_crs: str = ""
     timeout_seconds: float = Field(default=120, gt=0, le=3600)
+    max_output_chars: int = Field(default=12000, ge=6000, le=12000)
 
 
 class ExecutionConfig(BaseModel):

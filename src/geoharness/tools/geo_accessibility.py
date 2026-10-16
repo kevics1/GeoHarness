@@ -14,6 +14,60 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from geoharness.tools.geo_analysis import SpatialSource
 
 
+def _bounded_receipt(payload: dict, max_chars: int, primary: str) -> str:
+    """Keep action/meaning/path evidence readable; full tables stay in the manifest."""
+
+    def encode() -> str:
+        return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+    omitted = []
+    payload["deferred_sections"] = omitted
+    for field in ("table_previews", "suggested_layers"):
+        if len(encode()) <= max_chars:
+            break
+        if field in payload:
+            payload.pop(field)
+            omitted.append(field)
+    if len(encode()) > max_chars:
+        for label, entry in payload["artifacts"].items():
+            if label not in {"result", primary}:
+                for field in ("schema", "source_attribute_fields", "meaning", "field_roles",
+                              "csv", "schema_scope", "validation_state", "state"):
+                    entry.pop(field, None)
+        omitted.append("secondary artifact schema samples")
+    for field in ("comparison",):
+        if len(encode()) <= max_chars:
+            break
+        payload.pop(field, None)
+        omitted.append(field)
+    if len(encode()) > max_chars:
+        for entry in payload["artifacts"].values():
+            for field in ("source_attribute_fields", "meaning", "csv", "schema_scope"):
+                entry.pop(field, None)
+        omitted.append("source schema samples")
+    for field in (
+        "statistics",
+        "artifacts",
+    ):
+        if len(encode()) <= max_chars:
+            break
+        if field in payload:
+            payload.pop(field)
+            omitted.append(field)
+    if len(encode()) > max_chars:
+        payload.pop("qgis_inputs", None)
+        omitted.append("qgis_inputs")
+    if len(encode()) > max_chars:
+        # Do not let unusually long filters/field names hide the exact recovery entry.
+        core = {key: payload[key] for key in ("status", "manifest_path", "inspect_contract_call",
+                                            "quality_scope")}
+        core["deferred_sections"] = list(payload.keys())
+        core["note"] = "Full contract is in the verified manifest. Use inspect_contract_call; " \
+                       "change label/offset to inspect each artifact schema."
+        return json.dumps(core, ensure_ascii=False, separators=(",", ":"))
+    return encode()
+
+
 class GeoAccessibilityInput(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -163,19 +217,48 @@ class GeoAccessibilityTool(BaseTool):
                 "layers": [layer for layer in manifest["layers"] if layer["name"] in map_names],
                 "analysis_manifests": [manifest["manifest_path"]],
             }
-            visible_fields = {"geojson", "csv", "feature_count", "crs", "state", "validation_state"}
+            visible_fields = {
+                "geojson",
+                "csv",
+                "feature_count",
+                "crs",
+                "state",
+                "validation_state",
+                "role",
+                "scenario",
+                "meaning",
+                "field_roles",
+            }
             artifacts = {
                 label: {key: value for key, value in entry.items() if key in visible_fields}
                 for label, entry in manifest["paths"].items()
             }
+            for label, entry in manifest["paths"].items():
+                sample = entry["source_attribute_fields"][:12]
+                displayed = set(entry["field_roles"].values()) | set(sample)
+                artifacts[label].update(
+                    schema={
+                        field: dtype
+                        for field, dtype in entry["schema"].items()
+                        if field in displayed
+                    },
+                    schema_scope="role fields and first 12 source attributes; "
+                                 "full schema in manifest",
+                    source_attribute_fields=sample,
+                    source_attribute_count=len(entry["source_attribute_fields"]),
+                    schema_field_count=len(entry["schema"]),
+                )
             preview_fields = {
                 "gh_resident_id",
                 "gh_status",
+                "gh_status_label_zh",
                 "gh_shelter_id",
                 "gh_distance_m",
                 "gh_time_min",
                 "gh_transition",
                 "gh_objective_delta",
+                "gh_baseline_time_min",
+                "gh_hazard_time_min",
             }
             previews = {
                 label: [
@@ -185,10 +268,35 @@ class GeoAccessibilityTool(BaseTool):
                 for label in {"result", primary}
             }
             return ToolResult(
-                output=json.dumps(
+                output=_bounded_receipt(
                     {
                         "status": "succeeded",
                         "manifest_path": manifest["manifest_path"],
+                        "method_parameters": manifest["parameters"],
+                        "input_selection": manifest["input_selection"],
+                        "hazard_scope": manifest["hazard_scope"],
+                        "status_definitions": manifest["status_definitions"],
+                        "inspect_contract_call": {
+                            "tool": "geo_python",
+                            "arguments": {
+                                "input_refs": {"manifest": manifest["manifest_path"]},
+                                "code": (
+                                    "import json\n"
+                                    "raw = INPUTS['manifest'].read_text(encoding='utf-8')\n"
+                                    "contract = json.loads(raw)\n"
+                                    "label, offset = 'result', 0\n"
+                                    "entry = contract['paths'][label]\n"
+                                    "fields = list(entry['schema'])\n"
+                                    "print(json.dumps({'role': entry.get('role'), "
+                                    "'field_count': len(fields), 'schema': "
+                                    "{name: entry['schema'][name] "
+                                    "for name in fields[offset:offset+24]}, "
+                                    "'next_offset': offset+24 "
+                                    "if offset+24 < len(fields) else None}, "
+                                    "ensure_ascii=False))"
+                                ),
+                            },
+                        },
                         "qgis_inputs": qgis_inputs,
                         "comparison": manifest.get("comparison"),
                         "statistics": manifest["statistics"],
@@ -203,8 +311,8 @@ class GeoAccessibilityTool(BaseTool):
                         "quality_scope": "Method/data integrity checks passed; scientific "
                         "analysis_correctness remains unverified.",
                     },
-                    ensure_ascii=False,
-                    allow_nan=False,
+                    max_chars=getattr(analysis, "max_output_chars", 12000),
+                    primary=primary,
                 ),
                 metadata=manifest,
             )

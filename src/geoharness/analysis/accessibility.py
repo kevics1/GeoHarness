@@ -53,11 +53,24 @@ def _ids(frame: Any, field: str, label: str) -> list[str]:
     for value in frame[field]:
         value = value.item() if hasattr(value, "item") else value
         if isinstance(value, bool) or not isinstance(value, (str, int)) or str(value) == "":
+            numeric = frame[field].dropna().tolist()
+            integral_floats = bool(numeric) and all(
+                isinstance(item, float) and math.isfinite(item) and item.is_integer()
+                for item in numeric
+            )
             raise AccessibilityContractError(
                 "invalid_identity",
                 f"{label}: IDs must be nonempty strings or integers",
                 source=label,
                 id_field=field,
+                dtype=str(frame[field].dtype),
+                recovery={
+                    "integral_float_values": integral_floats,
+                    "instruction": "Create a new ID attribute in a derived output; preserve "
+                    "the original source and ID mapping. Before explicit conversion, verify "
+                    "non-null values, integer precision when relevant, uniqueness and collision "
+                    "freedom after string serialization. Then use the derived ID field.",
+                },
             )
         values.append(str(value))
     if len(values) != len(set(values)):
@@ -68,6 +81,128 @@ def _ids(frame: Any, field: str, label: str) -> list[str]:
             id_field=field,
         )
     return values
+
+
+def _status_definitions(hazard_buffer_m: float) -> dict[str, dict[str, str]]:
+    """Labels describe the model, without claiming real evacuation or fire exposure."""
+    hazard_label = "位于所选危险范围内"
+    if hazard_buffer_m:
+        hazard_label = f"位于所选危险范围及{hazard_buffer_m:g} m缓冲区内"
+    descriptions = {
+        "reachable": ("当前模型条件下可达", "A directed model path exists to an eligible shelter."),
+        "inside_hazard": (
+            hazard_label,
+            "Endpoint intersects selected hazard union plus buffer; "
+            "not proof of being inside a current fire.",
+        ),
+        "snap_too_far": (
+            "超出设定路网接驳距离",
+            "No candidate under the input data/connector limit; not proof of physical isolation.",
+        ),
+        "network_unreachable": ("当前模型路网不可达", "No directed path to an eligible shelter."),
+        "road_access_blocked": (
+            "模型接入道路受阻",
+            "All original candidate road segments blocked.",
+        ),
+        "connector_blocked": ("模型接驳线受阻", "All eligible straight access connectors blocked."),
+        "no_safe_network": (
+            "当前模型无可用路网",
+            "No traversable road segment remains in this model.",
+        ),
+        "no_available_shelters": (
+            "当前模型无可用目的地",
+            "No eligible shelter has safe model access.",
+        ),
+        "connected": (
+            "具有模型路网接入",
+            "Has eligible access candidates; not shelter activation "
+            "or a capacity/demand allocation.",
+        ),
+    }
+    return {
+        code: {"label_zh": label, "meaning": meaning}
+        for code, (label, meaning) in descriptions.items()
+    }
+
+
+def _describe_artifact(label: str, frame: Any, *, compare: bool) -> dict:
+    """Declare roles using actual exported fields; never promise guessed merge suffixes."""
+    scenario = "selected_scenario"
+    name = label
+    for prefix in ("baseline_", "hazard_"):
+        if label.startswith(prefix):
+            scenario, name = prefix[:-1], label[len(prefix) :]
+            break
+    fields = set(frame.columns)
+    roles = {}
+    if label == "result" and compare:
+        role, scenario = "resident_scenario_comparison", "comparison"
+        meaning = "One row per resident, retaining source attributes; baseline/hazard comparison."
+        roles = {
+            "join_key": "gh_resident_id",
+            "baseline_status": "gh_baseline_status",
+            "hazard_status": "gh_hazard_status",
+            "baseline_status_label_zh": "gh_baseline_status_label_zh",
+            "hazard_status_label_zh": "gh_hazard_status_label_zh",
+            "baseline_time_minutes": "gh_baseline_time_min",
+            "hazard_time_minutes": "gh_hazard_time_min",
+            "baseline_distance_metres": "gh_baseline_distance_m",
+            "hazard_distance_metres": "gh_hazard_distance_m",
+            "baseline_objective": "gh_baseline_objective",
+            "hazard_objective": "gh_hazard_objective",
+            "objective_delta": "gh_objective_delta",
+            "lost_model_access": "gh_lost_access",
+        }
+    elif name == "result":
+        role, meaning = "resident_status", "One row per resident, retaining source attributes."
+        roles = {
+            "join_key": "gh_resident_id",
+            "status": "gh_status",
+            "status_label_zh": "gh_status_label_zh",
+            "time_minutes": "gh_time_min",
+            "distance_metres": "gh_distance_m",
+        }
+    elif name == "routes":
+        role, meaning = "model_routes", "Model paths including road and endpoint connectors."
+        roles = {
+            "resident_key": "gh_resident_id",
+            "shelter_key": "gh_shelter_id",
+            "time_minutes": "gh_time_min",
+            "distance_metres": "gh_distance_m",
+        }
+    elif name == "shelters":
+        role = "shelter_access_status"
+        meaning = "Shelter access candidates; not shelter activation or allocated capacity."
+        roles = {
+            "join_key": "gh_shelter_id",
+            "status": "gh_status",
+            "status_label_zh": "gh_status_label_zh",
+        }
+    else:
+        role, meaning = "access_candidate_audit", "Original access candidates for model auditing."
+        scenario = "shared_candidates"
+    return {
+        "role": role,
+        "scenario": scenario,
+        "meaning": meaning,
+        "field_roles": {key: value for key, value in roles.items() if value in fields},
+        "source_attribute_fields": [
+            str(field)
+            for field in frame.columns
+            if field != frame.geometry.name and not str(field).startswith("gh_")
+        ],
+        "native_result_fields": [
+            str(field) for field in frame.columns if str(field).startswith("gh_")
+        ],
+    }
+
+
+def _label_artifacts(artifacts: dict, definitions: dict) -> None:
+    labels = {code: entry["label_zh"] for code, entry in definitions.items()}
+    for frame in artifacts.values():
+        for field in ("gh_status", "gh_baseline_status", "gh_hazard_status"):
+            if field in frame.columns:
+                frame[f"{field}_label_zh"] = frame[field].map(labels)
 
 
 def _projection(roads: Any, target_crs: str) -> Any:
@@ -204,10 +339,28 @@ def compute_accessibility(
     for label, frame in metric.items():
         _validate_frame(frame, label)
     hazard = union_all(metric["hazards"].geometry.array) if hazards is not None else None
+    raw_count = (
+        int(metric["residents"].geometry.intersects(hazard).sum()) if hazard is not None else 0
+    )
     if hazard is not None and hazard_buffer_m:
         hazard = hazard.buffer(hazard_buffer_m)
     if hazard is not None and hazard.is_empty:
         hazard = None
+    hazard_scope = {
+        "selected_feature_count": len(hazards) if hazards is not None else 0,
+        "geometry_operation": "union_then_buffer",
+        "hazard_buffer_m": hazard_buffer_m,
+        "resident_intersects_selected_count": raw_count,
+        "resident_intersects_buffered_count": int(
+            metric["residents"].geometry.intersects(hazard).sum()
+        )
+        if hazard is not None
+        else 0,
+        "count_unit": "resident_features",
+        "meaning": "Intersection counts refer to the supplied/filtered geometries and configured "
+        "buffer, not observed fire exposure. No automatic forecast-time selection.",
+    }
+    definitions = _status_definitions(hazard_buffer_m)
 
     directions = ["both"] * len(roads)
     if direction_mode == "field":
@@ -284,6 +437,7 @@ def compute_accessibility(
             for name, frame in output["artifacts"].items():
                 artifacts[f"{label}_{name}"] = frame
         artifacts["access_candidates"] = candidate_artifact(prepared, scenario)
+        _label_artifacts(artifacts, definitions)
         return {
             "artifacts": artifacts,
             "metric_crs": projection.to_string(),
@@ -294,13 +448,18 @@ def compute_accessibility(
             },
             "assumptions": assumptions,
             "comparison": comparison["summary"],
+            "hazard_scope": hazard_scope,
+            "status_definitions": definitions,
         }
     scenario["artifacts"]["access_candidates"] = candidate_artifact(prepared, scenario)
+    _label_artifacts(scenario["artifacts"], definitions)
     return {
         "artifacts": scenario["artifacts"],
         "metric_crs": projection.to_string(),
         "statistics": scenario["statistics"],
         "assumptions": assumptions,
+        "hazard_scope": hazard_scope,
+        "status_definitions": definitions,
     }
 
 
@@ -389,6 +548,7 @@ def analyze_accessibility(
                 "geojson_sha256": hashlib.sha256(geojson.read_bytes()).hexdigest(),
                 "csv_sha256": hashlib.sha256(csv.read_bytes()).hexdigest(),
                 "schema": {str(field): str(dtype) for field, dtype in exported.dtypes.items()},
+                **_describe_artifact(label, exported, compare=action == "compare"),
             }
             previews[label] = json.loads(
                 table.head(12).to_json(orient="records", date_format="iso")
@@ -410,8 +570,21 @@ def analyze_accessibility(
             "metric_crs": computed["metric_crs"],
             "export_crs": "EPSG:4326",
             "sources": provenance,
+            "input_selection": {
+                label: {
+                    "selection_mode": "explicit_filters"
+                    if entry["requested_filters"]
+                    else "all_supplied_features",
+                    "requested_filters": entry["requested_filters"],
+                    "applied_filters": entry["filters"],
+                    "feature_count": entry["feature_count"],
+                }
+                for label, entry in provenance.items()
+            },
             "parameters": {**kwargs, "action": action, "target_crs": args.target_crs or metric_crs},
             "assumptions": computed["assumptions"],
+            "hazard_scope": computed["hazard_scope"],
+            "status_definitions": computed["status_definitions"],
             "statistics": computed["statistics"],
             "paths": paths,
             "layers": layers,

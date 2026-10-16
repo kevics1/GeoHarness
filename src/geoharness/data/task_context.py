@@ -115,7 +115,8 @@ def recent_outputs(cwd: Path, config: Any, *, limit: int = 24) -> list[dict[str,
                     record["analysis_manifest"] = str(manifest)
                     record["crs"] = entry.get("crs", document.get("export_crs"))
                 for key in ("feature_count", "schema", "crs", "geometry_type", "format",
-                            "entity_key", "lineage", "input_refs", "validation_state"):
+                            "entity_key", "lineage", "input_refs", "validation_state",
+                            "role", "scenario", "field_roles"):
                     if key in entry:
                         record[key] = entry[key]
                 if entry.get("format") == "geojson" and entry.get("geojson_sha256"):
@@ -221,7 +222,8 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                     record["sha256"] = expected
                 for key in ("output_label", "action", "feature_count", "schema", "crs",
                             "geometry_type", "artifact_id", "version", "format", "entity_key",
-                            "lineage", "input_refs", "validation_state"):
+                            "lineage", "input_refs", "validation_state", "role", "scenario",
+                            "field_roles"):
                     if key in item:
                         record[key] = item[key]
             references[ref] = record
