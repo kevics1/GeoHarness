@@ -48,8 +48,14 @@ async def test_real_preflight_short_create_and_readable_report(tmp_path):
     report_path.write_bytes(saved)
     recovered = await tool.execute(
         GeoQgisProjectInput(action="create", plan_ref=reference), context)
-    assert not recovered.is_error, recovered.output
+    assert recovered.is_error and recovered.metadata["mutation_conflict"]
     assert not recovered.metadata.get("duplicate_error_blocked")
+    checked_again = await tool.execute(GeoQgisProjectInput(
+        **recovered.metadata["preflight_call"]), context)
+    assert not checked_again.is_error, checked_again.output
+    recreated = await tool.execute(GeoQgisProjectInput(
+        action="create", plan_ref=checked_again.metadata["plan_ref"]), context)
+    assert not recreated.is_error, recreated.output
 
 
 async def test_preflight_save_error_is_a_tool_result(tmp_path):

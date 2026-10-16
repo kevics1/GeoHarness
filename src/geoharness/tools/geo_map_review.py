@@ -11,6 +11,7 @@ from typing import Any
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
+from geoharness.cartography.mutation_control import current_owner, guard_map_mutations
 from geoharness.cartography.quality import (
     MapIssue,
     MapReview,
@@ -20,6 +21,13 @@ from geoharness.cartography.quality import (
 )
 from geoharness.cartography.review_context import build_review_iteration_context
 from geoharness.cartography.workflow import review_with_budget
+
+
+def _repair_stage(value):
+    owner = current_owner()
+    if owner:
+        owner.stage(value)
+    return value
 
 
 class GeoMapReviewInput(BaseModel):
@@ -175,6 +183,7 @@ class GeoMapReviewTool(BaseTool):
     )
     input_model = GeoMapReviewInput
 
+    @guard_map_mutations
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         from geoharness.cartography.workflow import repair_loop_lock
 
@@ -235,11 +244,18 @@ class GeoMapReviewTool(BaseTool):
                 if not decision.allowed or decision.requires_confirmation:
                     stop = "Automatic create is not currently allowed; issues retained."
                     break
-                repair_stage = "presentation_evidence_validation"
+                repair_stage = _repair_stage("presentation_evidence_validation")
                 try:
                     image = Path(current.metadata["image_path"])
                     receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
                                               map_id=identity, artifact_path=image)
+                    from geoharness.cartography.jobs import map_mutation_state
+
+                    live = map_mutation_state(context.metadata, cwd=context.cwd, config=config,
+                                               map_id=identity)
+                    if receipt.get("selected_version") != live["latest_version"]:
+                        raise RepairUnavailable(
+                            "Historical image reviewed; repair the latest draft")
                     reference = receipt.get("stages", {}).get("visual_checked", {}).get(
                         "report_reference", {})
                     report_path = Path(current.metadata["review_path"])
@@ -253,7 +269,10 @@ class GeoMapReviewTool(BaseTool):
                         raise RepairUnavailable("Visual report belongs to a different map image.")
                     review = MapReview.model_validate({k: v for k, v in report.items()
                                                        if k in MapReview.model_fields})
-                    repair_stage = "repair_plan"
+                    repair_stage = _repair_stage("repair_plan")
+                    state_owner = current_owner()
+                    if state_owner:
+                        state_owner.stage("repair_plan")
                     plan = build_repair_plan(image, review, receipt,
                                              config=config, cwd=context.cwd)
                     repair_plans.append({"issue_ids": getattr(plan, "issue_ids", []),
@@ -262,7 +281,7 @@ class GeoMapReviewTool(BaseTool):
                     if not claim_repair_attempt(context.metadata, plan.digest):
                         stop = "This presentation plan was already attempted; issues retained."
                         break
-                    repair_stage = "native_presentation_create"
+                    repair_stage = _repair_stage("native_presentation_create")
                     rendered = await GeoQgisProjectTool().execute(
                         plan.parameters, context, _source_bindings=plan.source_bindings)
                     if rendered.is_error:
@@ -272,7 +291,7 @@ class GeoMapReviewTool(BaseTool):
                         stop = ("Native presentation create failed; prior candidate retained. "
                                 + rendered.output)
                         break
-                    repair_stage = "new_render_validation"
+                    repair_stage = _repair_stage("new_render_validation")
                     preview = (rendered.metadata.get("preview_path")
                                or rendered.metadata.get("primary_map"))
                     if not preview or not Path(preview).is_file():
@@ -289,7 +308,7 @@ class GeoMapReviewTool(BaseTool):
                                 "no repeat review.")
                         break
                     seen_images.add(new_digest)
-                    repair_stage = "new_render_review"
+                    repair_stage = _repair_stage("new_render_review")
                     current = await self._review_one(arguments.model_copy(update={
                         "file_path": str(preview), "map_id": identity,
                         "retry_invalid_response": False,

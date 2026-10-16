@@ -17,8 +17,12 @@ def _directory(cwd, settings):
     return path
 
 
-def save_preflight(parameters: dict, report: dict, *, cwd, settings) -> tuple[str, Path]:
-    content = json.dumps({"parameters": parameters, "preflight": report}, ensure_ascii=False,
+def save_preflight(parameters: dict, report: dict, *, cwd, settings,
+                   binding=None) -> tuple[str, Path]:
+    packet = {"parameters": parameters, "preflight": report}
+    if binding is not None:
+        packet["binding"] = binding
+    content = json.dumps(packet, ensure_ascii=False,
                          sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     digest = hashlib.sha256(content).hexdigest()
     directory = _directory(cwd, settings)
@@ -48,6 +52,12 @@ def load_preflight(reference: str, *, cwd, settings) -> dict:
     if (not isinstance(packet, dict) or not isinstance(packet.get("parameters"), dict)
             or not isinstance(packet.get("preflight"), dict)):
         raise ValueError("Prepared preflight capsule is incomplete")
+    binding = packet.get("binding")
+    if binding is not None and (not isinstance(binding, dict) or
+            not isinstance(binding.get("map_id"), str) or
+            type(binding.get("base_version")) is not int or binding["base_version"] < 0 or
+            not isinstance(binding.get("spec_ref", ""), str)):
+        raise ValueError("Prepared preflight revision binding is invalid")
     return packet
 
 

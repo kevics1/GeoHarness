@@ -494,3 +494,11 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 结果图层保留英文状态码，并提供 `gh_status_label_zh`（比较表为 `gh_baseline_status_label_zh/gh_hazard_status_label_zh`）。默认中文含义使用“当前模型条件下可达”“位于所选危险范围及指定缓冲区内”等限定描述，不等同真实逃生、实际受火或避难所启用。速度、接驳距离和方向设定仍是显式模型条件，科学正确性保持 `unverified`。
 
 比较表新增实际求解结果的 `gh_baseline_time_min/gh_hazard_time_min` 和 `gh_baseline_distance_m/gh_hazard_distance_m`；不可达值为空。各产物的 `role/scenario/field_roles` 与完整schema保存在manifest，并传到注册数据引用；不要根据merge后缀猜字段。较大回执省略的部分列在 `deferred_sections`，使用返回的 `inspect_contract_call` 通过原生清单读取具体产物schema。`analysis.max_output_chars` 默认12000，完整内容仍保存在manifest。
+
+### 同一地图的编辑控制与恢复
+
+原生草案保存、预检、创建和导出在当前运行时按工作区及服务端地图任务身份互斥；审核自动修复持有同一修改控制权，内部创建可重入。并发手工修改返回 `mutation_conflict`，不会排队后应用过期输入。只读帮助和inspect仍可用。
+
+新预检计划同时绑定当时地图版本与可编辑草案头。绘出新版本或草案被修改后，旧计划返回最新版本、`inspect_call/preflight_call`，需要对最新草案重新预检。旧版未包含绑定的计划保留兼容，创建回执明确标为 `legacy_unbound`。
+
+每次创建和自动修复返回 `latest_version/latest_spec_ref`，这是下一次编辑的依据；交付候选可以是不同的历史版本。`inspect(spec_ref=...)` 可查看 `mutation_state`，其中记录当前或最近操作、阶段、开始/结束和失败/取消状态。历史草案可以inspect，更新或预检过期草案会给出恢复入口。导出现有历史工程仍保留其实际样式，不自动套用最新草案。

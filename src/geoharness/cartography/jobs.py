@@ -927,6 +927,33 @@ def _layer_key(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() and len(value) <= 128 else None
 
 
+def map_mutation_state(metadata, *, cwd, config, map_id) -> dict:
+    """Read current revision and editable head without rehashing historical packages."""
+    with _LOCK:
+        job = _job(_directory(cwd, config), map_id)
+        return {"map_id": map_id, "latest_version": job.get("current_version") or 0,
+                "latest_spec_ref": (job.get("editable_draft") or {}).get("spec_ref", ""),
+                "mutation": copy.deepcopy(job.get("mutation") or {})}
+
+
+def record_map_draft(map_id, metadata, *, cwd, config, spec_ref) -> None:
+    if not re.fullmatch(r"qgis-spec:[0-9a-f]{64}", spec_ref):
+        raise ValueError("Editable draft requires an actual qgis-spec reference")
+    with _LOCK:
+        directory = _directory(cwd, config)
+        job, index = _job(directory, map_id), _index(directory)
+        job["editable_draft"] = {"spec_ref": spec_ref, "updated_at": _now()}
+        _save(directory, job, index)
+
+
+def record_map_mutation(map_id, metadata, *, cwd, config, value) -> None:
+    with _LOCK:
+        directory = _directory(cwd, config)
+        job, index = _job(directory, map_id), _index(directory)
+        job["mutation"] = {**(job.get("mutation") or {}), **value}
+        _save(directory, job, index)
+
+
 def _layer_metadata(report: dict, name: str, source_index: int) -> dict:
     """Array positions may bind evidence inside one version, never between versions."""
     values = report.get(name)

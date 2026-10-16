@@ -13,6 +13,7 @@ from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from geoharness.cartography.derivation import MapDerivation, derive_frame
+from geoharness.cartography.mutation_control import guard_map_mutations
 from geoharness.cartography.retry_guard import guard_map_errors
 from geoharness.cartography.snapshot import FrozenQgisInputs, freeze_qgis_inputs
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_map_render
@@ -676,6 +677,7 @@ class GeoQgisProjectTool(BaseTool):
     input_model = GeoQgisProjectInput
 
     @guard_map_errors
+    @guard_map_mutations
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext,
                       *, _source_bindings: list[dict] | None = None) -> ToolResult:
         assert isinstance(arguments, GeoQgisProjectInput)
@@ -721,6 +723,14 @@ class GeoQgisProjectTool(BaseTool):
                     packet = {"status": "draft_inspected",
                         "spec_ref": arguments.spec_ref, "parameters": parameters,
                         "layers": describe_layers(parameters, context=context, config=config)}
+                    if parameters.get("map_id"):
+                        from geoharness.cartography.jobs import map_mutation_state
+
+                        try:
+                            packet["mutation_state"] = map_mutation_state(context.metadata,
+                                cwd=context.cwd, config=config, map_id=parameters["map_id"])
+                        except ValueError:
+                            pass  # Legacy caller-chosen aliases are not ledger UUIDs.
                     if (arguments.detail_path or arguments.offset
                             or len(json.dumps(packet, ensure_ascii=False)) >
                             config.qgis.inspection_max_chars):
@@ -742,6 +752,14 @@ class GeoQgisProjectTool(BaseTool):
                     exclude_unset=True)
                 parameters.setdefault('layers', [])
                 reference, path = save_spec(parameters, cwd=context.cwd, settings=config.qgis)
+                if arguments.action != "inspect":
+                    from geoharness.cartography.jobs import record_map_draft
+                    from geoharness.cartography.mutation_control import current_owner
+
+                    owner = current_owner()
+                    if owner:
+                        record_map_draft(owner.map_id, context.metadata, cwd=context.cwd,
+                                         config=config, spec_ref=reference)
                 spec_reference = reference
                 if arguments.action == "spec":
                     return ToolResult(output=json.dumps({"status": "draft_saved",
@@ -826,6 +844,11 @@ class GeoQgisProjectTool(BaseTool):
 
     async def _execute(self, arguments, context, snapshot_directory=None,
                        *, source_bindings=None) -> ToolResult:
+        from geoharness.cartography.mutation_control import current_owner
+
+        owner = current_owner()
+        if owner:
+            owner.stage("data_preflight" if arguments.action != "export" else "native_export")
         config = context.metadata["geoharness_config"]
         requested = arguments.model_dump(exclude={"action", "plan_ref"}, exclude_unset=True)
         preflight = None
@@ -919,6 +942,8 @@ class GeoQgisProjectTool(BaseTool):
         if arguments.action == "preflight":
             if arguments.layout is not None and config.qgis.enabled:
                 try:
+                    if owner:
+                        owner.stage("native_preflight")
                     result = await execute_qgis(
                         "project_preflight", payload, cwd=Path(context.cwd), settings=config.qgis,
                         read_roots=[*qgis_read_roots(config, Path(context.cwd)),
@@ -945,8 +970,13 @@ class GeoQgisProjectTool(BaseTool):
             if preflight.get("layout_plan"):
                 requested.setdefault("layout", {})["layout_plan"] = preflight["layout_plan"]
             try:
+                from geoharness.cartography.mutation_control import current_owner, plan_binding
+
+                owner = current_owner()
+                binding = (plan_binding(context, map_id=owner.map_id)
+                           if owner is not None else None)
                 reference, report_path = save_preflight(requested, preflight, cwd=context.cwd,
-                                                        settings=config.qgis)
+                                                        settings=config.qgis, binding=binding)
             except (OSError, ValueError) as exc:
                 return ToolResult(output=f"Error: QGIS preflight report could not be saved: {exc}",
                     is_error=True, metadata={"render_executed": False,
@@ -984,6 +1014,8 @@ class GeoQgisProjectTool(BaseTool):
             reserve_map_render(identity, context.metadata, config)
         payload["map_id"] = identity
         try:
+            if owner:
+                owner.stage("native_" + arguments.action)
             execution = execute_qgis(
                 f"project_{arguments.action}",
                 payload,
