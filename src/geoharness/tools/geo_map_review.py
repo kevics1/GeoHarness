@@ -150,6 +150,8 @@ def _verified_render_evidence(
                 "backend_proof": {"manifest_path": str(manifest_path), "image_sha256": digest,
                                   "manifest_sha256": hashlib.sha256(raw).hexdigest()},
                 "render_metadata": {
+                    "semantic_sources": (manifest.get("creation_spec") or {}).get(
+                        "source_bindings", []),
                     "creation_spec_available": isinstance(manifest.get("creation_spec"), dict),
                     **{key: manifest[key] for key in ("layers", "layout", "crs", "extent",
                         "analysis", "layout_plan", "native_facts", "frame_checks", "composition")
@@ -278,7 +280,8 @@ class GeoMapReviewTool(BaseTool):
                     repair_plans.append({"issue_ids": getattr(plan, "issue_ids", []),
                         "binding": getattr(plan, "binding", {}),
                         "rejected": getattr(plan, "rejected", [])})
-                    if not claim_repair_attempt(context.metadata, plan.digest):
+                    if not claim_repair_attempt(context.metadata,
+                            getattr(plan, "semantic_digest", "") or plan.digest):
                         stop = "This presentation plan was already attempted; issues retained."
                         break
                     repair_stage = _repair_stage("native_presentation_create")
@@ -563,6 +566,11 @@ class GeoMapReviewTool(BaseTool):
                 result.summary = "Additional layout pages have no completed pixel review."
                 budget["visual_review_status"] = "unverified"
                 budget["visual_review_completed"] = False
+        from geoharness.cartography.quality_repair import review_semantic_state
+
+        result.diagnostics["semantic_quality"] = review_semantic_state(
+            result, verified.get("render_metadata") or {}, page_index=page_index,
+            map_id=identity)
         report = save_review(
             path,
             {

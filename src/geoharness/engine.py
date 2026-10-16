@@ -181,6 +181,12 @@ class GeoQueryEngine(QueryEngine):
             try:
                 review, _ = json.JSONDecoder().raw_decode(event.output.lstrip())
                 diagnostic = review.get("diagnostics", {})
+                quality = diagnostic.get("semantic_quality", {})
+                if quality.get("complete") and quality.get("signature") and quality.get("map_id"):
+                    return hashlib.sha256(json.dumps({
+                        "tool": event.tool_name, "status": review.get("status"),
+                        "quality": quality["signature"],
+                    }, sort_keys=True).encode()).hexdigest()
                 if review.get("status") == "unverified" and diagnostic.get("stage") == "cache":
                     # Waiting/counter updates are not completed work or new service attempts.
                     held = {key: diagnostic.get(key) for key in (

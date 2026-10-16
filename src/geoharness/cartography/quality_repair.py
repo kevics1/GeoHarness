@@ -27,6 +27,85 @@ class RepairPlan:
     strategy: str
     binding: dict = field(default_factory=dict)
     rejected: list[dict] = field(default_factory=list)
+    semantic_digest: str = ""
+
+
+def review_semantic_state(review: MapReview, manifest: dict, *, page_index: int = 0,
+                          map_id: str = "") -> dict:
+    """Identify reported native subjects, independently of image IDs or provider prose.
+
+    Missing proof is not evidence of an unchanged subject. Callers retain their
+    ordinary image-bound identity whenever complete is false.
+    """
+    frames = (manifest.get("native_facts") or {}).get("frames", {})
+    layers = {layer.get("source_index", i): layer for i, layer in
+              enumerate(manifest.get("layers", []))}
+    sources = (manifest.get("creation_spec") or {}).get("source_bindings",
+               manifest.get("semantic_sources", []))
+
+    def source_key(index):
+        layer = layers.get(index, {})
+        if layer.get("layer_key"):
+            return layer["layer_key"]
+        if index < len(sources):
+            return sources[index]
+        return None
+
+    map_id = map_id or review.diagnostics.get("review_binding", {}).get("map_id")
+    targets, complete = [], bool(frames) and bool(map_id) and review.status in {"passed", "issues"}
+    if review.diagnostics.get("issue_binding_errors"):
+        complete = False
+    for issue in review.issues:
+        if issue.severity == "info":
+            continue
+        try:
+            _roi(issue, review)
+        except (RepairUnavailable, KeyError, TypeError, ValueError):
+            complete = False
+        target = {"code": issue.issue_code, "severity": issue.severity,
+                  "frame": issue.frame_id, "sources": [source_key(i)
+                      for i in sorted(issue.source_indices)]}
+        if issue.issue_code == "other" or any(value is None for value in target["sources"]):
+            complete = False
+        if issue.frame_id in {"main_map", "detail_map"}:
+            frame = frames.get(issue.frame_id, {})
+            if frame.get("page_index", page_index) != page_index:
+                complete = False
+            try:
+                extent = _issue_extent(issue, review, frame)
+            except (RepairUnavailable, KeyError, TypeError, ValueError):
+                complete = False
+                extent = None
+            points = [point for point in frame.get("points", []) if extent is not None
+                and point.get("layer_index") in issue.source_indices
+                and extent[0] <= point.get("x", math.inf) <= extent[2]
+                and extent[1] <= point.get("y", math.inf) <= extent[3]]
+            covered_sources = {point["layer_index"] for point in points}
+            sampled = frame.get("points", [])
+            limit = frame.get("sample_limit")
+            sample_complete = not (type(limit) is int and len(sampled) >= limit)
+            if (points and sample_complete and covered_sources == set(issue.source_indices)
+                    and all(point.get("feature_id") is not None for point in points)):
+                target["subjects"] = sorted([
+                    [point["layer_index"], point["feature_id"], point["x"], point["y"]]
+                    for point in points], key=lambda value: json.dumps(value, sort_keys=True))
+            else:
+                # Pixel boxes or aggregate layer extents cannot prove which
+                # local subjects repeat after a viewport/scale change.
+                complete = False
+        elif issue.frame_id not in {"legend", "footer", "title", "detail_legend",
+                                     "detail_title", "footer_text"}:
+            complete = False
+        targets.append(target)
+    material = {"status": review.status, "page_index": page_index,
+                "map_id": map_id,
+                "targets": sorted(targets, key=lambda value: json.dumps(
+                    value, sort_keys=True, default=str)),
+                "scope": review.diagnostics.get("review_scope", {})}
+    return {"signature": hashlib.sha256(json.dumps(material, sort_keys=True,
+                default=str).encode()).hexdigest(), "complete": complete,
+            "map_id": map_id, "page_index": page_index, "actionable_issues": len(targets),
+            "meaning": "reported_subject_state; changed does not imply improved quality"}
 
 
 def _sha(path: Path) -> str:
@@ -641,4 +720,13 @@ def build_repair_plan(
     digest = hashlib.sha256(
         json.dumps(material, sort_keys=True, ensure_ascii=False, default=str).encode()
     ).hexdigest()
-    return RepairPlan(parameters, sources, digest, identifiers, mode, binding, rejected)
+    accepted = review.model_copy(update={"issues": [issues[key] for key in identifiers]})
+    semantic = review_semantic_state(accepted, manifest, map_id=receipt["job_id"])
+    semantic_digest = digest
+    if semantic["complete"]:
+        semantic_digest = hashlib.sha256(json.dumps({
+            "map_id": receipt["job_id"], "subjects": semantic["signature"],
+            "strategy": mode, "parameters": stable_parameters,
+        }, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+    return RepairPlan(parameters, sources, digest, identifiers, mode, binding, rejected,
+                      semantic_digest)
