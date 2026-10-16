@@ -150,8 +150,11 @@ _TOOL_CATALOG = """\
 - **geo_accessibility**: Road-network accessibility with explicit direction mapping,
   metric CRS, speed, maximum snap distance and selected hazard geometry. Prefer this
   over rewriting routing in geo_python. Inspect every resident's status and the
-  safe graph components. Distances include endpoint connectors. Capacity allocation,
-  travel-time optimization and validated risk scoring are not implied.
+  safe graph components. Use action=compare for baseline versus hazard: common
+  attachment candidates, explicit objective=distance/time, native status transitions.
+  Do not subtract independent scenario runs or interpret snap_too_far as proven isolation.
+  Distances include connectors; estimated times depend on declared speeds.
+  Capacity allocation and validated risk scoring are not implied.
 - **geo_qgis**: Discover and execute the installed QGIS Processing registry.
   - Actions: doctor, search, help, run, model. search(query='buffer') finds actual
     IDs; help(algorithm_id=...) returns exact parameters and enums; run receives
@@ -162,7 +165,11 @@ _TOOL_CATALOG = """\
     Results are local files in unique .geoharness/qgis tasks; inspect actual outputs.
 - **geo_qgis_project**: Create/inspect/export genuine QGIS projects and print layouts.
   - Build a small draft with action=spec (layers can initially be empty), then add
-    layers/layout via spec_ref and patches=[{path:['layers',0],value:{...}}]. Paths
+    layers/layout via spec_ref. Inspect using action=inspect,spec_ref to recover actual
+    keys/state. Prefer typed edits (operation=layer/style/labels/frame/roster), targeting
+    returned layer_key. Use action=help,section=style/labels/frame/layout/edits for the
+    actual schema; geo_qgis Processing help is a different interface.
+    Advanced patches=[{path:['layers',0],value:{...}}] remain available. Paths
     use actual schema keys: layer.style.color, layer.label_style.size_pt,
     layout.width_mm/height_mm; do not invent color/type on a layer, paper_size or
     page_width_mm. Array append uses the exact next index; existing styles stay stored.
@@ -171,7 +178,12 @@ _TOOL_CATALOG = """\
     Label rosters use fields[0] as a unique nonnull key; columns counts parallel full
     tables, not property fields. top_n requires sort_by; omit selection for all rows.
     placement=auto may add roster pages; placement=pages requests them directly.
-    Keep the full roster CSV and page previews. Never remove subjects to bypass zoom.
+    Keep the full roster CSV and page previews. Declare each frame's purpose and
+    requirements (layer_index=exact layer_key, coverage=complete/intersects). Presence
+    in the main map never proves the required detail subjects are present.
+    Review zoom suggestions use detail_zoom_policy=advisory, not a new hard requirement.
+    Use detail_placement=page for a separate detail when supported by measured planning.
+    Never remove subjects or raise a zoom target simply to satisfy a review suggestion.
   - Build projects from real local layers with declared styles/CRS. Export the actual
     saved layout to PNG/PDF. Re-export user-edited projects to a new artifact directory,
     preserving the edited original. Use returned project_dir and preview_path for
@@ -207,6 +219,13 @@ _TOOL_CATALOG = """\
   - Use the same map_id as geo_python. Consolidate concrete errors/warnings into
     one repair. Stop on passed, unverified, info-only suggestions or no actionable change.
     Unchanged image checks are cached; never repeat a failed check blindly.
+    For multi-page projects review each returned page_previews item whose frames is
+    nonempty, using its exact path and the same map_id. A pending other-page check is
+    not a provider failure: continue to that page, never retry the unchanged main PNG.
+    Page reviews stay in the same map version; roster-only pages use native layout checks.
+    Only validated executable patches are repair instructions. An unverified response,
+    rejected raw review excerpt or mismatched frame/ROI is diagnostic, never a plan.
+    Use native repair results; do not translate a rejected patch into a new full map call.
 - **geo_deliver**: Copy selected files and a project_dir into workspace exports.
   - Use the returned delivery_dir and qgis_project paths in the final answer.
     Include map, editable project, analysis outputs, report and original Python script.
