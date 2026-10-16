@@ -480,7 +480,12 @@ class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["create", "inspect", "export", "preflight", "spec", "help"]
-    section: Literal["workflow", "style", "labels", "frame", "layout", "edits"] = "workflow"
+    section: Literal["workflow", "layer", "roster", "style", "labels", "frame", "layout",
+                     "edits"] = "workflow"
+    detail_path: list[str | int] = Field(default_factory=list, max_length=16,
+        description="Read-only JSON path within verified spec/plan or help. Never a file path.")
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=8, ge=1, le=32)
     edits: list[MapEdit] = Field(default_factory=list, max_length=32,
         description="Typed incremental spec operations. Use with action=spec + spec_ref; "
                     "target returned layer_key, never reconstruct paths or rewrite all layers.")
@@ -562,13 +567,17 @@ class GeoQgisProjectInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
+        selectors = {"detail_path", "offset", "limit"}
+        if self.model_fields_set & selectors and self.action not in {"help", "inspect"}:
+            raise ValueError("Diagnostic selectors are read-only; use help or inspect")
         if self.action == "help":
-            if self.model_fields_set - {"action", "section"}:
+            if self.model_fields_set - {"action", "section", *selectors}:
                 raise ValueError("help accepts only action and section")
             return self
         if self.spec_ref:
             if self.action not in {"spec", "preflight", "inspect"} or self.model_fields_set - {
-                "action", "spec_ref", "patches", "edits"
+                "action", "spec_ref", "patches", "edits", *(
+                    selectors if self.action == "inspect" else set())
             }:
                 raise ValueError("spec_ref accepts only action=spec/preflight/inspect, "
                                  "spec_ref and optional patches/edits")
@@ -578,6 +587,9 @@ class GeoQgisProjectInput(BaseModel):
         if self.patches or self.edits:
             raise ValueError("patches/edits require a returned spec_ref")
         if self.plan_ref:
+            if self.action == "inspect" and not self.model_fields_set - {
+                    "action", "plan_ref", *selectors}:
+                return self
             if self.action != "create" or self.model_fields_set - {"action", "plan_ref"}:
                 extra = sorted(self.model_fields_set - {"action", "plan_ref"})
                 raise ValueError("plan_ref create accepts only action and plan_ref; "
@@ -671,10 +683,22 @@ class GeoQgisProjectTool(BaseTool):
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
         if arguments.action == "help":
+            from geoharness.qgis.inspection import help_output, view
             from geoharness.qgis.specification import contract_help
 
-            return ToolResult(output=json.dumps(contract_help(arguments.section),
-                ensure_ascii=False), metadata={"render_executed": False})
+            payload = contract_help(arguments.section)
+            call = {"action": "help", "section": arguments.section}
+            try:
+                visible = (view(payload, call=call, path=arguments.detail_path,
+                    offset=arguments.offset, limit=arguments.limit,
+                    max_chars=config.qgis.inspection_max_chars)
+                    if arguments.detail_path or arguments.offset else
+                    help_output(payload, call=call, max_chars=config.qgis.inspection_max_chars))
+                return ToolResult(output=json.dumps(visible, ensure_ascii=False),
+                                  metadata={"render_executed": False})
+            except ValueError as exc:
+                return ToolResult(output=str(exc), is_error=True,
+                                  metadata={"render_executed": False})
         spec_reference = ""
         if arguments.action == "spec" or arguments.spec_ref:
             from geoharness.qgis.specification import (
@@ -691,11 +715,21 @@ class GeoQgisProjectTool(BaseTool):
                         "action", "plan_ref", "spec_ref", "patches", "edits", "section"},
                         exclude_unset=True))
                 if arguments.action == "inspect":
+                    from geoharness.qgis.inspection import view
                     from geoharness.qgis.specification import describe_layers
 
-                    return ToolResult(output=json.dumps({"status": "draft_inspected",
+                    packet = {"status": "draft_inspected",
                         "spec_ref": arguments.spec_ref, "parameters": parameters,
-                        "layers": describe_layers(parameters, context=context, config=config)},
+                        "layers": describe_layers(parameters, context=context, config=config)}
+                    if (arguments.detail_path or arguments.offset
+                            or len(json.dumps(packet, ensure_ascii=False)) >
+                            config.qgis.inspection_max_chars):
+                        packet = {"spec_ref": arguments.spec_ref, **view(packet,
+                            call={"action": "inspect", "spec_ref": arguments.spec_ref},
+                            path=arguments.detail_path, offset=arguments.offset,
+                            limit=arguments.limit,
+                            max_chars=config.qgis.inspection_max_chars - 100)}
+                    return ToolResult(output=json.dumps(packet,
                         ensure_ascii=False), metadata={"render_executed": False})
                 parameters = patch_spec(parameters,
                     [patch.model_dump() for patch in arguments.patches])
@@ -730,6 +764,15 @@ class GeoQgisProjectTool(BaseTool):
 
             try:
                 packet = load_preflight(arguments.plan_ref, cwd=context.cwd, settings=config.qgis)
+                if arguments.action == "inspect":
+                    from geoharness.qgis.inspection import view
+
+                    visible = view(packet,
+                        call={"action": "inspect", "plan_ref": arguments.plan_ref},
+                        path=arguments.detail_path, offset=arguments.offset,
+                        limit=arguments.limit, max_chars=config.qgis.inspection_max_chars - 100)
+                    return ToolResult(output=json.dumps({"plan_ref": arguments.plan_ref,
+                        **visible}, ensure_ascii=False), metadata={"render_executed": False})
                 arguments = GeoQgisProjectInput.model_validate({**packet["parameters"],
                                                                 "action": "create"})
             except (OSError, ValueError) as exc:
@@ -776,7 +819,7 @@ class GeoQgisProjectTool(BaseTool):
         if spec_reference and not result.is_error:
             visible = json.loads(result.output)
             visible["spec_ref"] = spec_reference
-            result = ToolResult(output=json.dumps(visible, ensure_ascii=False, indent=2),
+            result = ToolResult(output=json.dumps(visible, ensure_ascii=False),
                                 is_error=result.is_error,
                                 metadata={**result.metadata, 'spec_ref': spec_reference})
         return result
@@ -909,11 +952,9 @@ class GeoQgisProjectTool(BaseTool):
                     is_error=True, metadata={"render_executed": False,
                                             "preflight_status": "failed"})
             # Keep small legacy reports readable inline; large reports use an exact capsule.
-            visible = summary(preflight, reference, report_path)
-            if len(json.dumps(preflight, ensure_ascii=False)) <= 6000:
-                visible = {**preflight, **{key: visible[key] for key in (
-                    "plan_ref", "report_path", "create_call", "note")}}
-            return ToolResult(output=json.dumps(visible, ensure_ascii=False, indent=2),
+            visible = summary(preflight, reference, report_path,
+                              max_chars=config.qgis.inspection_max_chars - 120)
+            return ToolResult(output=json.dumps(visible, ensure_ascii=False),
                 metadata={"preflight": preflight, "render_executed": False,
                           "plan_ref": reference, "report_path": str(report_path)})
         identity = arguments.map_id or map_identity(

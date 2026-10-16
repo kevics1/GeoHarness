@@ -35,8 +35,12 @@ def load_preflight(reference: str, *, cwd, settings) -> dict:
         raise ValueError("plan_ref requires an actual returned qgis-plan reference")
     digest = reference.split(":", 1)[1]
     path = _directory(cwd, settings) / (digest + ".json")
-    if path.resolve() != path or not path.is_file() or path.stat().st_size > 10 * 1024 * 1024:
-        raise ValueError("Prepared preflight is missing, linked or oversized; run preflight again")
+    if path.resolve() != path:
+        raise ValueError("Prepared preflight is a link; use a direct workspace plan")
+    if not path.is_file():
+        raise ValueError("Prepared preflight not found; copy the exact returned plan_ref")
+    if path.stat().st_size > 10 * 1024 * 1024:
+        raise ValueError("Prepared preflight exceeds the 10 MiB size limit")
     content = path.read_bytes()
     if hashlib.sha256(content).hexdigest() != digest:
         raise ValueError("Prepared preflight changed; run preflight again")
@@ -78,21 +82,25 @@ def diagnostic_files(*, cwd, settings) -> tuple[Path, ...]:
     return tuple(files)
 
 
-def summary(report: dict, reference: str, path: Path) -> dict:
-    result = {key: report[key] for key in (
+def summary(report: dict, reference: str, path: Path, *, max_chars=2400) -> dict:
+    result = {"status": report.get("status"), "plan_ref": reference,
+        "create_call": {"action": "create", "plan_ref": reference},
+        "inspect_call": {"action": "inspect", "plan_ref": reference},
+        "report_path": str(path)}
+    details = {key: report[key] for key in (
         "status", "display_crs", "map_extent", "map_extent_source", "warnings", "issues",
         "parameter_normalizations", "analysis_binding_note",
     ) if key in report}
-    result["layers"] = [{"layer_index": index, **{key: layer[key] for key in (
+    details["layers"] = [{"layer_index": index, **{key: layer[key] for key in (
         "label", "kind", "feature_count", "visible_main", "visible_detail", "symbolization_field",
         "label_field", "issues", "warnings",
     ) if key in layer}} for index, layer in enumerate(report.get("layers", [])[:16])]
-    result["layers_omitted"] = max(0, len(report.get("layers", [])) - 16)
+    details["layers_omitted"] = max(0, len(report.get("layers", [])) - 16)
     if report.get("frame_checks"):
-        result["frame_checks"] = _bounded(report["frame_checks"])
+        details["frame_checks"] = _bounded(report["frame_checks"])
     layout = report.get("layout") or {}
     effective = layout.get("effective_parameters") or {}
-    result["layout"] = {"effective_parameters": {key: effective[key] for key in (
+    details["layout"] = {"effective_parameters": {key: effective[key] for key in (
         "width_mm", "height_mm", "sidebar_width_mm", "detail_height_ratio", "footer_height_mm",
         "body_font_size_pt", "legend_font_size_pt") if key in effective},
         "bounds_check": {key: (layout.get("bounds_check") or {}).get(key)
@@ -100,11 +108,11 @@ def summary(report: dict, reference: str, path: Path) -> dict:
         "adaptations": layout.get("adaptations", []),
         "label_tables": [{key: table[key] for key in ("id", "rows", "visible_rows", "fields")
                           if key in table} for table in layout.get("label_tables", [])]}
-    result.update(plan_ref=reference, report_path=str(path),
-        create_call={"action": "create", "plan_ref": reference},
-        note="Full preflight and original parameters are in report_path. "
-             "Use create_call unchanged: do not add map_id, title or output_format; the plan "
-             "already carries the checked values/defaults. Changes require a new preflight.")
+    for key, item in details.items():
+        candidate = {**result, key: item}
+        if len(json.dumps(candidate, ensure_ascii=False)) <= max_chars - 200:
+            result[key] = item
+    result["note"] = "Use create_call unchanged. Inspect the plan for full diagnostics."
     return result
 
 

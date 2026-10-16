@@ -21,7 +21,9 @@ def input_feedback(name: str, arguments: dict) -> dict | None:
     section = ("labels" if "label_style" in paths
                else "style" if any(key in paths for key in ("style", "color", "categories"))
                else "frame" if any(key in paths for key in ("frame", "extent", "focus"))
-               else "layout" if "layout" in paths else "workflow")
+               else "roster" if "label_table" in paths
+               else "layout" if "layout" in paths
+               else "layer" if "layers" in paths else "workflow")
     result = {"status": "invalid_input", "executed": False, "errors": errors,
         "help_call": {"action": "help", "section": section},
         "recovery": "Use the actual geo_qgis_project contract, not geo_cartography bridge "

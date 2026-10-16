@@ -830,3 +830,150 @@ def test_detail_strategies_accept_nullable_main_and_detail_frames(tmp_path, stra
     assert plan.parameters.layout.main_frame.render_layers == ([0] if strategy == "split_maps"
                                                               else [0, 1])
     assert plan.parameters.layout.detail_frame is not None
+
+
+@pytest.mark.parametrize("frame_id", ["footer", "legend"])
+def test_repeated_non_map_issue_keeps_page_patch(tmp_path, monkeypatch, frame_id):
+    from geoharness.cartography.quality import MapIssue, QgisLayoutPatch, QgisPresentationPatch
+    from geoharness.cartography.quality_repair import build_repair_plan
+
+    image, receipt, _, _ = package(tmp_path)
+    review = overlapping_review()
+    review.issues = [MapIssue(issue_id="page", severity="warning", issue_code="footer_density",
+        description="Crowded page region", frame_id=frame_id, roi_ref=frame_id,
+        bbox=[0, 0, 1, 1])]
+    review.diagnostics["review_rois"] = [{"roi_ref": frame_id, "frame_id": frame_id,
+        "pixel_bbox": [0, 90, 100, 100], "region_bbox": [0, 90, 100, 100],
+        "original_size": [100, 100], "resampled": False}]
+    review.qgis_patch = QgisPresentationPatch(issue_ids=["page"],
+        layout=QgisLayoutPatch(footer_height_mm=30))
+    monkeypatch.setattr("geoharness.cartography.quality_repair._repeat", lambda *args: True)
+    plan = build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+    assert plan.strategy == "adjust_presentation"
+    assert plan.parameters.layout.footer_height_mm == 30
+
+
+def test_repeated_map_issue_does_not_georeference_footer_and_keeps_its_patch(tmp_path, monkeypatch):
+    from geoharness.cartography.quality import MapIssue, QgisLayoutPatch
+    from geoharness.cartography.quality_repair import build_repair_plan
+
+    image, receipt, _, _ = package(tmp_path)
+    review = overlapping_review()
+    review.issues.append(MapIssue(
+        issue_id="footer", severity="warning", issue_code="footer_density",
+        description="Crowded footer", frame_id="footer", roi_ref="footer", bbox=[0, 0, 1, 1]))
+    review.diagnostics["review_rois"].append({"roi_ref": "footer", "frame_id": "footer",
+        "pixel_bbox": [0, 90, 100, 100], "region_bbox": [0, 90, 100, 100],
+        "original_size": [100, 100], "resampled": False})
+    review.qgis_patch.issue_ids.append("footer")
+    review.qgis_patch.layout = QgisLayoutPatch(footer_height_mm=30)
+    monkeypatch.setattr("geoharness.cartography.quality_repair._repeat", lambda *args: True)
+    plan = build_repair_plan(image, review, receipt, config=GeoConfig(), cwd=tmp_path)
+    assert plan.strategy == "split_maps"
+    assert plan.parameters.layout.footer_height_mm == 30
+    assert "footer" in plan.issue_ids
+
+
+@pytest.mark.parametrize("frame_id,extent", [
+    ("footer", [0, 0, 100, 100]), ("main_map", None),
+    ("main_map", [0, 0, 0, 100]), ("main_map", [0, 0, float("inf"), 100]),
+    ("main_map", [0, 0, "100", 100]), ("main_map", [0, 0, 100]),
+])
+def test_issue_extent_rejects_non_map_or_invalid_native_frame(frame_id, extent):
+    from geoharness.cartography.quality_repair import RepairUnavailable, _issue_extent
+
+    review = overlapping_review()
+    issue = review.issues[0].model_copy(update={"frame_id": frame_id})
+    with pytest.raises(RepairUnavailable, match="native map frame"):
+        _issue_extent(issue, review, {"extent": extent})
+
+
+@pytest.mark.parametrize("stage,error", [
+    ("repair_plan", KeyError("missing internal field")),
+    ("native_presentation_create", TypeError("broken internal create")),
+    ("new_render_review", RuntimeError("broken follow-up review")),
+])
+async def test_internal_repair_failure_preserves_completed_review(
+    tmp_path, monkeypatch, stage, error,
+):
+    from openharness.config.settings import PermissionSettings
+    from openharness.permissions.checker import PermissionChecker
+    from openharness.tools.base import ToolExecutionContext
+    from test_map_review_evidence import Reviewer
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+    from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
+
+    image, receipt, metadata, _ = package(tmp_path)
+    reviewer = Reviewer(overlapping_review().model_dump(exclude={"diagnostics"}))
+    metadata.update(geoharness_config=GeoConfig(), map_review_client=reviewer,
+        geoharness_permission_checker=PermissionChecker(
+            PermissionSettings(allowed_tools=["geo_qgis_project"])))
+
+    def fail_plan(*args, **kwargs):
+        raise error
+
+    async def fail_create(*args, **kwargs):
+        raise error
+
+    async def create(self, arguments, context, **kwargs):
+        from openharness.tools.base import ToolResult
+
+        rendered, _, _, _ = package(tmp_path, metadata, name="repaired", color="blue",
+                                     map_id=arguments.map_id)
+        return ToolResult(output="Created", metadata={"preview_path": str(rendered)})
+
+    original_review = GeoMapReviewTool._review_one
+
+    async def follow_up_fails(self, arguments, context):
+        if Path(arguments.file_path) != image:
+            raise error
+        return await original_review(self, arguments, context)
+
+    if stage == "repair_plan":
+        monkeypatch.setattr("geoharness.cartography.quality_repair.build_repair_plan", fail_plan)
+    elif stage == "native_presentation_create":
+        monkeypatch.setattr(GeoQgisProjectTool, "execute", fail_create)
+    else:
+        monkeypatch.setattr(GeoQgisProjectTool, "execute", create)
+        monkeypatch.setattr(GeoMapReviewTool, "_review_one", follow_up_fails)
+    result = await GeoMapReviewTool().execute(
+        GeoMapReviewInput(file_path=str(image), task="Preserve capacity"),
+        ToolExecutionContext(cwd=tmp_path, metadata=metadata))
+    assert not result.is_error
+    assert result.metadata["review_status"] == "issues"
+    assert result.metadata["repair_failure"]["stage"] == stage
+    assert result.metadata["repair_failure"]["exception_type"] == type(error).__name__
+    assert Path(result.metadata["review_path"]).is_file()
+    assert result.metadata["map_receipt"]["job_id"] == receipt["job_id"]
+    assert len(reviewer.requests) == 1
+    if stage == "new_render_review":
+        assert result.metadata["latest_render"]["preview_path"] == str(
+            tmp_path / "repaired" / "preview.png")
+
+
+async def test_repair_cancellation_propagates(tmp_path, monkeypatch):
+    import asyncio
+
+    from openharness.config.settings import PermissionSettings
+    from openharness.permissions.checker import PermissionChecker
+    from openharness.tools.base import ToolExecutionContext
+    from test_map_review_evidence import Reviewer
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+    from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
+
+    image, _, metadata, _ = package(tmp_path)
+    metadata.update(geoharness_config=GeoConfig(),
+        map_review_client=Reviewer(overlapping_review().model_dump(exclude={"diagnostics"})),
+        geoharness_permission_checker=PermissionChecker(
+            PermissionSettings(allowed_tools=["geo_qgis_project"])))
+
+    async def cancel(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(GeoQgisProjectTool, "execute", cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await GeoMapReviewTool().execute(
+            GeoMapReviewInput(file_path=str(image), task="Preserve capacity"),
+            ToolExecutionContext(cwd=tmp_path, metadata=metadata))

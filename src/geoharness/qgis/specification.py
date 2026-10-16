@@ -157,15 +157,18 @@ def contract_help(section: str) -> dict:
         QgisFrameEdit,
         QgisLabelEdit,
         QgisLabelStyle,
+        QgisLabelTable,
         QgisLayerEdit,
         QgisMapFrameSpec,
+        QgisProjectLayer,
         QgisProjectLayout,
         QgisRosterEdit,
         QgisStyleEdit,
         QgisVectorStyle,
     )
 
-    schemas = {"style": QgisVectorStyle, "labels": QgisLabelStyle,
+    schemas = {"layer": QgisProjectLayer, "roster": QgisLabelTable,
+               "style": QgisVectorStyle, "labels": QgisLabelStyle,
                "frame": QgisMapFrameSpec, "layout": QgisProjectLayout}
     result = {"section": section, "contract": "geo_qgis_project",
         "workflow": ["spec -> inspect/typed edits -> preflight(spec_ref) -> create(plan_ref)"],
@@ -261,8 +264,12 @@ def load_spec(reference: str, *, cwd, settings) -> dict:
         raise ValueError("spec_ref must be an actual returned qgis-spec reference")
     digest = reference.split(":", 1)[1]
     path = _directory(cwd, settings) / "specifications" / (digest + ".json")
-    if path.resolve() != path or not path.is_file() or path.stat().st_size > 10 * 1024 * 1024:
-        raise ValueError("Map specification is missing, linked or oversized")
+    if path.resolve() != path:
+        raise ValueError("Map specification is a link; use a direct workspace specification")
+    if not path.is_file():
+        raise ValueError("Map specification not found; copy the exact returned spec_ref")
+    if path.stat().st_size > 10 * 1024 * 1024:
+        raise ValueError("Map specification exceeds the 10 MiB size limit")
     content = path.read_bytes()
     if hashlib.sha256(content).hexdigest() != digest:
         raise ValueError("Map specification changed; save a new specification")

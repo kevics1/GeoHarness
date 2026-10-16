@@ -51,6 +51,7 @@ class QgisConfig(BaseModel):
     prefix_path: str = ""
     outputs_dir: str = ".geoharness/qgis"
     plans_dir: str = ".geoharness/qgis-plans"
+    inspection_max_chars: int = Field(default=2400, ge=1200, le=12000)
     timeout_seconds: float = Field(default=180, gt=0, le=3600)
     max_output_chars: int = Field(default=12000, ge=100, le=1000000)
     max_search_results: int = Field(default=20, ge=1, le=100)

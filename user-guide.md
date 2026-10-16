@@ -476,3 +476,13 @@ PNG/PDF 默认使用 QGIS。配置 `cartography.static_renderer: qgis`，调用 
 需要旧静态路径时指定 `renderer="matplotlib"` 或配置 `cartography.static_renderer: matplotlib`；HTML/SVG 保留原有渲染入口。QGIS 禁用或启动失败时，默认路径会给出具体错误。
 
 QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出及元素边界。对用户已保存的工程，inspect/export 保留真实布局并在 bounds_check 中记录问题，允许合法的地图内注记或手动移动图例；非结构化模板可能返回 checked=false。有问题或缺少有效检查时按草稿处理。bounds_check 只覆盖报告中的布局元素与边界，不证明所有地图标签、图层语义或分析结果正确。显式 font_file 会随工程打包并由 GeoHarness 重导出时加载。QGIS 桌面需使用已安装字体，或由用户自行安装工程携带的自定义字体；系统默认中文字体无需另行打包。
+
+### QGIS 短回执与详细诊断读取
+
+预检回执优先返回 `plan_ref`、`create_call` 和 `inspect_call`；创建时直接使用返回的 `create_call`。完整报告仍保存到哈希核验的工作区计划文件，文件不存在、链接、内容改变和大小超限分别报错，不需要猜引用或遍历目录。
+
+`geo_qgis_project(action="inspect", plan_ref="实际返回的引用", detail_path=["preflight","frame_checks"], offset=0, limit=8)` 按 JSON 路径读取预检内容；草案同样使用 `spec_ref`，参数从 `["parameters"]` 开始。返回的 `read_call` 下钻大对象，`next_call` 读取下一段。路径仅选择已核验 JSON 对象，不授予额外文件或目录权限。`qgis.inspection_max_chars` 默认2400，控制短回执与诊断视图长度；完整数据保留在原报告中。
+
+帮助增加 `section="layer"` 和 `section="roster"`。简短帮助省略嵌套定义和较长说明，通过返回的 `detail_call` 或 `detail_path=["schema","properties","字段名"]` 读取完整定义；`help(section="edits")` 的完整结构可按 `schemas` 中的实际索引下钻。无需读取全局 `tool_artifacts`。
+
+视觉审核完成后，自动修复的证据、编译、原生生成或后续审核失败会保留先前报告，并返回 `repair_failure.stage/error_type`；不能将此解释成审核服务空响应。页脚与图例问题只进入对应的页面呈现策略，不能用于地理范围换算。

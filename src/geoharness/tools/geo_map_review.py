@@ -235,6 +235,7 @@ class GeoMapReviewTool(BaseTool):
                 if not decision.allowed or decision.requires_confirmation:
                     stop = "Automatic create is not currently allowed; issues retained."
                     break
+                repair_stage = "presentation_evidence_validation"
                 try:
                     image = Path(current.metadata["image_path"])
                     receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
@@ -252,6 +253,7 @@ class GeoMapReviewTool(BaseTool):
                         raise RepairUnavailable("Visual report belongs to a different map image.")
                     review = MapReview.model_validate({k: v for k, v in report.items()
                                                        if k in MapReview.model_fields})
+                    repair_stage = "repair_plan"
                     plan = build_repair_plan(image, review, receipt,
                                              config=config, cwd=context.cwd)
                     repair_plans.append({"issue_ids": getattr(plan, "issue_ids", []),
@@ -260,6 +262,7 @@ class GeoMapReviewTool(BaseTool):
                     if not claim_repair_attempt(context.metadata, plan.digest):
                         stop = "This presentation plan was already attempted; issues retained."
                         break
+                    repair_stage = "native_presentation_create"
                     rendered = await GeoQgisProjectTool().execute(
                         plan.parameters, context, _source_bindings=plan.source_bindings)
                     if rendered.is_error:
@@ -269,6 +272,7 @@ class GeoMapReviewTool(BaseTool):
                         stop = ("Native presentation create failed; prior candidate retained. "
                                 + rendered.output)
                         break
+                    repair_stage = "new_render_validation"
                     preview = (rendered.metadata.get("preview_path")
                                or rendered.metadata.get("primary_map"))
                     if not preview or not Path(preview).is_file():
@@ -285,6 +289,7 @@ class GeoMapReviewTool(BaseTool):
                                 "no repeat review.")
                         break
                     seen_images.add(new_digest)
+                    repair_stage = "new_render_review"
                     current = await self._review_one(arguments.model_copy(update={
                         "file_path": str(preview), "map_id": identity,
                         "retry_invalid_response": False,
@@ -293,10 +298,14 @@ class GeoMapReviewTool(BaseTool):
                     if current.is_error:
                         stop = "Review of the new PNG failed; visual quality is unverified."
                         break
-                except (OSError, ValueError, RuntimeError) as exc:
-                    repair_failure = {"stage": "presentation_validation", "error": str(exc)}
+                except Exception as exc:
+                    # Preserve the completed review if an optional repair fails internally.
+                    # Cancellation and process-control BaseExceptions must still propagate.
+                    repair_failure = {"stage": repair_stage, "error": str(exc),
+                                      "exception_type": type(exc).__name__}
                     stop = (str(exc) if isinstance(exc, RepairUnavailable)
-                            else f"Presentation validation failed; issues retained. {exc}")
+                            else f"Presentation repair failed at {repair_stage}; "
+                                 f"completed review retained. {exc}")
                     break
             latest_image = current.metadata.get("image_path", first.metadata["image_path"])
             receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,

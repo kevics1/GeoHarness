@@ -99,6 +99,12 @@ def _roi(issue: MapIssue, review: MapReview) -> dict:
 
 
 def _issue_extent(issue: MapIssue, review: MapReview, frame: dict) -> list[float]:
+    extent = frame.get("extent") if isinstance(frame, dict) else None
+    if (issue.frame_id not in {"main_map", "detail_map"}
+            or not isinstance(extent, (list, tuple)) or len(extent) != 4
+            or not all(type(value) in {int, float} and math.isfinite(value) for value in extent)
+            or extent[0] >= extent[2] or extent[1] >= extent[3]):
+        raise RepairUnavailable("Geographic repair requires a valid measured native map frame.")
     roi = _roi(issue, review)
     crop = roi["pixel_bbox"]
     region = roi["region_bbox"]
@@ -108,7 +114,7 @@ def _issue_extent(issue: MapIssue, review: MapReview, frame: dict) -> list[float
         crop[0] + issue.bbox[2] * (crop[2] - crop[0]),
         crop[1] + issue.bbox[3] * (crop[3] - crop[1]),
     ]
-    xmin, ymin, xmax, ymax = frame["extent"]
+    xmin, ymin, xmax, ymax = extent
     xscale = (xmax - xmin) / (region[2] - region[0])
     yscale = (ymax - ymin) / (region[3] - region[1])
     return [
@@ -121,6 +127,8 @@ def _issue_extent(issue: MapIssue, review: MapReview, frame: dict) -> list[float
 
 def _covering_pair(manifest: dict, issue: MapIssue, review: MapReview) -> tuple[int, int] | None:
     """Prove a local opaque single circle covers an actual classified point circle."""
+    if issue.frame_id not in {"main_map", "detail_map"} or not issue.source_indices:
+        return None
     frame = manifest["native_facts"]["frames"].get(issue.frame_id, {})
     order = frame.get("source_indices", [])  # actual native top-to-bottom order
     metadata = {
@@ -228,6 +236,17 @@ def _nullable_dict(container: dict, key: str) -> dict:
     if not isinstance(value, dict):
         raise RepairUnavailable(f"Creation spec {key} must be an object or null.")
     return value
+
+
+def _layout_updates(layout: dict, patch: Any) -> dict:
+    updates = patch.layout.model_dump(exclude_none=True) if patch.layout else {}
+    if "detail_minimum_zoom" in updates:
+        if (layout.get("detail_minimum_zoom") is not None
+                and layout.get("detail_zoom_policy", "hard") == "hard"):
+            updates.pop("detail_minimum_zoom")
+        else:
+            updates["detail_zoom_policy"] = "advisory"
+    return updates
 
 
 def _apply_layer_patch(raw: dict, suggestion: Any, related: list[MapIssue],
@@ -428,14 +447,27 @@ def build_repair_plan(
     selected = [issues[key] for key in identifiers]
     mode = strategy.strategy if strategy_ids else None
     identity_report = {"source_bindings": sources, "layers": manifest.get("layers", [])}
+    local_subjects = [i for i in selected if i.frame_id in frames and i.source_indices
+                      and i.issue_code in {"label_overlap", "symbol_overlap", "label_missing",
+                                           "layer_occlusion"}]
     if any(_repeat(i, receipt, package["image_sha256"],
-                   _source_keys(identity_report, i.source_indices)) for i in selected):
+                   _source_keys(identity_report, i.source_indices)) for i in local_subjects):
         mode = (
             "split_maps"
-            if any(_covering_pair(manifest, i, review) for i in selected)
+            if any(_covering_pair(manifest, i, review) for i in local_subjects)
             else "detail_map"
         )
     if mode in {"detail_map", "split_maps"}:
+        # Geographic escalation must not discard an independently bound page correction.
+        page_ids = []
+        if patch and not any(key not in issues for key in patch.issue_ids if key not in info_ids):
+            updates = _layout_updates(layout, patch)
+            if updates:
+                layout.update(updates)
+                page_ids = patch_ids
+            if patch.dpi is not None:
+                raw["dpi"] = patch.dpi
+                page_ids = patch_ids
         relevant = [issues[i] for i in strategy_ids] if strategy_ids else selected
         subjects = [i for i in relevant if i.frame_id in frames and i.source_indices
                     and i.issue_code in {"label_overlap", "symbol_overlap", "label_missing",
@@ -513,6 +545,7 @@ def build_repair_plan(
             for i, layer in enumerate(raw["layers"])
         ):
             raise RepairUnavailable("Detail/split would omit required layer content.")
+        identifiers = list(dict.fromkeys([*(i.issue_id for i in subjects), *page_ids]))
     elif patch is not None:
         mode = "adjust_presentation"
         used = set()
@@ -523,13 +556,7 @@ def build_repair_plan(
         # Layout/DPI are coupled across frames. A bad supporting issue blocks this unit only.
         if not any(key not in issues for key in patch.issue_ids if key not in info_ids):
             if patch.layout:
-                updates = patch.layout.model_dump(exclude_none=True)
-                if "detail_minimum_zoom" in updates:
-                    if (layout.get("detail_minimum_zoom") is not None and
-                            layout.get("detail_zoom_policy", "hard") == "hard"):
-                        updates.pop("detail_minimum_zoom")
-                    else:
-                        updates["detail_zoom_policy"] = "advisory"
+                updates = _layout_updates(layout, patch)
                 if updates:
                     layout.update(updates)
                     used.update(patch_ids)
