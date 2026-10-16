@@ -59,7 +59,14 @@ async def test_native_legend_table_and_zoom_fit_then_reuse_plan(tmp_path, minimu
     assert plan["parameters"]["height_mm"] > 195
     assert plan["parameters"]["detail_extent"] == layout["detail_extent"]
     assert plan["parameters"]["label_table"]["columns"] == 1
-    assert plan["parameters"]["label_table"]["height_mm"] > 15
+    # Auto rosters may move intact to their own pages instead of consuming
+    # more map area. Check delivered rows, rather than one fitting mechanism.
+    table_plan = plan["parameters"]["label_table"]
+    assert table_plan["placement"] == "pages" or table_plan["height_mm"] > 15
+    tables = preflight["layout"]["label_tables"]
+    assert sum(table["rows"] for table in tables) == 24
+    assert sum(table["visible_rows"] for table in tables) == 24
+    assert preflight["layout"]["roster_selection"]["membership_check"]["valid"]
     frame = plan["frames"]["detail_map"]
     assert frame["extent"][0] <= 2000 and frame["extent"][2] >= 8000
     assert frame["extent"][1] <= 2000 and frame["extent"][3] >= 8000
