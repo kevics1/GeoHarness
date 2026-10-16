@@ -89,7 +89,8 @@ class QgisVectorStyle(BaseModel):
             raise ValueError("category values must be unique")
         # A reversed legend order is a harmless permutation, not an invalid interval.
         # Keep each interval's label and color together; actual overlap still fails.
-        self.ranges = sorted(self.ranges, key=lambda item: (item.lower, item.upper))
+        object.__setattr__(self, "ranges", sorted(self.ranges,
+                           key=lambda item: (item.lower, item.upper)))
         for previous, current in zip(self.ranges, self.ranges[1:]):
             if current.lower < previous.upper or current.upper <= previous.upper:
                 raise ValueError("graduated ranges must be ordered and non-overlapping")
@@ -215,23 +216,45 @@ class QgisExtent(BaseModel):
         return self
 
 
+LayerReference = Annotated[int, Field(strict=True, ge=0)] | Annotated[str, Field(min_length=1)]
+
+
+class QgisFrameRequirement(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    layer_index: LayerReference
+    minimum_visible_features: int = Field(default=1, ge=0)
+    coverage: Literal["intersects", "complete"] = "intersects"
+    key_field: str = ""
+    feature_keys: list[str | int | float] | None = None
+
+    @model_validator(mode="after")
+    def validate_keys(self):
+        if self.feature_keys is not None and (not self.key_field or not self.feature_keys):
+            raise ValueError("feature_keys requires key_field and a nonempty explicit selection")
+        return self
+
+
 class QgisMapFrameSpec(BaseModel):
     """Choose an extent's subject separately from the layers drawn in that frame."""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    purpose: str = Field(default="", max_length=500)
+    requirements: list[QgisFrameRequirement] = Field(default_factory=list, max_length=64,
+        description="Per-frame required subjects; complete preserves every selected geometry. "
+                    "layer_index also accepts a unique stable layer_key in a project call.")
 
-    label_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
+    label_layers: list[LayerReference] | None = Field(
         default=None, max_length=64, description=(
             "Layers allowed to label in this frame. [] hides labels here while keeping symbols; "
             "use a detail frame and label_table to retain dense names. None preserves labels."
         ))
 
-    focus_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
+    focus_layers: list[LayerReference] | None = Field(
         default=None, min_length=1, max_length=64,
         description="FIT mode: 0-based subject layer indices; excludes backgrounds. Omit when "
                     "using EXPLICIT mode (map_extent for main, detail_extent for detail).",
     )
-    render_layers: list[Annotated[int, Field(strict=True, ge=0)]] | None = Field(
+    render_layers: list[LayerReference] | None = Field(
         default=None, min_length=1, max_length=64,
         description="0-based selected layers; original bottom-to-top drawing order is preserved.",
     )
@@ -247,7 +270,8 @@ class QgisMapFrameSpec(BaseModel):
             if indices is not None:
                 if len(indices) != len(set(indices)):
                     raise ValueError(f"{name} must not contain duplicate layer indices")
-                setattr(self, name, sorted(indices))
+                setattr(self, name, sorted(indices,
+                    key=lambda value: (isinstance(value, str), value)))
         if self.focus_layers and self.render_layers is not None and not (
             set(self.focus_layers) <= set(self.render_layers)
         ):
@@ -279,7 +303,7 @@ class QgisLayoutPlan(BaseModel):
 class QgisLabelTable(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    layer_index: int = Field(ge=0, description="Numbered source vector layer; never guessed.")
+    layer_index: LayerReference = Field(description="Exact layer_key or 0-based source index.")
     fields: list[str] = Field(min_length=2, max_length=8, description=(
         "Existing fields in display order. First field is a unique non-null stable roster key."
     ))
@@ -339,11 +363,18 @@ class QgisProjectLayout(BaseModel):
     )
     main_frame: QgisMapFrameSpec | None = None
     detail_frame: QgisMapFrameSpec | None = None
+    detail_placement: Literal["sidebar", "page"] = Field(default="sidebar",
+        description="page places the detail on a separate editable layout page and PNG preview.")
     label_table: QgisLabelTable | None = None
     detail_minimum_zoom: float | None = Field(default=None, ge=1, le=20, description=(
         "Require main scale/detail scale >= this value, measured after native layout fitting. "
         "Use >1 for a real magnified detail; unset allows a locator/legacy inset."
     ))
+    detail_zoom_policy: Literal["hard", "advisory"] = Field(default="hard", description=(
+        "hard enforces an explicit magnification constraint; advisory reports measured zoom "
+        "without enlarging paper or cropping subjects solely to satisfy a visual suggestion."))
+    auto_expand_max_ratio: float | None = Field(default=None, ge=1, le=10,
+        description="Optional maximum width/height expansion relative to requested paper.")
     layout_plan: QgisLayoutPlan | None = Field(default=None, description=(
         "Unchanged preflight.layout_plan to consume; changed sources/styles/fonts are rejected."
     ))
@@ -396,10 +427,63 @@ class QgisSpecPatch(BaseModel):
     value: Any = None
 
 
+class QgisStyleEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["style"]
+    layer_key: str
+    style: QgisVectorStyle
+
+
+class QgisLabelEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["labels"]
+    layer_key: str
+    label_field: str
+    label_style: QgisLabelStyle | None = None
+
+
+class QgisFrameEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["frame"]
+    frame: Literal["main", "detail"]
+    settings: QgisMapFrameSpec
+    extent: QgisExtent | None = None
+    minimum_zoom: float | None = Field(default=None, ge=1, le=20)
+    zoom_policy: Literal["hard", "advisory"] = "advisory"
+
+    @model_validator(mode="after")
+    def validate_mode(self):
+        if self.extent is not None and self.settings.focus_layers:
+            raise ValueError("Choose extent or settings.focus_layers for this frame, never both")
+        if self.frame == "main" and self.minimum_zoom is not None:
+            raise ValueError("minimum_zoom applies to detail only")
+        return self
+
+
+class QgisLayerEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["layer"]
+    layer: QgisProjectLayer
+
+
+class QgisRosterEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["roster"]
+    table: QgisLabelTable | None = None
+
+
+MapEdit = Annotated[QgisStyleEdit | QgisLabelEdit | QgisFrameEdit | QgisLayerEdit | QgisRosterEdit,
+                    Field(discriminator="operation")]
+
+
 class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["create", "inspect", "export", "preflight", "spec"]
+    action: Literal["create", "inspect", "export", "preflight", "spec", "help"]
+    section: Literal["workflow", "style", "labels", "frame", "layout", "edits"] = "workflow"
+    edits: list[MapEdit] = Field(default_factory=list, max_length=32,
+        description="Typed incremental spec operations. Use with action=spec + spec_ref; "
+                    "target returned layer_key, never reconstruct paths or rewrite all layers.")
     spec_ref: str = Field(default="", description=(
         "Returned immutable qgis-spec reference. action=spec saves/edits a draft; "
         "action=preflight checks it. Use only action+spec_ref+optional patches."
@@ -443,6 +527,15 @@ class GeoQgisProjectInput(BaseModel):
                     "unrelated statistics or Python-rewritten copies.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def compile_layer_references(cls, value):
+        from geoharness.qgis.specification import compile_references
+
+        if isinstance(value, dict) and isinstance(value.get("layers"), str):
+            value = {**value, "layers": cls.normalize_complete_layers(value["layers"])}
+        return compile_references(value)
+
     @field_validator("layers", mode="before")
     @classmethod
     def normalize_complete_layers(cls, value):
@@ -469,15 +562,21 @@ class GeoQgisProjectInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
-        if self.spec_ref:
-            if self.action not in {"spec", "preflight"} or self.model_fields_set - {
-                "action", "spec_ref", "patches"
-            }:
-                raise ValueError("spec_ref accepts only action=spec/preflight, "
-                                 "spec_ref and patches")
+        if self.action == "help":
+            if self.model_fields_set - {"action", "section"}:
+                raise ValueError("help accepts only action and section")
             return self
-        if self.patches:
-            raise ValueError("patches require a returned spec_ref")
+        if self.spec_ref:
+            if self.action not in {"spec", "preflight", "inspect"} or self.model_fields_set - {
+                "action", "spec_ref", "patches", "edits"
+            }:
+                raise ValueError("spec_ref accepts only action=spec/preflight/inspect, "
+                                 "spec_ref and optional patches/edits")
+            if self.action == "inspect" and (self.patches or self.edits):
+                raise ValueError("inspect is read-only; use action=spec to edit")
+            return self
+        if self.patches or self.edits:
+            raise ValueError("patches/edits require a returned spec_ref")
         if self.plan_ref:
             if self.action != "create" or self.model_fields_set - {"action", "plan_ref"}:
                 extra = sorted(self.model_fields_set - {"action", "plan_ref"})
@@ -529,6 +628,12 @@ class GeoQgisProjectInput(BaseModel):
                                 if frame else ()):
                     if indices is not None and any(index >= len(self.layers) for index in indices):
                         raise ValueError(f"{name} contains an out-of-range layer index")
+                if frame:
+                    rendered_here = (set(frame.render_layers) if frame.render_layers is not None
+                                     else set(range(len(self.layers))))
+                    for requirement in frame.requirements:
+                        if requirement.layer_index not in rendered_here:
+                            raise ValueError(f"{name} requirement references an unrendered layer")
                 rendered.update(frame.render_layers if frame and frame.render_layers is not None
                                 else range(len(self.layers)))
             if any(layer.required and index not in rendered
@@ -542,38 +647,19 @@ class GeoQgisProjectInput(BaseModel):
 class GeoQgisProjectTool(BaseTool):
     name = "geo_qgis_project"
     description = (
-        "Preflight map data/fields/CRS/extents without rendering, create an editable QGIS "
-        "project, inspect one, or export a user-edited saved layout. "
-        "For iterative design, save layers/layout once with action=spec; edit its returned "
-        "spec_ref using short patches with key/index array paths. Preflight spec_ref then "
-        "create using only action+returned plan_ref. Do not repeat the full layer stack. "
-        "QGIS runs offscreen in a separate process. Create accepts local vector/raster layers, "
-        "explicit category colors/fields, labels, CRS and extent; layer order is bottom first. "
-        "Create/export packages snapshots as GPKG/TIFF and writes a new project plus a PNG "
-        "preview exported from the same editable layout; optional PDF comes from that layout. "
-        "Export preserves saved styles/layouts and never overwrites the source project. "
-        "Use layer.derivation for verified subsets/fields/annotations of native output files. "
-        "Native analysis manifests are shared with geo_cartography and may be inferred; "
-        "previous map facts are never inherited. Datetime categories normalize automatically. "
-        "Preflight every new/changed layout before create, then use only returned create_call "
-        "(action+plan_ref). Native fitting measures fonts/legend/table/zoom without exporting "
-        "and may grow paper dimensions while preserving geographic coverage and symbols. "
-        "Use main_frame/detail_frame focus_layers, render_layers and label_layers to separate "
-        "overview and detail duties without removing required features. label_table retains "
-        "number/name attributes in an editable table separate from footer notes. "
-        "detail_minimum_zoom checks actual paper magnification after native fitting. "
-        "Use effective_parameters, adaptations and content_metrics for layout diagnosis. "
-        "Changed page/sidebar/table/detail geometry invalidates old zoom suggestions. "
-        "Do not round calculated coordinates or remove subjects to satisfy zoom. "
-        "legend_font_size_pt controls the legend; body_font_size_pt controls footer text. "
-        "duplicate_error_blocked requires changing the diagnosed arguments or input data. "
-        "Network/database layers are unsupported. Outputs are drafts until geo_map_review "
-        "checks actual pixels. Keep the same map_id and use geo_deliver for final delivery."
-        " Preflight with layout returns plan_ref and an exact readable report_path; "
-        "create with only action+plan_ref avoids repeating checked layer arrays/layout_plan. "
-        "file_path accepts registered data: references; stale/unknown references are rejected."
-        " Prefer placement=auto; point placements require point geometry. Colors use "
-        "#RRGGBB or Qt names; CSS rgba is normalized, not passed literally to QColor."
+        "Authoritative QGIS map contract: local data/data: refs -> editable project and "
+        "PNG/PDF exported from that same layout. Build with spec, inspect the returned "
+        "spec_ref, then use typed edits by layer_key (layer/style/labels/frame/roster). "
+        "Use help(section=style/labels/frame/layout/edits) for actual runtime schemas, "
+        "not Processing help or geo_cartography bridge fields. Preflight every changed "
+        "spec_ref; create accepts ONLY action+returned plan_ref. Advanced full inputs and "
+        "path patches remain supported. Layers draw bottom to top; native styles use "
+        "style.renderer/field/categories. Each frame declares purpose and required subject "
+        "coverage; explicit extent and focus_layers are mutually exclusive. Review zoom "
+        "preferences use advisory; preserve all declared subjects. Inspect/export with "
+        "project_path preserves user edits and writes a new portable snapshot. Use native "
+        "analysis outputs/derivation for verified provenance. Outputs remain drafts until "
+        "their actual pixels are reviewed; use geo_deliver for workspace delivery."
     )
     input_model = GeoQgisProjectInput
 
@@ -584,26 +670,53 @@ class GeoQgisProjectTool(BaseTool):
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        if arguments.action == "help":
+            from geoharness.qgis.specification import contract_help
+
+            return ToolResult(output=json.dumps(contract_help(arguments.section),
+                ensure_ascii=False), metadata={"render_executed": False})
         spec_reference = ""
         if arguments.action == "spec" or arguments.spec_ref:
-            from geoharness.qgis.specification import load_spec, patch_spec, save_spec
+            from geoharness.qgis.specification import (
+                apply_edits,
+                canonical_spec,
+                load_spec,
+                patch_spec,
+                save_spec,
+            )
 
             try:
                 parameters = (load_spec(arguments.spec_ref, cwd=context.cwd, settings=config.qgis)
                     if arguments.spec_ref else arguments.model_dump(exclude={
-                        "action", "plan_ref", "spec_ref", "patches"}, exclude_unset=True))
+                        "action", "plan_ref", "spec_ref", "patches", "edits", "section"},
+                        exclude_unset=True))
+                if arguments.action == "inspect":
+                    from geoharness.qgis.specification import describe_layers
+
+                    return ToolResult(output=json.dumps({"status": "draft_inspected",
+                        "spec_ref": arguments.spec_ref, "parameters": parameters,
+                        "layers": describe_layers(parameters, context=context, config=config)},
+                        ensure_ascii=False), metadata={"render_executed": False})
                 parameters = patch_spec(parameters,
                     [patch.model_dump() for patch in arguments.patches])
+                parameters = apply_edits(parameters,
+                    [edit.model_dump(exclude_unset=True) for edit in arguments.edits])
                 checked = GeoQgisProjectInput.model_validate({**parameters,
                     "action": 'spec' if arguments.action == 'spec' else 'preflight'})
                 parameters = checked.model_dump(
-                    exclude={"action", "plan_ref", "spec_ref", "patches"}, exclude_unset=True)
+                    exclude={"action", "plan_ref", "spec_ref", "patches", "edits", "section"},
+                    exclude_unset=True)
                 parameters.setdefault('layers', [])
                 reference, path = save_spec(parameters, cwd=context.cwd, settings=config.qgis)
                 spec_reference = reference
                 if arguments.action == "spec":
                     return ToolResult(output=json.dumps({"status": "draft_saved",
                         "spec_ref": reference, "spec_path": path,
+                        "inspect_call": {"action": "inspect", "spec_ref": reference},
+                        "layers": [{"layer_index": index, "layer_key": layer.get("layer_key"),
+                                    "name": layer.get("name", "")}
+                                   for index, layer in enumerate(
+                                       canonical_spec(parameters).get("layers", []))],
                         "preflight_call": {"action": "preflight", "spec_ref": reference},
                         "note": "Draft schema checked; data/native layout have not been checked."},
                         ensure_ascii=False), metadata={"spec_ref": reference,
@@ -639,7 +752,8 @@ class GeoQgisProjectTool(BaseTool):
                     source_path = Path(context.cwd) / source_path
                 assert_usable_artifact(source_path)
                 record = references.get(layer.file_path, {})
-                if record.get("producer") == "geo_analysis" and record.get("analysis_manifest"):
+                if record.get("producer") in {"geo_analysis", "geo_accessibility"} \
+                        and record.get("analysis_manifest"):
                     bound_manifests.append(record["analysis_manifest"])
                 layers.append(layer.model_copy(update={"file_path": path}))
             arguments = arguments.model_copy(update={"layers": layers,
@@ -885,7 +999,7 @@ class GeoQgisProjectTool(BaseTool):
 
     def is_read_only(self, arguments: BaseModel) -> bool:
         return isinstance(arguments, GeoQgisProjectInput) and arguments.action in {
-            "inspect", "preflight",
+            "inspect", "preflight", "help",
         }
 
     def _freeze_and_preflight(self, arguments, context, directory, source_bindings=None):
@@ -1095,7 +1209,9 @@ def _apply_native_frame_evidence(preflight: dict, details: dict) -> None:
     preflight["preliminary_extent"] = preflight["map_extent"]
     preflight.update(map_extent=extent, named_bounds=named_bounds(extent),
                      imshow_extent=to_imshow_extent(extent),
-                     visibility_scope="union_of_rendered_map_frames")
+                     visibility_scope=("declared_frame_subjects_and_legacy_union"
+                         if details["frame_checks"].get("subjects", {}).get("checked")
+                         else "union_of_rendered_map_frames"))
     for layer, checked in zip(preflight.get("layers", []), details["frame_checks"]["layers"]):
         counts = checked["frames"]
         layer.update(visible_feature_count=checked["visible_feature_count"],

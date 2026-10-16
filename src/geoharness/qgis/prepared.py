@@ -56,7 +56,7 @@ def diagnostic_files(*, cwd, settings) -> tuple[Path, ...]:
     if not directory.is_dir():
         return ()
     candidates = []
-    for path in directory.glob("*.json"):
+    for path in (*directory.glob("*.json"), * (directory / "specifications").glob("*.json")):
         try:
             candidates.append((path.stat().st_mtime_ns, path))
         except OSError:
@@ -66,7 +66,12 @@ def diagnostic_files(*, cwd, settings) -> tuple[Path, ...]:
     for path in paths[:64]:
         if re.fullmatch(r"[0-9a-f]{64}", path.stem):
             try:
-                load_preflight("qgis-plan:" + path.stem, cwd=cwd, settings=settings)
+                if path.parent.name == "specifications":
+                    from geoharness.qgis.specification import load_spec
+
+                    load_spec("qgis-spec:" + path.stem, cwd=cwd, settings=settings)
+                else:
+                    load_preflight("qgis-plan:" + path.stem, cwd=cwd, settings=settings)
                 files.append(path)
             except (OSError, ValueError, TypeError):
                 continue
@@ -83,6 +88,8 @@ def summary(report: dict, reference: str, path: Path) -> dict:
         "label_field", "issues", "warnings",
     ) if key in layer}} for index, layer in enumerate(report.get("layers", [])[:16])]
     result["layers_omitted"] = max(0, len(report.get("layers", [])) - 16)
+    if report.get("frame_checks"):
+        result["frame_checks"] = _bounded(report["frame_checks"])
     layout = report.get("layout") or {}
     effective = layout.get("effective_parameters") or {}
     result["layout"] = {"effective_parameters": {key: effective[key] for key in (
@@ -191,8 +198,11 @@ def execution_summary(result: dict) -> dict:
         "name", "effective_parameters", "bounds_check", "adaptations",
     ) if key in layout}
     compact["layout"]["map_frames"] = [{key: frame[key] for key in (
-        "id", "crs", "scale", "extent",
+        "id", "crs", "scale", "extent", "page_index",
     ) if key in frame} for frame in layout.get("map_frames", [])[:8]]
+    native = details.get("native_facts") or {}
+    if native.get("page_previews"):
+        compact["page_previews"] = native["page_previews"]
     compact["note"] = "Full source, layout and label evidence is in project_manifest; " \
                       "geo_python can read that exact workspace file."
     return {**{key: result[key] for key in ("status", "error_summary", "run_dir") if key in result},

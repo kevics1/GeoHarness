@@ -36,7 +36,7 @@ def _layout_input_digest(payload: dict[str, Any]) -> str:
     bound = {key: value for key, value in payload.items() if key not in {
         "action", "map_id", "output_path", "output_format", "project_format",
         "strict_layout", "_frozen_frames", "_consume_plan",
-        "_creation_spec",
+        "_creation_spec", "_layout_origin", "_layout_zoom_history",
     }}
     bound["layout"] = {key: value for key, value in (payload.get("layout") or {}).items()
                        if key != "layout_plan"}
@@ -240,7 +240,7 @@ def _rect_values(rect: Any) -> list[float]:
 
 
 def _plan_frames(layout: Any, project: Any, layers: list[Any], payload: dict) -> dict[str, dict]:
-    from qgis.core import QgsLayoutItemMap
+    from qgis.core import QgsLayoutItemMap, QgsRectangle
 
     spec = payload.get("layout") or {}
     result = {}
@@ -269,6 +269,26 @@ def _plan_frames(layout: Any, project: Any, layers: list[Any], payload: dict) ->
             "page_index": item.page()}
         frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
         result[name]["label_layers"] = frame.get("label_layers")
+    if any((spec.get(name) or {}).get("requirements") for name in ("main_frame", "detail_frame")):
+        subjects = _declared_frame_evidence(project, layers, payload, result)
+        for name, facts in result.items():
+            declared = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
+            selected = [check for check in subjects["checks"] if check["frame_id"] == name]
+            facts["subject_contracts"] = selected
+            bounds = [check["selected_bounds"] for check in selected if check["selected_bounds"]]
+            if bounds and not declared.get("focus_layers"):
+                bbox = QgsRectangle(*bounds[0])
+                for value in bounds[1:]:
+                    bbox.combineExtentWith(QgsRectangle(*value))
+                extent = QgsRectangle(*facts["extent"])
+                center = bbox.center()
+                facts.update(focus_bbox=_rect_values(bbox),
+                    focus_scope="declared_frame_requirements",
+                    normalized_center=[(center.x() - extent.xMinimum()) / extent.width(),
+                                       (center.y() - extent.yMinimum()) / extent.height()],
+                    coverage=(bbox.intersect(extent).area() / bbox.area()
+                              if bbox.area() > 0 else float(extent.contains(bbox))),
+                    bbox_fraction=[bbox.width() / extent.width(), bbox.height() / extent.height()])
     return result
 
 
@@ -367,7 +387,100 @@ def _frame_evidence(
         error = ValueError("Required layer visibility failed across the rendered frame union")
         error.diagnostics = {"frame_checks": frame_checks}
         raise error
+    frame_checks["subjects"] = _declared_frame_evidence(project, layers, payload, frames)
+    if frame_checks["subjects"]["checked"]:
+        frame_checks["scope"] = "union_and_declared_frame_subjects"
+        frame_checks["by_frame"] = {name: {
+            "valid": all(check["valid"] for check in frame_checks["subjects"]["checks"]
+                         if check["frame_id"] == name),
+            "requirements": [check for check in frame_checks["subjects"]["checks"]
+                             if check["frame_id"] == name]}
+            for name in frames}
+    frame_checks["valid"] = frame_checks["valid"] and frame_checks["subjects"]["valid"]
+    if not frame_checks["valid"]:
+        error = ValueError("Declared map-frame subjects are missing or incompletely covered")
+        error.diagnostics = {"code": "frame_subject_contract_failed", "frame_checks": frame_checks}
+        raise error
     return {**composition.get("main_map", {}), "map_frames": composition}, frame_checks
+
+
+def _declared_frame_evidence(project: Any, layers: list[Any], payload: dict, frames: dict) -> dict:
+    """Measure each declared frame's own subjects, independent of the union fallback."""
+    from qgis.core import NULL, QgsCoordinateTransform, QgsGeometry, QgsRectangle, QgsVectorLayer
+
+    from geoharness.qgis.frame_contracts import evaluate_requirements
+
+    measurements = []
+    layout_spec = payload.get("layout") or {}
+    for frame_id, field in (("main_map", "main_frame"), ("detail_map", "detail_frame")):
+        declared = layout_spec.get(field) or {}
+        frame = frames.get(frame_id)
+        for requirement in declared.get("requirements", []):
+            index = requirement["layer_index"]
+            base = {**requirement, "frame_id": frame_id, "purpose": declared.get("purpose", ""),
+                "frame_present": frame is not None, "rendered": False, "selected_features": 0,
+                "visible_features": 0, "complete_features": 0, "missing_keys": [],
+                "duplicate_keys": [], "selected_bounds": None}
+            if not frame or index < 0 or index >= len(layers):
+                measurements.append(base)
+                continue
+            base["rendered"] = index in frame["render_layers"]
+            layer = layers[index]
+            base["layer_key"] = layer.customProperty("geoharness/layer_key", "")
+            base["layer_name"] = layer.name()
+            if not base["rendered"]:
+                measurements.append(base)
+                continue
+            extent = QgsRectangle(*frame["extent"])
+            transform = QgsCoordinateTransform(layer.crs(), project.crs(), project)
+            if not isinstance(layer, QgsVectorLayer):
+                if requirement.get("feature_keys") is not None:
+                    error = ValueError("Frame feature_keys apply only to vector sources")
+                    error.diagnostics = {"code": "frame_selector_kind", "frame_id": frame_id,
+                                         "layer_index": index, "kind": "raster"}
+                    raise error
+                bounds = transform.transformBoundingBox(layer.extent())
+                base.update(selected_features=1, visible_features=int(extent.intersects(bounds)),
+                            complete_features=int(extent.contains(bounds)),
+                            selected_bounds=_rect_values(bounds))
+                measurements.append(base)
+                continue
+            key_field = requirement.get("key_field", "")
+            keys = requirement.get("feature_keys")
+            if keys is not None and (not key_field or key_field not in layer.fields().names()):
+                error = ValueError(f"Frame subject key field is missing: {frame_id}.{key_field}")
+                error.diagnostics = {"code": "frame_selector_field", "frame_id": frame_id,
+                    "layer_index": index, "key_field": key_field,
+                    "available_fields": layer.fields().names()}
+                raise error
+            def token(value):
+                return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+            wanted = {token(value): value for value in keys} if keys is not None else None
+            found = {}
+            for feature in layer.getFeatures():
+                key = feature[key_field] if wanted is not None else None
+                if wanted is not None:
+                    if key == NULL or token(key) not in wanted:
+                        continue
+                    identity = token(key)
+                    found[identity] = found.get(identity, 0) + 1
+                geometry = QgsGeometry(feature.geometry())
+                if geometry.isEmpty():
+                    continue
+                geometry.transform(transform)
+                bounds = geometry.boundingBox()
+                combined = QgsRectangle(*base["selected_bounds"]) if base["selected_bounds"] else (
+                    QgsRectangle(bounds))
+                combined.combineExtentWith(bounds)
+                base["selected_bounds"] = _rect_values(combined)
+                base["selected_features"] += 1
+                base["visible_features"] += int(geometry.intersects(extent))
+                base["complete_features"] += int(extent.contains(geometry.boundingBox()))
+            if wanted is not None:
+                base["missing_keys"] = [value for key, value in wanted.items() if key not in found]
+                base["duplicate_keys"] = [wanted[key] for key, count in found.items() if count > 1]
+            measurements.append(base)
+    return evaluate_requirements(measurements)
 
 
 def _freeze_layout_plan(layout: Any, project: Any, layers: list[Any], payload: dict,
@@ -1007,7 +1120,8 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
     if table and table.get("placement") != "pages":
         map_height -= table.get("height_mm", 50) + gap
     has_detail = spec.get("detail_extent") is not None or spec.get("detail_frame") is not None
-    sidebar = spec.get("legend", True) or has_detail
+    separate_detail = has_detail and spec.get("detail_placement", "sidebar") == "page"
+    sidebar = spec.get("legend", True) or (has_detail and not separate_detail)
     sidebar_width = spec.get("sidebar_width_mm", 60) if sidebar else 0
     map_width = inner_width - sidebar_width - (gap if sidebar else 0)
     if map_width < 40 or map_height < 40:
@@ -1026,7 +1140,9 @@ def _layout_regions(spec: dict[str, Any], title: str) -> dict[str, list[float]]:
                 footer_y - gap - table.get("height_mm", 50), column_width,
                 table.get("height_mm", 50)]
     sidebar_x = width - margin - sidebar_width
-    if has_detail:
+    if separate_detail:
+        regions["detail_map"] = [margin, margin, inner_width, height - 2 * margin]
+    elif has_detail:
         detail_height = (map_height * spec.get("detail_height_ratio", 0.4)
                          if spec.get("legend", True) else map_height)
         regions["detail_map"] = [sidebar_x, top, sidebar_width, detail_height]
@@ -1060,6 +1176,7 @@ def _create_layout(
         QgsLayoutItemLabel,
         QgsLayoutItemLegend,
         QgsLayoutItemMap,
+        QgsLayoutItemPage,
         QgsLayoutItemScaleBar,
         QgsLayoutSize,
         QgsLegendRenderer,
@@ -1070,6 +1187,17 @@ def _create_layout(
 
     spec = {key: value for key, value in (payload.get("layout") or {}).items()
             if key != "layout_plan"}
+    payload = {**payload, "_layout_origin": payload.get("_layout_origin") or spec}
+    from geoharness.qgis.frame_contracts import paper_limits
+
+    limits = paper_limits(payload["_layout_origin"], spec)
+    if not limits["within_limits"]:
+        error = ValueError("Joint layout exceeds its declared automatic paper expansion limits")
+        error.diagnostics = {"code": "paper_expansion_limit", "limits": limits,
+            "proposed_mm": [spec.get("width_mm", 297), spec.get("height_mm", 210)],
+            "remedy": "Keep complete subject coverage; use detail_placement='page' or "
+                      "label_table.placement='pages', or explicitly choose a larger page."}
+        raise error
     state = _json_digest(spec)
     if state in _fit_states or _fit_attempt > 12:
         raise ValueError("Native layout sizing did not converge; retain subject coverage and "
@@ -1084,6 +1212,10 @@ def _create_layout(
     layout.initializeDefaults()
     layout.setName(payload.get("layout_name") or spec.get("name", "Map"))
     layout.pageCollection().page(0).setPageSize(QgsLayoutSize(width, height))
+    if spec.get("detail_placement", "sidebar") == "page" and "detail_map" in regions:
+        page = QgsLayoutItemPage(layout)
+        page.setPageSize(QgsLayoutSize(width, height))
+        layout.pageCollection().addPage(page)
     layout.renderContext().setDpi(payload.get("dpi", 150))
     layout.setCustomProperty("geoharness/template", "structured-v1")
     layout.setCustomProperty("geoharness/regions", json.dumps(regions))
@@ -1096,6 +1228,10 @@ def _create_layout(
         item = QgsLayoutItemMap(layout)
         frozen = (payload.get("_frozen_frames") or {}).get(name)
         _place_item(layout, item, name, frozen["rect_mm"] if frozen else regions[name])
+        if name == "detail_map" and spec.get("detail_placement", "sidebar") == "page":
+            from qgis.core import QgsLayoutPoint
+
+            item.attemptMove(QgsLayoutPoint(*regions[name][:2]), False, False, 1)
         item.setCrs(project.crs())
         render, _ = _frame_selection(name, spec, len(layers))
         item.setLayers([layers[index] for index in reversed(render)])
@@ -1282,6 +1418,13 @@ def _create_layout(
                 "after": resized["label_table"]["height_mm"]}])
     minimum_zoom = spec.get("detail_minimum_zoom")
     detail = layout.itemById("detail_map")
+    if any((spec.get(name) or {}).get("requirements") for name in ("main_frame", "detail_frame")):
+        subject_facts = _declared_frame_evidence(
+            project, layers, payload, _plan_frames(layout, project, layers, payload))
+        if not subject_facts["valid"]:
+            error = ValueError("Declared map-frame subjects are missing or incompletely covered")
+            error.diagnostics = {"code": "frame_subject_contract_failed", "subjects": subject_facts}
+            raise error
     if minimum_zoom is not None and detail is not None:
         zoom = map_item.scale() / detail.scale()
         if not _detail_zoom_satisfied(zoom, minimum_zoom):
@@ -1289,20 +1432,38 @@ def _create_layout(
             measured = detail.extent()
             fractions = (requested.width() / measured.width(),
                          requested.height() / measured.height())
-            resized = _fit_detail_paper(spec, regions, zoom, minimum_zoom, fractions)
-            if (resized is not None and not payload.get("_consume_plan")
+            diagnostics = _detail_zoom_diagnostics(map_item, detail, minimum_zoom,
+                                                   spec=spec, regions=regions,
+                                                   original=payload["_layout_origin"])
+            if spec.get("detail_zoom_policy", "hard") == "advisory":
+                diagnostics.update(severity="warning", policy="advisory",
+                    note="Preferred magnification is unmet. Subject coverage is preserved; "
+                         "paper was not enlarged solely to meet this preference.")
+                layout.setCustomProperty("geoharness/layout_warnings", json.dumps([diagnostics]))
+            else:
+                from geoharness.qgis.frame_contracts import joint_paper_proposal
+
+                resized = joint_paper_proposal(spec, regions, zoom, minimum_zoom, fractions,
+                                               original=payload["_layout_origin"])
+                history = payload.get("_layout_zoom_history", [])
+                progress = not history or zoom > history[-1] * 1.005
+                if (resized is not None and progress and not payload.get("_consume_plan")
                     and spec.get("legend_auto_fit", True) and _fit_attempt < 12):
-                changes = [{"parameter": key, "before": spec.get(key), "after": value,
+                    changes = [{"parameter": key, "before": spec.get(key), "after": value,
                             "reason": "joint measured detail zoom/legend sizing; coverage retained"}
                            for key, value in resized.items() if spec.get(key) != value]
-                return _create_layout(project, layers, extent, {**payload, "layout": resized},
-                    context, _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
-                    _adaptations=[*adaptations, *changes])
-            error = ValueError(f"detail frame is not magnified enough (zoom={zoom:.8f}, "
+                    return _create_layout(project, layers, extent, {**payload, "layout": resized,
+                        "_layout_zoom_history": [*history, zoom]}, context,
+                        _fit_attempt=_fit_attempt + 1, _fit_states=fit_states,
+                        _adaptations=[*adaptations, *changes])
+                diagnostics["coupled_fit_progress"] = {
+                    "previous_zoom": history[-1] if history else None,
+                    "improved": progress}
+                error = ValueError(f"detail frame is not magnified enough (zoom={zoom:.8f}, "
                                f"required={minimum_zoom}); use the measured frame/scale "
                                "diagnostics; preserve all required subjects")
-            error.diagnostics = _detail_zoom_diagnostics(map_item, detail, minimum_zoom)
-            raise error
+                error.diagnostics = diagnostics
+                raise error
     _validate_layout_bounds(layout)
     project.layoutManager().addLayout(layout)
     return layout
@@ -1317,31 +1478,14 @@ def _fit_detail_paper(
     spec: dict, regions: dict, zoom: float, required: float,
     content_fraction: tuple[float, float] = (1.0, 1.0),
 ) -> dict | None:
-    """Grow paper rectangles jointly; never change sources, geographic extents or styles."""
-    factor = required * 1.01 / zoom
-    detail = regions["detail_map"]
-    sidebar = max(detail[2], detail[2] * factor * content_fraction[0])
-    if sidebar > 500:
-        return None
-    resized = {**spec, "sidebar_width_mm": sidebar,
-               "width_mm": spec.get("width_mm", 297) + sidebar - detail[2]}
-    map_height = regions["main_map"][3]
-    detail_height = max(20, detail[3] * factor * content_fraction[1])
-    if spec.get("legend", True):
-        legend_height = regions["legend"][3]
-        # The 0.8 public ratio limit requires enough paper for the complete legend too.
-        needed_height = max(map_height, detail_height / 0.8,
-                            detail_height + spec.get("gap_mm", 5) + legend_height)
-        resized["detail_height_ratio"] = max(0.1, detail_height / needed_height)
-    else:
-        needed_height = max(map_height, detail_height)
-    resized["height_mm"] = spec.get("height_mm", 210) + needed_height - map_height
-    if resized["width_mm"] > 2000 or resized["height_mm"] > 2000:
-        return None
-    return resized
+    """Compatibility entry for the pure bounded joint-paper planner."""
+    from geoharness.qgis.frame_contracts import joint_paper_proposal
+
+    return joint_paper_proposal(spec, regions, zoom, required, content_fraction)
 
 
-def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> dict[str, Any]:
+def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float, *,
+                             spec=None, regions=None, original=None) -> dict[str, Any]:
     """Describe a failed paper-scale constraint without changing either map's coverage."""
     def facts(item: Any) -> dict[str, Any]:
         rect, extent = item.rect(), item.extent()
@@ -1360,6 +1504,13 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> di
     center_x, center_y = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
     half_width = (bounds[2] - bounds[0]) / factor / 2
     half_height = (bounds[3] - bounds[1]) / factor / 2
+    from geoharness.qgis.frame_contracts import joint_paper_proposal, paper_limits
+
+    spec = spec or {}
+    proposal = (joint_paper_proposal(spec, regions, zoom, required_zoom, original=original)
+                if regions else None)
+    dimensions = {key: value for key, value in (proposal or {}).items()
+                  if key in {"width_mm", "height_mm", "sidebar_width_mm", "detail_height_ratio"}}
     return {
         "code": "detail_zoom_insufficient",
         "actual_zoom": zoom,
@@ -1367,6 +1518,7 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> di
         "suggestion_target_zoom": required_zoom * 1.01,
         "target_detail_scale_denominator": main.scale() / required_zoom,
         "frames": {"main_map": main_facts, "detail_map": detail_facts},
+        "public_limits": paper_limits(original or spec, spec),
         "suggestions": [
             {
                 "strategy": "enlarge_detail_frame",
@@ -1374,8 +1526,14 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> di
                     "width": detail.rect().width() * factor,
                     "height": detail.rect().height() * factor,
                 },
+                "feasible_with_public_dimensions": proposal is not None,
+                "patches": [{"path": ["layout", key], "value": value}
+                            for key, value in dimensions.items() if spec.get(key) != value],
+                "requires_native_preflight": True,
                 "assumptions": "Keep the measured main frame and both extents unchanged; "
-                               "grow/rearrange the page to fit this detail frame, then preflight.",
+                               "the raw needed size is a measurement, not a new API field. "
+                               "Only patches within public_limits are executable candidates; "
+                               "coupled scales must be measured again.",
             },
             {
                 "strategy": "smaller_detail_extent_if_subjects_fit",
@@ -1393,8 +1551,11 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float) -> di
             },
             {
                 "strategy": "separate_detail_map",
+                "patches": [{"path": ["layout", "detail_placement"], "value": "page"}],
+                "requires_native_preflight": True,
                 "instruction": "If required subjects do not fit, retain their coverage and "
-                               "create a larger or separate detail map instead of cropping.",
+                               "use the real separate detail page. This does not promise the "
+                               "requested zoom when the subject covers the whole overview.",
             },
         ],
     }
@@ -1562,7 +1723,7 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
         name = item.id() or item.uuid()
         rect = item.mapRectToScene(item.rect())
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
-        if name.startswith("label_table_") and item.page() > 0:
+        if (name.startswith("label_table_") or name == "detail_map") and item.page() > 0:
             roster_page = layout.pageCollection().page(item.page())
             local = [x - roster_page.pos().x(), y - roster_page.pos().y(), w, h]
             roster_pages.setdefault(item.page(), {})[name] = local
@@ -1690,6 +1851,7 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
             maps.append(
                 {
                     "id": item.id(),
+                    "page_index": item.page(),
                     "crs": item.crs().authid(),
                     "crs_valid": item.crs().isValid(),
                     "scale": item.scale(),
@@ -1703,9 +1865,12 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
                 }
             )
             main = layout.itemById("main_map")
-            if item.id() == "detail_map" and main and main.rect().height() > 0:
+            if (item.id() == "detail_map" and main and main.rect().height() > 0
+                    and item.page() == main.page()):
                 effective["detail_height_ratio"] = (
                     item.rect().height() / main.rect().height())
+            elif item.id() == "detail_map" and main and item.page() != main.page():
+                effective["detail_placement"] = "page"
         elif isinstance(item, QgsLayoutItemLegend):
             legends[item.id() or item.uuid()] = _legend_node_facts(item, layout)
             effective["sidebar_width_mm"] = converter.convert(
@@ -1731,6 +1896,7 @@ def _layout_metadata(layout: Any) -> dict[str, Any]:
         "label_tables": label_table_facts(layout),
         "roster_selection": json.loads(layout.customProperty(
             "geoharness/roster_selection", "null")),
+        "warnings": json.loads(layout.customProperty("geoharness/layout_warnings", "[]")),
         "map_extents": {item["id"]: item["extent"] for item in maps},
         "scale_bars": scale_bars,
         "legends": legends,
@@ -1778,11 +1944,12 @@ def _export_label_facts(layout: Any, exporter: Any) -> dict[str, list[dict[str, 
     results = exporter.labelingResults()
     labels = {}
     for item in layout.items():
-        if not isinstance(item, QgsLayoutItemMap) or item.page() != 0:
+        if not isinstance(item, QgsLayoutItemMap):
             continue
         indices = {layer.id(): layer.customProperty("geoharness/source_index", None)
                    for layer in layout.project().mapLayers().values()}
-        positions = results[item.uuid()].allLabels() if item.uuid() in results else []
+        result = results.get(item.uuid())
+        positions = result.allLabels() if result is not None else []
         labels[item.id() or item.uuid()] = [{
             "layer_index": (int(indices[position.layerID])
                             if indices.get(position.layerID) is not None else None),
@@ -1808,7 +1975,7 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
 
     frames = {}
     for item in layout.items():
-        if not isinstance(item, QgsLayoutItemMap) or item.page() != 0:
+        if not isinstance(item, QgsLayoutItemMap):
             continue
         name = item.id() or item.uuid()
         extent = item.extent()
@@ -1878,6 +2045,10 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
                     "minimum_span_mm": minimum, "sample_size": sampled, "sample_limit": 512,
                     "scope": "sampled_visible_polygon_feature_bboxes"})
         frames[name] = {"extent": _rect_values(extent),
+            "page_index": item.page(),
+            "rect_page_mm": [rect.x() - layout.pageCollection().page(item.page()).pos().x(),
+                             rect.y() - layout.pageCollection().page(item.page()).pos().y(),
+                             rect.width(), rect.height()] if millimeters else None,
             "crs": item.crs().authid() or item.crs().toWkt(),
             "rect_mm": ([rect.x(), rect.y(), rect.width(), rect.height()] if millimeters else None),
             "rect_scene": [rect.x(), rect.y(), rect.width(), rect.height()],
@@ -1942,10 +2113,17 @@ def _export_layout(
     if not preview.is_file():
         raise ValueError("QGIS did not write the layout preview")
     labels = _export_label_facts(layout, exporter)
-    native_facts = _export_geometry_facts(layout, labels, image_settings.dpi)
-    native_facts["roster_previews"] = []
+    from geoharness.qgis.layout_table import label_table_facts
+
+    tables = label_table_facts(layout)
+    roster_previews, page_previews = [], [{"page_index": 0, "path": str(preview),
+        "frames": [name for name in ("main_map", "detail_map")
+                   if layout.itemById(name) is not None and layout.itemById(name).page() == 0]}]
     for index in range(1, layout.pageCollection().pageCount()):
-        path = Path(context.output_path(None, f"roster_page_{index + 1}.png"))
+        frame_ids = [name for name in ("main_map", "detail_map")
+                     if layout.itemById(name) is not None and layout.itemById(name).page() == index]
+        prefix = "detail_page" if frame_ids else "roster_page"
+        path = Path(context.output_path(None, f"{prefix}_{index + 1}.png"))
         image_settings.pages = [index]
         status = exporter.exportToImage(str(path), image_settings)
         if status != QgsLayoutExporter.Success:
@@ -1955,7 +2133,13 @@ def _export_layout(
             numbered.rename(path)
         if not path.is_file():
             raise ValueError("QGIS did not write the roster-page preview")
-        native_facts["roster_previews"].append(str(path))
+        labels.update({key: value for key, value in _export_label_facts(layout, exporter).items()
+                       if value})
+        page_previews.append({"page_index": index, "path": str(path), "frames": frame_ids})
+        if any(table["page"] == index for table in tables):
+            roster_previews.append(str(path))
+    native_facts = _export_geometry_facts(layout, labels, image_settings.dpi)
+    native_facts.update(roster_previews=roster_previews, page_previews=page_previews)
     if payload.get("strict_layout", False):
         _validate_layout_bounds(layout)
     output_format = payload.get("output_format", "png")
@@ -2084,7 +2268,9 @@ def _save_package(
                 if planned is not None:
                     frame.update({key: planned[key] for key in (
                         "focus_bbox", "normalized_center", "bbox_fraction", "coverage")})
-                    frame["focus_scope"] = "validated_current_layout_plan"
+                    frame["focus_scope"] = planned.get("focus_scope",
+                                                       "validated_current_layout_plan")
+                    frame["subject_contracts"] = planned.get("subject_contracts", [])
     finally:
         reopened.clear()
     digest = hashlib.sha256(preview.read_bytes()).hexdigest()
@@ -2111,6 +2297,7 @@ def _save_package(
     if roster.is_file():
         files.append(roster)
     files.extend(Path(path) for path in native_facts.get('roster_previews', []))
+    files.extend(Path(item["path"]) for item in native_facts.get("page_previews", []))
     for directory in (
         context.run_dir / "data",
         context.run_dir / "styles",
@@ -2134,7 +2321,9 @@ def _save_package(
         "layout_plan": layout_plan,
         "composition": composition,
         "frame_checks": frame_checks,
-        "native_facts": native_facts,
+        "native_facts": {**native_facts, "page_previews": [
+            {**item, "path": Path(item["path"]).relative_to(context.run_dir).as_posix()}
+            for item in native_facts.get("page_previews", [])]},
         "creation_spec": creation_spec,
         "automatic_repair_eligible": creation_spec is not None,
         "files": sorted({path.relative_to(context.run_dir).as_posix() for path in files}),

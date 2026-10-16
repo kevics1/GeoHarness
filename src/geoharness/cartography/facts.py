@@ -37,6 +37,7 @@ _METHODS = {
     "count": "分区相交计数",
     "impact": "距离阈值影响分析",
     "area": "面积统计",
+    "accessibility": "路网可达性",
 }
 
 
@@ -118,6 +119,11 @@ _GEOMETRY_SEMANTICS = {
     "impact": "Shortest planar distance between any parts of the geometries.",
     "area": _AREA_SEMANTICS,
 }
+
+
+def _is_accessibility(manifest: dict) -> bool:
+    return manifest.get("producer") == "geo_accessibility" and \
+        manifest.get("action") == "accessibility"
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict:
@@ -267,7 +273,13 @@ def _read_outputs(
     manifest: dict, reader: _EvidenceReader, export_crs: CRS
 ) -> tuple[dict, dict, str]:
     paths = manifest["paths"]
-    _output_labels(manifest["action"], paths)
+    if _is_accessibility(manifest):
+        if "result" not in paths or not all(isinstance(label, str) for label in paths):
+            raise ValueError("Accessibility evidence requires named native outputs")
+        if manifest.get("status") != "succeeded":
+            raise ValueError("Accessibility evidence must be a succeeded native run")
+    else:
+        _output_labels(manifest["action"], paths)
     if any(not isinstance(item, dict) for item in paths.values()):
         raise ValueError("Native manifest output entries must be objects.")
     has_hashes = any("geojson_sha256" in item or "csv_sha256" in item for item in paths.values())
@@ -294,7 +306,7 @@ def _read_outputs(
                 features = _features(document)
                 declared = _declared_crs(document)
                 actual_crs = _crs(declared or "EPSG:4326")[0]
-                if actual_crs != export_crs:
+                if not actual_crs.equals(export_crs, ignore_axis_order=True):
                     raise ValueError("Analysis output CRS disagrees with export_crs.")
                 if _count(entry.get("feature_count")) != len(features):
                     raise ValueError(
@@ -551,6 +563,54 @@ def _area_note(stats: dict) -> str:
             f"；去重覆盖 {areas['union_area_m2'] / 1e6:.2f} km²")
 
 
+def _accessibility_facts(manifest, path, raw, reader, mapped_sources, display_name):
+    """Verify persisted method outputs without pretending to rerun the route algorithm."""
+    _, metric_name = _crs(manifest.get("metric_crs"), metric=True)
+    export, export_name = _crs(manifest.get("export_crs"))
+    if export != CRS.from_epsg(4326):
+        raise ValueError("Native accessibility export_crs must be EPSG:4326")
+    outputs, fingerprints, verification = _read_outputs(manifest, reader, export)
+    if verification != "sha256_verified":
+        raise ValueError("Accessibility evidence requires complete native output fingerprints")
+    matches = _mapped_outputs(outputs, mapped_sources, reader)
+    measured = {}
+    allowed = {"reachable", "snap_too_far", "inside_hazard", "network_unreachable",
+               "connector_blocked", "no_safe_shelter", "no_safe_snap", "hazard_blocked",
+               "no_safe_network", "road_access_blocked", "no_available_shelters"}
+    for name, output in outputs.items():
+        if name not in {"result", "baseline_result", "hazard_result"}:
+            continue  # Shelter connection states are not resident route states.
+        rows = [feature["properties"] for feature in output["features"]]
+        if not rows or "gh_status" not in rows[0]:
+            continue
+        counts = {}
+        ids = set()
+        for row in rows:
+            status = row.get("gh_status")
+            if status not in allowed:
+                raise ValueError("Accessibility output contains an unknown resident status")
+            identifier = row.get("gh_resident_id")
+            if identifier is None or str(identifier) in ids:
+                raise ValueError("Accessibility output requires unique resident IDs")
+            ids.add(str(identifier))
+            counts[status] = counts.get(status, 0) + 1
+        measured[name] = {"feature_count": len(rows), "status_counts": counts}
+    primary = measured.get("result", measured.get("hazard_result", {}))
+    statistics = {"feature_count": primary.get("feature_count", len(outputs["result"]["features"])),
+                  "output_status_counts": measured}
+    return {"manifest_path": str(path), "manifest_digest": hashlib.sha256(raw).hexdigest(),
+        "action": "accessibility", "metric_crs": metric_name, "export_crs": export_name,
+        "display_crs": display_name, "parameters": manifest.get("parameters", {}),
+        "statistics": statistics, "unverified_statistics": manifest.get("statistics", {}),
+        "count_semantics": "One status per resident; snap_too_far describes the declared "
+                           "attachment threshold, not actual structural isolation.",
+        "geometry_semantics": "Native resident/route/shelter geometry; route analysis not rerun.",
+        "mapped_outputs": matches, "output_fingerprints": fingerprints,
+        "verification": verification, "analysis_correctness": "unverified",
+        "verification_scope": "Persisted output hashes, CRS, feature counts and resident "
+                              "status/ID consistency only; original road analysis not rerun."}
+
+
 def _footer(analyses: list[dict]) -> str:
     """At most three logical lines; detailed facts belong to the project report."""
     if not analyses:
@@ -609,7 +669,7 @@ def infer_analysis_manifests(mapped_sources: list[dict], *, cwd: Path,
             manifest_path = reader.path(str(path.parent / "manifest.json"))
             document = _json(reader.read(manifest_path, _MANIFEST_BYTES))
             if not isinstance(document.get("action"), str) or (
-                document["action"] not in _ACTIONS
+                document["action"] not in _ACTIONS and not _is_accessibility(document)
             ) or not isinstance(
                 document.get("paths"), dict,
             ):
@@ -655,6 +715,10 @@ def load_analysis_facts(
         raw = reader.read(path, _MANIFEST_BYTES)
         manifest = _json(raw)
         action = manifest.get("action")
+        if _is_accessibility(manifest):
+            analyses.append(_accessibility_facts(manifest, path, raw, reader,
+                                                mapped_sources, display_name))
+            continue
         if (
             not isinstance(action, str)
             or action not in _ACTIONS

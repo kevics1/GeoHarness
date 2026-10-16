@@ -172,6 +172,10 @@ def relocate_package(metadata: dict, destination: Path, config: Any) -> dict:
     for key in ("project_file", "project_manifest", "preview_path", "primary_map", "output_path"):
         result[key] = str(destination / Path(metadata[key]).relative_to(source))
     result["qgis_project"] = result["project_file"]
+    if metadata.get("native_facts", {}).get("page_previews"):
+        result["native_facts"] = {**metadata["native_facts"], "page_previews": [
+            {**item, "path": str(destination / Path(item["path"]).relative_to(source))}
+            for item in metadata["native_facts"]["page_previews"]]}
     return result
 
 

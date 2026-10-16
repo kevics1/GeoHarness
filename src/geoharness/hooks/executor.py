@@ -82,6 +82,15 @@ class GeoHookExecutor(HookExecutor):
                     ),
                     metadata={"argument_diagnostic": safe},
                 )])
+            if isinstance(arguments, dict):
+                from geoharness.tools.contracts import input_feedback
+
+                feedback = input_feedback(payload.get("tool_name", ""), arguments)
+                if feedback:
+                    return AggregatedHookResult(results=[HookResult(
+                        hook_type="geoharness_contract_guard", success=False, blocked=True,
+                        reason=json.dumps(feedback, ensure_ascii=False),
+                        metadata={"input_feedback": feedback})])
         return await super().execute(event, payload)
 
     async def _run_prompt_like_hook(self, hook, event, payload, *, agent_mode):

@@ -80,6 +80,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
         "full_roster": "roster_full.csv" if context is not None else None}, default=str))
     count = spec.get("columns", 3)
     paginated = spec.get("placement") == "pages"
+    first_roster_page = layout.pageCollection().pageCount()
     chunk = max(1, math.ceil(len(values) / count))
     pending = list(values)
     index = 0
@@ -90,7 +91,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
         page_number = 0
         if paginated:
             column = index % count
-            page_number = index // count + 1
+            page_number = index // count + first_roster_page
             if column == 0:
                 page = QgsLayoutItemPage(layout)
                 page.setPageSize(QgsLayoutSize(page_spec.get("width_mm", 297),

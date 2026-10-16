@@ -112,8 +112,7 @@ def recent_outputs(cwd: Path, config: Any, *, limit: int = 24) -> list[dict[str,
                           "validation_state": entry.get("validation_state", "unverified")}
                 if native:
                     record.update(output_label=label, action=document["action"])
-                    if producer == "geo_analysis":
-                        record["analysis_manifest"] = str(manifest)
+                    record["analysis_manifest"] = str(manifest)
                     record["crs"] = entry.get("crs", document.get("export_crs"))
                 for key in ("feature_count", "schema", "crs", "geometry_type", "format",
                             "entity_key", "lineage", "input_refs", "validation_state"):
@@ -216,7 +215,7 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
                 record.update(manifest=str(manifest),
                               manifest_signature=manifest_signature,
                               manifest_sha256=manifest_digest)
-                if item["producer"] == "geo_analysis":
+                if item["producer"] in {"geo_analysis", "geo_accessibility"}:
                     record["analysis_manifest"] = str(manifest)
                 if expected is not None:
                     record["sha256"] = expected
@@ -328,6 +327,9 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
     records = recent_outputs(cwd, config, limit=16)
     references = data_references(profiles, records)
     qgis_jobs = recent_qgis_results(cwd, config)
+    from geoharness.qgis.specification import recent_specs
+
+    drafts = recent_specs(cwd=cwd, settings=config.qgis)
     compact = []
     for item in list(profiles.values())[-16:]:
         compact.append({key: value for key, value in item.items() if key in {
@@ -336,7 +338,7 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
             "feature_count", "freshness",
         }})
     data = {"profiles": compact, "existing_outputs": records, "qgis_jobs": qgis_jobs,
-            "data_refs": references,
+            "data_refs": references, "map_drafts": drafts,
             "data_root": str(_root(cwd, config.data.file_dir or "."))}
     data['analysis_stages'] = {name: {key: record.get(key) for key in
         ('status', 'manifest_path', 'failure')} for name, record in
@@ -349,7 +351,7 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
                  if isinstance(key, str) and len(key) <= 128 and isinstance(entry, dict)}}
     # Remove complete records, never truncate a path into a different locator.
     # Preserve measured source CRS before less recent artifact history.
-    for collection in (records, qgis_jobs, compact):
+    for collection in (records, qgis_jobs, compact, drafts):
         while len(json.dumps(data, ensure_ascii=False)) > 18000 and collection:
             collection.pop(0 if collection is compact else -1)
     while len(json.dumps(data, ensure_ascii=False)) > 18000 and references:
