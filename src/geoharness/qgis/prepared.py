@@ -218,9 +218,11 @@ def execution_summary(result: dict) -> dict:
     compact["layout"]["map_frames"] = [{key: frame[key] for key in (
         "id", "crs", "scale", "extent", "page_index",
     ) if key in frame} for frame in layout.get("map_frames", [])[:8]]
-    native = details.get("native_facts") or {}
-    if native.get("page_previews"):
-        compact["page_previews"] = native["page_previews"]
+    from geoharness.qgis.artifacts import returned_page_previews
+
+    pages = returned_page_previews(details)
+    if pages:
+        compact["page_previews"] = pages
     compact["note"] = "Full source, layout and label evidence is in project_manifest; " \
                       "geo_python can read that exact workspace file."
     return {**{key: result[key] for key in ("status", "error_summary", "run_dir") if key in result},
