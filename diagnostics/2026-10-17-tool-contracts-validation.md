@@ -1,0 +1,37 @@
+# Oct17 第三轮实测工具完善与验证
+
+本轮按四阶段完成工具实现、定向回归、安装一致性和安装版合成流程验收。实现位于隔离工作树 `oct17-tool-contracts/GeoHarness`、分支 `codex/oct17-tool-contracts`，基于 `aaf7f3c`。原6049目录存在重叠修改，本轮后续未覆盖或回滚该目录的混合状态；不能把它与本分支的验证结果混为一谈。新版已安装至现有 `D:/Python312` 环境。
+
+## 修复后的行为
+
+| 范围 | 行为与验收依据 | 实现提交 |
+| --- | --- | --- |
+| 台账存储 | 短JSON定位SQLite，版本独立保存、重复report按哈希去重，版本与任务头事务提交；保留既有字典API。当前状态读取不加载历史报告。旧台账只读查询不隐式迁移，显式recover保留精确备份并全量等值验证后切换。 | 16b0650 |
+| 故障隔离 | 保留成功渲染的实际路径和执行状态。台账不可读时，显式review-only仍能保存本地报告，selected交付仍可复制草稿；均不提升地图质量。清理失败不覆盖原异常、不遗留运行时所有权。复制完成后才登记失败也返回真实目录和delivery.json。 | 16b0650、fae07b2 |
+| 分析输入与事实 | input_requirements在子进程guard生效后检查实际schema、ID、CRS和几何；未绑定的literal INPUTS访问提前失败。extent_geometry明确范围顺序和CRS。artifact_facts从持久文件复算统计、缺失数、条件计数及面积，check_claims核对明确声明。非法几何报告有界行号和原因，提示目标投影中再次校验。 | a0222c6、fae07b2 |
+| 布局和名录 | 尺寸不变候选不再递归，重复状态返回layout_no_progress；hard zoom和主体覆盖不放松。key_field独立于显示编号，筛选、排序、格式与分页保留原始身份。field_widths错误明确列出未显示字段。 | 06329ab |
+| 审核与恢复契约 | 当前图框记录purpose、实际标签启用源（含保存的样式覆盖）与标签落位；矛盾的“未落位”断言不能授权改图，也不能自动变成像素通过。severity_reason仅为说明。修复另存工程恢复Path类型不一致、完整规格round-trip默认selector误拒；历史窗口锚点与JSON分页分开，长路径分段read_call可正确重组。 | 06329ab、fae07b2 |
+
+没有增加累计制图或审核次数限制，没有新增运行依赖，SQLite使用Python标准库。没有修改AGENTS、Skills、主模型配置、凭证、原始GIS数据、旧地图、上游OpenHarness或既有.env.example状态，没有推送GitHub。
+
+## 验证记录
+
+- 阶段1：86项回归通过，覆盖台账、修改互斥、登记失败、审核与交付。
+- 阶段2：65项执行回归通过，覆盖输入字段、CRS、持久事实、既有Python隔离和输出完整性。
+- 阶段3：22项布局/逐页审核/语义进展回归通过；随后可选说明字段和非法field_widths检查通过。包含实际独立QGIS进程的双页/隐藏ID测试。
+- 首次较大回归为334通过、2失败，定位并修复Path类型和默认selector问题。修正后的跨阶段回归为 **337 passed、0 failed、0 skipped**；JUnit：`.scratch/oct17-final-clean-regression.xml`。pyproj/NumPy有120条既有兼容性弃用警告，没有测试失败。
+- 补充规格/冻结计划/绑定复验：21通过。新历史窗口、根分页、长路径read_call测试及4项规格检查共5通过；后续仅调整代码换行，最终全src及新增测试Ruff通过，git diff --check通过。这些批次有重叠，不累加为独立测试总数。
+- 真实旧台账仅迁移副本：原文件16,874,939字节，68个版本；迁移后locator为100字节，68条版本、200条去重报告，恢复内容与旧JSON完整等值。健康回执213字符、恢复回执888字符。原始源SHA256保持 `60a7fe8955290471812eda6a904a735b8aea97b95ec895e2768bf6a114589a3f`。记录：`.scratch/oct17-real-ledger-copy-evidence.json`。未迁移真实业务目录本身。
+- 构建wheel并以 `--no-deps` 安装。源码、wheel和安装目录 **96个Python模块、34个随包技能文件零差异**；wheel SHA256：`3fb156cd89b3d5bb46e3c2c8a5fa42a4005d462749d38441f4afaf1784aa836b`。记录：`.scratch/oct17-tools-parity.json`。初次无隔离构建因本机未装hatchling失败，随后使用项目声明的隔离构建成功；没有改变运行依赖。
+- 安装版公开工具串联：合成输入契约 → 分析（缺失时间保留unknown）→ 持久事实 → 声明检查 → spec → 原生preflight → frozen create → 隐藏身份名录与逐页标签角色 → 实际交付。输出三页，名录成员a/b正确，facts/claims/method/result和可编辑工程均交付。模型请求0次，像素验收unverified，交付质量保持draft。记录：`.scratch/oct17-installed-acceptance.json`。
+- 源码和安装版version/dry-run通过，16个工具组装正常；MCP为configured/not connected，此检查不证明外部服务连通。
+
+## 使用与剩余验证边界
+
+重启已经运行的GeoHarness进程后加载新版。旧业务台账不会因本轮安装而被自动迁移；使用新版进程的 `geo_qgis_project(action="inspect",map_id="实际ID")` 查看健康，按返回的recover_call显式迁移。恢复前应结束同一工作区仍使用旧代码的写入进程。只读分页应原样保留返回的history_offset/history_limit锚点。
+
+本轮证明的是上述工程契约和合成工具链通过，没有重跑234处居民点的真实分析或真实模型整图，未证明业务结论、权重科学性、逐页像素可读性或无人值守最终完成率。check_claims只核对显式结构化声明，不自动审计任意自然语言；面积是逐要素之和，重叠可能重复。像素占比不是视觉验收。
+
+尝试派发独立代码审查，但审查任务返回了未执行任务的确认语，没有有效审查报告，因此本轮不计为独立审查通过。证据来自主执行者自检、故障注入、真实副本等值验证、定向回归及安装版合成串联。需要有效独立代码复核和真实业务验收才能扩大结论。
+
+当前修改互斥仍限于同一运行时。兼容全历史receipt API仍会线性加载历史报告，低成本接口是任务头和分页健康查询；没有声称所有旧API已经变为恒定成本。
