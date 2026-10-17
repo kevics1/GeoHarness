@@ -7,6 +7,7 @@ import json
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from functools import wraps
+from pathlib import Path
 
 from openharness.tools.base import ToolResult
 
@@ -101,6 +102,10 @@ def current_owner():
     return _CURRENT.get()
 
 
+def mutation_active(cwd, map_id):
+    return (str(cwd.resolve()), map_id) in _OWNERS
+
+
 def _enrich(result, state):
     output = result.output
     try:
@@ -148,7 +153,7 @@ def guard_map_mutations(execute):
             identity = parameters.get("map_id") or parameters.get("title", "")
             if not reviewing and action == "export" and not identity:
                 identity = jobs.saved_project_job(context.metadata, cwd=context.cwd, config=config,
-                                                  project_path=arguments.project_path) or ""
+                                                  project_path=Path(arguments.project_path)) or ""
             job = jobs.ensure_map_job(context.metadata, cwd=context.cwd, config=config,
                                      map_id=identity, artifact_path=artifact)
             async def perform(owner, arguments):
@@ -210,7 +215,10 @@ def guard_map_mutations(execute):
                               "quality_status": "draft", "cleanup_error": owner.ledger_error})
             return result
         except MapMutationConflict as exc:
-            recovery = _state(context, exc.recovery["map_id"])
+            try:
+                recovery = _state(context, exc.recovery["map_id"])
+            except (OSError, ValueError) as state_error:
+                recovery = {**exc.recovery, "ledger_error": str(state_error)}
             return ToolResult(output=json.dumps({"status": "mutation_conflict", "reason": str(exc),
                 **recovery}, ensure_ascii=False), is_error=True,
                 metadata={"mutation_conflict": True, "render_executed": False, **recovery})

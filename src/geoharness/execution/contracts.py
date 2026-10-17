@@ -115,7 +115,14 @@ def validate_vector(frame: Any) -> dict:
             raise ValueError("Vector output contains null/empty geometry; keep explicit "
                              "unreachable statuses in a table instead of empty routes")
         if not frame.geometry.is_valid.all() or not np.isfinite(frame.total_bounds).all():
-            raise ValueError("Vector output contains invalid/nonfinite geometry")
+            from shapely.validation import explain_validity
+
+            invalid = ~frame.geometry.is_valid
+            samples = [{'row': str(index)[:80], 'reason': explain_validity(geometry)[:240]}
+                       for index, geometry in frame.loc[invalid].geometry.iloc[:8].items()]
+            raise ValueError("Vector output contains invalid/nonfinite geometry; "
+                             + json.dumps({'invalid_rows': int(invalid.sum()),
+                                           'samples': samples}, ensure_ascii=False))
         b = frame.total_bounds
         if frame.crs.is_geographic and (b[0] < -180 or b[2] > 180
                                        or b[1] < -90 or b[3] > 90):

@@ -499,6 +499,10 @@ class GeoQgisProjectInput(BaseModel):
         description="Read-only JSON path within verified spec/plan or help. Never a file path.")
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=8, ge=1, le=32)
+    history_offset: int | None = Field(default=None, ge=0,
+        description="Ledger inspect window anchor from a returned read_call; preserve unchanged.")
+    history_limit: int | None = Field(default=None, ge=1, le=32,
+        description="Ledger inspect window size from a returned read_call; preserve unchanged.")
     edits: list[MapEdit] = Field(default_factory=list, max_length=32,
         description="Typed incremental spec operations. Use with action=spec + spec_ref; "
                     "target returned layer_key, never reconstruct paths or rewrite all layers.")
@@ -583,11 +587,18 @@ class GeoQgisProjectInput(BaseModel):
         selectors = {"detail_path", "offset", "limit"}
         if self.action == "recover" or (self.action == "inspect" and self.map_id and not (
                 self.project_path or self.spec_ref or self.plan_ref)):
-            allowed = {"action", "map_id", *(selectors if self.action == "inspect" else set())}
+            allowed = {"action", "map_id", *(
+                selectors | {'history_offset', 'history_limit'} if self.action == "inspect" else
+                set())}
             if not self.map_id or self.model_fields_set - allowed:
                 raise ValueError("Ledger inspect/recover accepts only map_id and read selectors")
             return self
-        if self.model_fields_set & selectors and self.action not in {"help", "inspect"}:
+        if self.history_offset is not None or self.history_limit is not None:
+            raise ValueError('History anchors are only valid for ledger inspect with map_id')
+        # A model_dump()/validated-spec round trip includes default selectors.
+        # Only selectors that actually request a view are illegal on mutations.
+        if (self.detail_path or self.offset != 0 or self.limit != 8) and self.action not in {
+                "help", "inspect"}:
             raise ValueError("Diagnostic selectors are read-only; use help or inspect")
         if self.action == "help":
             if self.model_fields_set - {"action", "section", *selectors}:
@@ -717,12 +728,17 @@ class GeoQgisProjectTool(BaseTool):
             from geoharness.cartography.jobs import inspect_map_ledger
 
             try:
+                anchored = (arguments.history_offset is not None or
+                            arguments.history_limit is not None)
+                start = (arguments.history_offset or 0) if anchored else (
+                    arguments.offset if not arguments.detail_path else 0)
+                window = arguments.history_limit or arguments.limit
                 payload = inspect_map_ledger(cwd=context.cwd, config=config,
                     map_id=arguments.map_id, recover=arguments.action == "recover",
-                    offset=arguments.offset if not arguments.detail_path else 0,
-                    limit=arguments.limit)
+                    offset=start, limit=window)
                 visible = payload
-                if arguments.detail_path or len(json.dumps(payload, ensure_ascii=False)) > (
+                if (anchored or arguments.detail_path or
+                        len(json.dumps(payload, ensure_ascii=False)) >
                         config.qgis.inspection_max_chars):
                     from geoharness.qgis.inspection import view
 
@@ -730,8 +746,9 @@ class GeoQgisProjectTool(BaseTool):
                     visible = {key: payload[key] for key in (
                         "map_id", "status", "requires_recovery", "migration") if key in payload}
                     visible["diagnostic"] = view(details, call={"action": "inspect",
-                        "map_id": arguments.map_id}, path=arguments.detail_path,
-                        offset=arguments.offset if arguments.detail_path else 0,
+                        "map_id": arguments.map_id, "history_offset": start,
+                        "history_limit": window}, path=arguments.detail_path,
+                        offset=arguments.offset if anchored or arguments.detail_path else 0,
                         limit=arguments.limit, max_chars=config.qgis.inspection_max_chars - 600)
                 return ToolResult(output=json.dumps(visible, ensure_ascii=False),
                                   metadata={"render_executed": False, **payload})

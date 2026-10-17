@@ -990,6 +990,12 @@ def inspect_map_ledger(*, cwd, config, map_id, recover=False, offset=0, limit=8)
         job_id = _find(index, map_id, None)
         if job_id is None:
             raise ValueError("Unknown map_id; use an actual returned map identity")
+        if recover:
+            from geoharness.cartography.mutation_control import mutation_active
+
+            if mutation_active(cwd, job_id):
+                raise ValueError('Map mutation is active; inspect health now and recover '
+                                 'after it ends')
         path = _job_path(directory, job_id)
         value = {"map_id": job_id, "receipt_bytes": path.stat().st_size,
                  "status": "legacy", "requires_recovery": True,

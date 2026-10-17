@@ -111,6 +111,9 @@ def _publish(path, job_id):
 
 @_errors
 def write(receipt, job):
+    if (not isinstance(job, dict) or job.get('job_id') != receipt.parent.name
+            or not isinstance(job.get('versions'), list)):
+        raise ValueError('Map ledger task/version identities are invalid')
     receipt.parent.mkdir(parents=True, exist_ok=True)
     with closing(_connect(receipt.parent / DATABASE, create=True)) as connection:
         connection.executescript("""
@@ -121,7 +124,8 @@ def write(receipt, job):
         """)
         with connection:
             for expected, version in enumerate(job["versions"], 1):
-                if type(version.get("version")) is not int or version["version"] != expected:
+                if (not isinstance(version, dict) or type(version.get("version")) is not int
+                        or version["version"] != expected):
                     raise ValueError("Map ledger version identities are invalid")
                 payload = _encode(_freeze(version, connection))
                 digest = _digest(payload)
@@ -144,7 +148,11 @@ def _head(connection):
     row = connection.execute("SELECT payload,digest FROM metadata WHERE id=1").fetchone()
     if row is None:
         raise ValueError("Map ledger task head is missing")
-    return _checked(*row)
+    value = _checked(*row)
+    if (not isinstance(value, dict) or type(value.get('version_count')) is not int
+            or value['version_count'] < 0):
+        raise ValueError('Map ledger task head is invalid')
+    return value
 
 
 @_errors
@@ -161,6 +169,8 @@ def load(receipt):
     with closing(_connect(receipt.parent / DATABASE)) as connection:
         connection.execute("BEGIN")
         result = _head(connection)
+        if result.get('job_id') != receipt.parent.name:
+            raise ValueError('Map ledger task identity does not match')
         expected = result.pop("version_count")
         cache = {}
         result["versions"] = [_thaw(_checked(payload, digest), connection, cache)
@@ -199,7 +209,8 @@ def migrate(receipt):
     original = receipt.read_bytes()
     digest = hashlib.sha256(original).hexdigest()
     job = json.loads(original)
-    if job.get("job_id") != receipt.parent.name or not isinstance(job.get("versions"), list):
+    if (not isinstance(job, dict) or job.get("job_id") != receipt.parent.name
+            or not isinstance(job.get("versions"), list)):
         raise ValueError("Legacy map ledger identities are invalid")
     backup = receipt.with_name("receipt.v1." + digest + ".json")
     _regular(backup)
@@ -211,7 +222,7 @@ def migrate(receipt):
     if backup.read_bytes() != original or receipt.read_bytes() != original:
         raise ValueError("Legacy map ledger changed during migration")
     with tempfile.TemporaryDirectory(prefix="ledger-migration-", dir=receipt.parent) as stage:
-        staged = Path(stage) / "receipt.json"
+        staged = Path(stage) / job['job_id'] / "receipt.json"
         write(staged, job)
         verify(staged, job)
         if receipt.read_bytes() != original:

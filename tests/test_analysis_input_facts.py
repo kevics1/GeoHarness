@@ -62,6 +62,20 @@ def test_named_extent_retains_crs_and_validates_order():
         extent_geometry(west=400000, south=3000000, east=401000, north=3001000, crs=4326)
 
 
+def test_invalid_geometry_returns_bounded_row_diagnostics():
+    from shapely.geometry import Polygon
+
+    from geoharness.execution.contracts import validate_vector
+    from geoharness.tools.geo_python import python_recovery_hints
+
+    frame = gpd.GeoDataFrame(geometry=[Polygon([(0, 0), (1, 1), (1, 0), (0, 1), (0, 0)])],
+                             index=['collapsed-part'], crs=32648)
+    with pytest.raises(ValueError, match='collapsed-part') as error:
+        validate_vector(frame)
+    assert 'Self-intersection' in str(error.value)
+    assert 'after to_crs()' in python_recovery_hints('', str(error.value))[0]
+
+
 def test_facts_recompute_threshold_and_area_and_reject_wrong_claims(tmp_path):
     source = tmp_path / 'results.gpkg'
     gpd.GeoDataFrame({'id': ['a', 'b', 'c'], 'd_fire_m': [160, 500, None]}, geometry=[

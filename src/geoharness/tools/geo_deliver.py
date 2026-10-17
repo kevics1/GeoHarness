@@ -495,14 +495,17 @@ class GeoDeliverTool(BaseTool):
             if receipt.get("job_id"):
                 from geoharness.cartography.jobs import record_map_delivery
 
-                receipt = record_map_delivery(
-                    receipt["job_id"],
-                    context.metadata,
-                    cwd=workspace,
-                    config=config,
-                    image_path=primary or preview,
-                    delivery=payload,
-                )
+                try:
+                    receipt = record_map_delivery(
+                        receipt["job_id"], context.metadata, cwd=workspace, config=config,
+                        image_path=primary or preview, delivery=payload,
+                    )
+                except (OSError, ValueError) as exc:
+                    # Copying finished. Preserve the real destination and manifest
+                    # even when registration fails after the initial health check.
+                    payload['ledger_errors'].append(str(exc))
+                    payload['receipt_status'] = 'failed'
+                    payload['quality_status'] = 'draft'
                 if receipt.get("status") == "stale" or receipt.get("quality_status") != "passed":
                     payload["quality_status"] = "draft"
                 receipt_file = destination / "map-receipt.json"

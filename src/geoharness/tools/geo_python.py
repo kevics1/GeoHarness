@@ -107,9 +107,18 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
         hints.append('Keep attributes and geometry in one GeoDataFrame while sorting/filtering. '
                      'Join new statistics with entity_join(source, table, key="unique_id"). '
                      'Do not reconstruct geometry by positional .values.')
-    if 'cannot convert float NaN to integer' in stderr:
+    if any(text in stderr for text in ('cannot convert float NaN to integer',
+                                      'cannot convert float infinity to integer')):
         hints.append('Check empty geometries and finite bounds before window/index conversion. '
                      'For point sampling use sample_raster_points; Point.buffer(0) is empty.')
+    if 'invalid/nonfinite geometry' in stderr:
+        hints.append('Inspect the returned invalid row samples in the output CRS. Validate again '
+                     'after to_crs(); pre-projection validity alone is insufficient. Preserve '
+                     'source IDs and diagnose collapsed parts before any explicit repair; do not '
+                     'silently drop required features or relabel CRS.')
+    if 'Cannot transform naive geometries' in stderr or 'Vector output has no CRS' in stderr:
+        hints.append('Recover the verified source CRS from the registered file/GeoDataFrame. '
+                     'Bare Shapely objects lose CRS. Do not guess a CRS merely to make to_crs run.')
     if 'ModuleNotFoundError' in stderr:
         hints.append('Use installed libraries or the native QGIS tools; unavailable optional '
                      'packages must not be assumed or installed by the analysis script.')

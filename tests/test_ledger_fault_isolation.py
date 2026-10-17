@@ -89,3 +89,112 @@ async def test_review_only_retains_pixel_report_without_a_healthy_ledger(tmp_pat
     assert result.metadata["quality_status"] == "draft"
     assert Path(result.metadata["review_path"]).is_file()
     assert len(client.requests) == 1
+
+
+async def test_cleanup_failure_keeps_original_exception_and_releases_owner(tmp_path, monkeypatch):
+    import pytest
+
+    from geoharness.cartography.mutation_control import (
+        current_owner,
+        map_mutation,
+        mutation_active,
+    )
+
+    context = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': GeoConfig()})
+    identity = jobs.ensure_map_job(context.metadata, cwd=tmp_path, config=GeoConfig())
+    original = jobs.record_map_mutation
+    def record(*args, **kwargs):
+        if kwargs['value']['status'] != 'running':
+            raise ValueError('injected cleanup failure')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(jobs, 'record_map_mutation', record)
+    with pytest.raises(RuntimeError, match='original native failure'):
+        async with map_mutation(context, map_id=identity, operation='test'):
+            raise RuntimeError('original native failure')
+    assert current_owner() is None
+    assert not mutation_active(tmp_path, identity)
+
+
+async def test_recovery_waits_for_live_owner_and_malformed_legacy_is_structured(tmp_path):
+    from geoharness.cartography.mutation_control import map_mutation
+    from geoharness.tools.geo_qgis_project import GeoQgisProjectInput, GeoQgisProjectTool
+
+    config = GeoConfig()
+    context = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': config})
+    identity = jobs.ensure_map_job(context.metadata, cwd=tmp_path, config=config)
+    async with map_mutation(context, map_id=identity, operation='test'):
+        busy = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
+            action='recover', map_id=identity), context)
+        assert busy.is_error and 'active' in busy.output
+    receipt = tmp_path/config.cartography.jobs_dir/identity/'receipt.json'
+    receipt.write_text('[]', encoding='utf-8')
+    invalid = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
+        action='recover', map_id=identity), context)
+    assert invalid.is_error and 'identities' in invalid.output
+    assert receipt.read_text(encoding='utf-8') == '[]'
+
+
+async def test_delivery_registration_failure_preserves_copied_manifest(tmp_path, monkeypatch):
+    from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
+
+    path = tmp_path/'preview.png'
+    Image.new('RGB', (8, 8), 'red').save(path)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': GeoConfig()})
+    identity = jobs.ensure_map_job(context.metadata, cwd=tmp_path, config=GeoConfig(),
+                                    artifact_path=path)
+    def fail(*args, **kwargs):
+        raise ValueError('injected registration failure after copying')
+    monkeypatch.setattr(jobs, 'record_map_delivery', fail)
+    result = await GeoDeliverTool().execute(GeoDeliverInput(map_id=identity,
+        primary_map=str(path), version_policy='selected'), context)
+    assert not result.is_error, result.output
+    assert result.metadata['quality_status'] == 'draft'
+    assert result.metadata['receipt_status'] == 'failed'
+    assert Path(result.metadata['primary_map']).is_file()
+    manifest = json.loads(Path(result.metadata['manifest_path']).read_text(encoding='utf-8'))
+    assert 'injected registration failure' in manifest['ledger_errors'][0]
+
+
+async def test_health_read_calls_preserve_history_window_and_root_pagination(tmp_path):
+    from geoharness.cartography import ledger_store
+    from geoharness.tools.geo_qgis_project import GeoQgisProjectInput, GeoQgisProjectTool
+
+    config = GeoConfig()
+    context = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': config})
+    identity = jobs.ensure_map_job(context.metadata, cwd=tmp_path, config=config)
+    directory = tmp_path/config.cartography.jobs_dir
+    receipt = directory/identity/'receipt.json'
+    job = jobs._job(directory, identity)
+    job.update(current_version=12, versions=[{'version': i+1,
+        'image_path': f'actual-{i+1}/' + '路径'*1500 + '/preview.png', 'stages': {}}
+        for i in range(12)])
+    ledger_store.write(receipt, job)
+    before = receipt.read_bytes()
+    tool = GeoQgisProjectTool()
+
+    async def read(call):
+        result = await tool.execute(GeoQgisProjectInput(**call), context)
+        assert not result.is_error, result.output
+        assert len(result.output) <= config.qgis.inspection_max_chars
+        return json.loads(result.output)['diagnostic']
+
+    page = await read({'action': 'inspect', 'map_id': identity, 'offset': 3, 'limit': 3})
+    for _ in range(8):
+        if 'history' in page['value']:
+            history = page['value']['history']
+            break
+        assert page['next_call']['history_offset'] == 3
+        assert page['next_call']['history_limit'] == 3
+        page = await read(page['next_call'])
+    else:
+        raise AssertionError('Root diagnostic pagination did not reach history')
+    page = await read(history['read_call'])
+    record = await read(page['value'][0]['read_call'])
+    assert record['value']['version'] == 4
+    image = await read(record['value']['image_path']['read_call'])
+    text = image['value']
+    while image.get('next_call'):
+        image = await read(image['next_call'])
+        text += image['value']
+    assert text == job['versions'][3]['image_path']
+    assert receipt.read_bytes() == before

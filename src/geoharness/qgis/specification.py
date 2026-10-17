@@ -177,6 +177,11 @@ def contract_help(section: str) -> dict:
                   "Explicit extent and focus_layers are mutually exclusive per frame.",
                   "dpi/map_extent/title are project fields; style.field/renderer are nested.",
                   "Visual zoom suggestions use advisory; preserve declared frame requirements."]}
+    if section == 'workflow':
+        result['ledger'] = {'inspect': {'action': 'inspect', 'map_id': 'returned-map-id'},
+                            'recover': {'action': 'recover', 'map_id': 'returned-map-id'},
+                            'note': 'Recovery migrates with backup and verification; '
+                                    'health inspection is read-only. Use key_field for stable IDs.'}
     if section in schemas:
         result["schema"] = schemas[section].model_json_schema()
     elif section == "edits":
