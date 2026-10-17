@@ -322,3 +322,5 @@
 阶段1真实副本验收：16874939字节旧台账68版本完整等值迁移；100字节locator，68独立版本/200去重报告；健康213字符，恢复888字符；原业务源SHA256不变。未调用模型、未重画业务图。
 
 阶段1验收：86项定向pytest通过，ruff通过，source CLI version/dry-run通过（16工具，MCP未连接）。独立review子任务三次未执行指定审查，不能计为独立审查通过；保留自检和故障注入证据。
+
+阶段2：新增可选input_requirements，子进程在文件guard生效后读取实际schema/key/CRS；literal INPUTS未绑定预检失败。新增extent_geometry、artifact_facts、check_claims。65项执行/字段/CRS/事实/隔离回归通过，ruff通过。事实检查仅覆盖显式声明，不代表科学方法或自然语言全部通过。

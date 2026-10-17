@@ -13,10 +13,18 @@ from pathlib import Path
 from typing import Any
 
 
-def preflight_code(code: str) -> list[dict]:
+def preflight_code(code: str, input_aliases=None) -> list[dict]:
     """Compile before starting GIS; check unconditional top-level dependencies only."""
     tree = ast.parse(code)
     compile(tree, "analysis.py", "exec")
+    if input_aliases is not None:
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                    and node.value.id == 'INPUTS' and isinstance(node.slice, ast.Constant)
+                    and isinstance(node.slice.value, str)
+                    and node.slice.value not in input_aliases):
+                raise ValueError(f"INPUTS[{node.slice.value!r}] is not bound; declare input_refs. "
+                                 f"Available aliases: {sorted(input_aliases)}")
     checks = []
     for node in tree.body:
         names = ([alias.name.split('.')[0] for alias in node.names]
@@ -29,6 +37,72 @@ def preflight_code(code: str) -> list[dict]:
                                           "use an installed implementation before execution")
             checks.append({"check": "import_available", "module": name})
     return checks
+
+
+def validate_input(path: Any, requirement: dict) -> dict:
+    """Read the actual intermediate under the child's file guards before user code."""
+    import geopandas as gpd
+    import numpy as np
+    import pandas as pd
+    from pyproj import CRS
+
+    if Path(path).suffix.lower() == '.csv':
+        frame = pd.read_csv(path)
+    else:
+        options = {'layer': requirement['layer']} if requirement.get('layer') else {}
+        frame = gpd.read_file(path, **options)
+    schema = {str(k): str(v) for k, v in frame.dtypes.items()}
+    fields = set(requirement.get('fields', [])) | set(requirement.get('finite_fields', []))
+    if requirement.get('key'):
+        fields.add(requirement['key'])
+    missing = sorted(fields - set(frame.columns))
+    if missing:
+        raise ValueError(f"Input {Path(path).name}: missing fields {missing}; "
+                         f"actual schema={schema}")
+    key = requirement.get('key')
+    if key and (frame[key].isna().any() or not frame[key].is_unique):
+        raise ValueError(f"Input {Path(path).name}: key {key!r} must be unique and non-null")
+    for name in requirement.get('finite_fields', []):
+        if not np.isfinite(pd.to_numeric(frame[name], errors='raise')).all():
+            raise ValueError(f"Input {Path(path).name}: field {name!r} must be finite/non-null")
+    crs = getattr(frame, 'crs', None)
+    if requirement.get('crs') and (crs is None or CRS(crs) != CRS(requirement['crs'])):
+        raise ValueError(f"Input {Path(path).name}: expected CRS {requirement['crs']}; "
+                         f"actual={crs}. "
+                         "Transform explicitly; never relabel coordinates to satisfy a contract")
+    if requirement.get('metric'):
+        require_metric(crs)
+    detail = validate_vector(frame) if requirement.get('valid_geometry') else {}
+    return {'path': str(path), 'rows': len(frame), 'schema': schema,
+            'crs': str(crs) if crs else None, **detail}
+
+
+def require_metric(value: Any) -> Any:
+    import math
+
+    from pyproj import CRS
+
+    if value is None:
+        raise ValueError('A verified projected CRS with metre units is required')
+    crs = CRS(value)
+    if (not crs.is_projected or len(crs.axis_info) < 2
+            or any(not math.isclose(axis.unit_conversion_factor, 1)
+                   for axis in crs.axis_info[:2])):
+        raise ValueError('A verified projected CRS with metre units is required')
+    return crs
+
+
+def extent_geometry(*, west: float, south: float, east: float, north: float, crs: Any) -> Any:
+    """Named bounds, explicit CRS; ready for mask_raster or to_crs, never a bare box."""
+    import geopandas as gpd
+    import numpy as np
+    from shapely.geometry import box
+
+    if not np.isfinite([west, south, east, north]).all() or west >= east or south >= north:
+        raise ValueError('Extent requires finite west < east and south < north')
+    result = gpd.GeoSeries([box(west, south, east, north)], crs=crs)
+    validate_vector(result.to_frame(name='geometry'))
+    return result
 
 
 def validate_vector(frame: Any) -> dict:
@@ -255,7 +329,97 @@ def artifact_metadata(path: Path, *, succeeded: bool) -> dict:
     return record
 
 
-def write_contract_report(path: Path, tracker: EntityTracker) -> None:
+def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
+                   metric_crs=None) -> dict:
+    """Recompute bounded statistics from a persisted table/vector, with its fingerprint.
+
+    Predicates are {name, field, op, value}; missing values never count as matches.
+    Area, when requested, is a sum of feature areas, not a union or fire forecast.
+    """
+    import operator
+
+    import geopandas as gpd
+    import numpy as np
+    import pandas as pd
+
+    path = Path(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    frame = pd.read_csv(path) if path.suffix.lower() == '.csv' else gpd.read_file(path)
+    if key not in frame or frame[key].isna().any() or not frame[key].is_unique:
+        raise ValueError('Facts require an existing unique non-null source key')
+    result = {'scope': 'recomputed_persisted_values; scientific_method_unverified',
+              'source': str(path), 'sha256': digest, 'key': key, 'row_count': len(frame),
+              'crs': str(frame.crs) if getattr(frame, 'crs', None) else None,
+              'numeric': {}, 'counts': {}}
+    for field in numeric_fields:
+        if field not in frame:
+            raise ValueError(f'Fact field {field!r} missing; actual fields={list(frame.columns)}')
+        values = pd.to_numeric(frame[field], errors='raise')
+        if np.isinf(values).any():
+            raise ValueError(f'Fact field {field!r} contains infinity')
+        valid = values.dropna()
+        result['numeric'][field] = {
+            'missing': int(values.isna().sum()), 'count': len(valid),
+            **{name: float(getattr(valid, name)()) if len(valid) else None
+               for name in ('min', 'max', 'sum', 'mean')}}
+    operators = {'<': operator.lt, '<=': operator.le, '>': operator.gt,
+                 '>=': operator.ge, '==': operator.eq, '!=': operator.ne}
+    for predicate in predicates:
+        if set(predicate) != {'name', 'field', 'op', 'value'}:
+            raise ValueError('Fact predicates require name/field/op/value')
+        name, field, op = (predicate[k] for k in ('name', 'field', 'op'))
+        if (not isinstance(name, str) or not name or name in result['counts']
+                or field not in frame or op not in operators or predicate['value'] is None):
+            raise ValueError('Fact predicates need unique names, existing fields and supported op')
+        if isinstance(predicate['value'], (int, float)) and not np.isfinite(predicate['value']):
+            raise ValueError('Fact predicate values must be finite')
+        mask = frame[field].notna() & operators[op](frame[field], predicate['value'])
+        result['counts'][name] = {'count': int(mask.sum()), 'predicate': predicate,
+                                  'missing_excluded': int(frame[field].isna().sum())}
+    if metric_crs is not None:
+        require_metric(metric_crs)
+        if not isinstance(frame, gpd.GeoDataFrame):
+            raise ValueError('Area facts require a CRS-bearing vector')
+        validate_vector(frame)
+        shapes = frame.to_crs(metric_crs)
+        validate_vector(shapes)
+        result['area'] = {'sum_feature_area_m2': float(shapes.area.sum()),
+                          'metric_crs': str(shapes.crs), 'semantics': 'sum; overlaps may repeat'}
+    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        raise ValueError('Fact source changed while reading; discard these facts')
+    return result
+
+
+def check_claims(facts: dict, claims: list[dict]) -> dict:
+    """Compare explicit leaf values; this never certifies arbitrary prose or a risk model."""
+    import math
+
+    checks = []
+    for claim in claims:
+        if set(claim) - {'path', 'expected', 'absolute_tolerance'} or not claim.get('path'):
+            raise ValueError('Claim requires path list, expected and optional absolute_tolerance')
+        if 'expected' not in claim or not isinstance(claim['path'], list):
+            raise ValueError('Claim requires path list and expected')
+        actual = facts
+        for key in claim['path']:
+            actual = actual[key]
+        tolerance = float(claim.get('absolute_tolerance', 0))
+        if not math.isfinite(tolerance) or tolerance < 0:
+            raise ValueError('Claim tolerance must be finite and nonnegative')
+        expected = claim['expected']
+        if type(actual) in (int, float) and type(expected) in (int, float):
+            matched = math.isfinite(actual) and math.isfinite(expected) and math.isclose(
+                actual, expected, abs_tol=tolerance, rel_tol=0)
+        else:
+            matched = type(actual) is type(expected) and actual == expected
+        checks.append({**claim, 'actual': actual, 'matched': bool(matched)})
+    return {'scope': 'explicit_claims_only; prose_and_method_unverified',
+            'status': 'passed' if checks and all(c['matched'] for c in checks) else 'failed',
+            'checks': checks}
+
+
+def write_contract_report(path: Path, tracker: EntityTracker, *, input_checks=None) -> None:
     path.write_text(json.dumps({"vector_writes": tracker.writes,
+                               "input_checks": input_checks or {},
                                "scientific_correctness": "unverified"},
                               ensure_ascii=False, indent=2), encoding="utf-8")

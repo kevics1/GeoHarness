@@ -115,6 +115,7 @@ async def execute_python(
     data_refs: dict[str, Any] | None = None,
     previous_outputs: tuple[Path, ...] = (),
     input_artifacts: dict[str, str] | None = None,
+    input_requirements: dict[str, dict] | None = None,
     expected_outputs: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Save and execute a script, returning and persisting its reproducibility record."""
@@ -156,6 +157,7 @@ async def execute_python(
              "read_files": exact_files, "data_profiles": data_profiles or {},
              "data_refs": data_refs or {},
              "input_artifacts": input_artifacts or {},
+             "input_requirements": input_requirements or {},
              "expected_outputs": list(expected_outputs),
              "previous_outputs": [str(path) for path in previous_outputs]},
             ensure_ascii=False,
@@ -171,7 +173,7 @@ async def execute_python(
                              'signature': _reference_signature(Path(value))}
                       for alias, value in (input_artifacts or {}).items()}
     try:
-        preflight = _contracts().preflight_code(code)
+        preflight = _contracts().preflight_code(code, set(input_artifacts or {}))
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-I",
@@ -204,7 +206,7 @@ async def execute_python(
             out_task, err_task
         )
         exit_code = process.returncode
-    except (SyntaxError, ModuleNotFoundError) as exc:
+    except (SyntaxError, ModuleNotFoundError, ValueError) as exc:
         stderr = f"{type(exc).__name__}: {exc}"
         exit_code = 1
     except (OSError, RuntimeError) as exc:
@@ -866,6 +868,11 @@ def _child_main() -> None:
     _artifact_contracts()
     tracker = contracts.EntityTracker()
     _install_guards(spec, tracker)
+    input_checks = {}
+    for alias, requirement in spec.get('input_requirements', {}).items():
+        if alias not in spec.get('input_artifacts', {}):
+            raise ValueError(f'Unbound input requirement: {alias}')
+        input_checks[alias] = contracts.validate_input(spec['input_artifacts'][alias], requirement)
     data_refs = spec.get("data_refs", {})
     namespace = {
         "__name__": "__main__",
@@ -881,6 +888,9 @@ def _child_main() -> None:
         "entity_join": contracts.entity_join,
         "score_risk": contracts.score_risk,
         "sample_raster_points": contracts.sample_raster_points,
+        "extent_geometry": contracts.extent_geometry,
+        "artifact_facts": contracts.artifact_facts,
+        "check_claims": contracts.check_claims,
         **_data_helpers(data_refs, tracker),
     }
     exec(code, namespace)
@@ -892,7 +902,7 @@ def _child_main() -> None:
         if output.suffix.lower() in {".geojson", ".gpkg", ".shp"} and output.is_file():
             frame = gpd.read_file(output)
             tracker.writes.setdefault(str(output), tracker.check(frame))
-    contracts.write_contract_report(run_dir / "integrity.json", tracker)
+    contracts.write_contract_report(run_dir / "integrity.json", tracker, input_checks=input_checks)
 
 
 if __name__ == "__main__":

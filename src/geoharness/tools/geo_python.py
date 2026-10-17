@@ -184,6 +184,19 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
     return hints
 
 
+class InputRequirement(BaseModel):
+    """Optional explicit contract for one persisted dependency."""
+
+    model_config = {"extra": "forbid"}
+    fields: list[str] = Field(default_factory=list, max_length=64)
+    key: str = ''
+    finite_fields: list[str] = Field(default_factory=list, max_length=64)
+    layer: str = ''
+    crs: str = ''
+    metric: bool = False
+    valid_geometry: bool = False
+
+
 class GeoPythonInput(BaseModel):
     code: str = Field(min_length=1, description="Complete Python script saved as analysis.py.")
     name: str = Field(
@@ -201,6 +214,9 @@ class GeoPythonInput(BaseModel):
     input_refs: dict[str, str] = Field(default_factory=dict, max_length=64,
         description="Named exact DATA_REFS IDs or returned artifact paths. Injected as "
         "INPUTS[name]: Path; use for CSV/GeoPackage dependencies across fresh runs.")
+    input_requirements: dict[str, InputRequirement] = Field(default_factory=dict, max_length=64,
+        description="Optional requirements by input_refs alias: fields, key (unique/non-null), "
+        "finite_fields, layer, crs, metric, valid_geometry. Actual files are checked before code.")
     expected_outputs: list[str] = Field(default_factory=list, max_length=64,
         description="Relative output files required for stage success; missing files fail.")
     stage_id: str = Field(default='', pattern=r'^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63})?$',
@@ -284,7 +300,14 @@ class GeoPythonTool(BaseTool):
         "Use relative output filenames or RUN_DIR / filename. Network and subprocesses "
         "are unavailable. Returns script, manifest, stdout/stderr and generated file paths. "
         "Use input_refs={alias: exact_ref_or_path}, then INPUTS[alias] for cross-run CSV/files. "
+        "Use input_requirements={alias:{fields,key,crs,metric,valid_geometry}} to check the "
+        "actual intermediate before code. extent_geometry(west=...,south=...,east=...,north=...,"
+        "crs=...) returns CRS-bearing bounds for mask_raster. "
         "Declare expected_outputs, stage_id and depends_on for analysis steps. "
+        "artifact_facts(path,key=...,numeric_fields=[...],predicates=[{name,field,op,value}],"
+        "metric_crs=...) recomputes file-bound counts/statistics/area. check_claims(facts,"
+        "[{path:[...],expected:...}]) compares explicit claims. Save both as JSON for delivery; "
+        "these helpers do not validate unstructured prose or scientific assumptions. "
         "entity_join(source, table, key='id') joins attributes safely. "
         "score_risk(frame,key='id',components=[{field,weight,minimum,maximum,direction}], "
         "missing_policy='error'|'unknown') computes an explicit assumed weighted score; "
@@ -329,6 +352,8 @@ class GeoPythonTool(BaseTool):
 
         inputs, stage_fingerprint = {}, ''
         try:
+            if set(arguments.input_requirements) - set(arguments.input_refs):
+                raise ValueError('input_requirements must name existing input_refs aliases')
             if arguments.depends_on and not arguments.stage_id:
                 raise ValueError('depends_on requires stage_id')
             for alias, value in arguments.input_refs.items():
@@ -341,7 +366,9 @@ class GeoPythonTool(BaseTool):
             if arguments.stage_id:
                 stage_fingerprint = prepare_stage(context.metadata,
                     stage_id=arguments.stage_id, dependencies=arguments.depends_on,
-                    code=arguments.code, inputs=inputs, expected_outputs=arguments.expected_outputs)
+                    code=arguments.code + json.dumps({k: v.model_dump() for k, v in
+                        arguments.input_requirements.items()}, sort_keys=True),
+                    inputs=inputs, expected_outputs=arguments.expected_outputs)
         except (OSError, ValueError) as exc:
             return ToolResult(output=f'Precondition failed; no script executed: {exc}',
                               is_error=True, metadata={'script_executed': False})
@@ -418,6 +445,8 @@ class GeoPythonTool(BaseTool):
                 data_refs=references,
                 previous_outputs=tuple(Path(item["path"]) for item in outputs),
                 input_artifacts=inputs,
+                input_requirements={k: v.model_dump() for k, v in
+                                    arguments.input_requirements.items()},
                 expected_outputs=tuple(arguments.expected_outputs),
             )
         except (OSError, ValueError) as exc:
@@ -453,6 +482,10 @@ class GeoPythonTool(BaseTool):
             "resolve_data": "ref -> original Path; stable ID or unique registered name/path",
             "read_vector": "ref, target_crs=None -> GeoDataFrame; no guessed source CRS",
             "INPUTS": "dict[alias, Path] from verified input_refs; use across calls",
+            "input_requirements": "Actual schema/key/CRS checks before script execution",
+            "extent_geometry": "keyword west,south,east,north,crs -> CRS-bearing GeoSeries",
+            "artifact_facts": "path,key,numeric_fields,predicates,metric_crs -> measured facts",
+            "check_claims": "facts,claims -> compare explicit values; no NLP audit",
             "entity_join": "source, table, key=... -> key-joined GeoDataFrame; never positional",
             "projection": "Reproject GeoDataFrame/GeoSeries, not iterrows() pandas Series rows",
             "native_layer": "ref, derivation=None -> layer retaining original source/provenance",

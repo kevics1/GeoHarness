@@ -528,3 +528,12 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 图片已渲染而登记失败时，回执保留实际图片路径、render_executed和receipt_status，不再统一称为未开始。审核设置auto_repair=false时，可在台账不可读情况下保存独立像素审核报告；其地图质量保持draft，报告不授权自动修改。正常自动修复仍要求有效台账和绑定。
 
 交付默认仍按已核验候选规则执行。若台账不可读，调用者可以显式指定version_policy="selected"并给出实际文件，保存带ledger_errors的草稿恢复包；它不执行历史候选替换、不宣称质量通过。原始台账、旧地图和先前交付目录不会被此降级路径清空。
+
+
+## 分析输入与事实核对
+
+每次 `geo_python` 都使用新的 `RUN_DIR`。跨步骤先声明 `input_refs={alias: 实际返回的ref或路径}`，再读 `INPUTS[alias]`。可用 `input_requirements={alias:{fields:[...],key:"id",crs:"EPSG:32648",metric:true,valid_geometry:true}}` 核对实际文件；字段缺失会列出实际schema，CRS不一致会拒绝执行，不会自动重贴CRS。CSV可检查fields/key/finite_fields，矢量还可声明layer/crs/metric/valid_geometry。
+
+`extent_geometry(west=...,south=...,east=...,north=...,crs=...)` 返回带CRS的GeoSeries；交给 `mask_raster` 会转换到栅格真实CRS。不要把顺序不明的四元组直接传给box，也不要给裸Shapely对象猜CRS。
+
+使用 `artifact_facts(INPUTS["result"],key="id",numeric_fields=["d_fire_m"],predicates=[{"name":"within500","field":"d_fire_m","op":"<=","value":500}],metric_crs="EPSG:32648")` 从落盘文件复算行数、缺失数、统计量、条件计数及面积（指定metric_crs时）。面积为逐要素面积之和，重叠可能重复；不是自动求并集或重新预测火势。返回源文件SHA256和验证范围。`check_claims(facts,[{"path":["counts","within500","count"],"expected":13}])` 对比明确声明并返回实际值及是否相符；空声明不会通过。将facts、claims结果和评分方法另存为JSON，加入 `expected_outputs` 和交付files。此检查不审计任意自然语言，也不证明评分权重或风险方法科学有效。缺失路网时间仍应保留unknown，不应无说明地填充为某个分钟数。
