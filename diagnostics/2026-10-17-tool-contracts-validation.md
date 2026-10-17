@@ -1,6 +1,6 @@
 # Oct17 第三轮实测工具完善与验证
 
-本轮按四阶段完成工具实现、定向回归、安装一致性和安装版合成流程验收。实现位于隔离工作树 `oct17-tool-contracts/GeoHarness`、分支 `codex/oct17-tool-contracts`，基于 `aaf7f3c`。原6049目录存在重叠修改，本轮后续未覆盖或回滚该目录的混合状态；不能把它与本分支的验证结果混为一谈。新版已安装至现有 `D:/Python312` 环境。
+本轮按四阶段完成工具实现、定向回归、安装一致性和安装版合成流程验收。修复先在隔离分支 `codex/oct17-tool-contracts` 实现（基于 `aaf7f3c`），随后在用户确认以当前会话为准后，于2026-10-17保留备份并快进合并回6049工作区。新版已重新构建并安装至现有 `D:/Python312` 环境；最新集成证据见下文，早期验证批次与历史wheel哈希保留用于追溯。
 
 ## 修复后的行为
 
@@ -35,3 +35,12 @@
 尝试派发独立代码审查，但审查任务返回了未执行任务的确认语，没有有效审查报告，因此本轮不计为独立审查通过。证据来自主执行者自检、故障注入、真实副本等值验证、定向回归及安装版合成串联。需要有效独立代码复核和真实业务验收才能扩大结论。
 
 当前修改互斥仍限于同一运行时。兼容全历史receipt API仍会线性加载历史报告，低成本接口是任务头和分页健康查询；没有声称所有旧API已经变为恒定成本。
+
+## 2026-10-17 当前工作区集成验收
+
+- 代码已从aaf7f3c快进合并至f163ab8。合并前10个重叠文件及完整差异保存于 `.scratch/integration-backup-20261017-132813/`，逐文件SHA256核验一致；8项保留文件（包括.env.example及无关诊断文件）合并后哈希不变。源码、tests和skills与已验证分支一致。合并首次被Git的行尾/索引缓存状态阻止；确认实际diff为空后仅刷新对应文件索引，再快进成功，未覆盖额外改动。
+- 追加修复复制后读取台账失败：返回真实交付路径和delivery.json，delivery_status=copied_unregistered、receipt_status=failed、quality_status=draft，保留ledger_errors/next_action，不写旧map-receipt。复制前默认校验仍拒绝不可读台账；显式selected可保存草稿。新增故障先复现为失败，修复后交付相关47项通过；最后guard调整后的故障隔离9项通过，合并后下述80项亦覆盖该路径。批次有重叠，不累计总数。
+- 当前6049工作区：9个相关测试文件 **80 passed、0 failed**，53.77秒；`.scratch/oct17-integrated-regression.xml`。Ruff全src与新增测试通过、diff检查通过。没有运行全量pytest或真实业务整图。
+- 最新wheel SHA256：`afacd66775c6dbfcd5c85c6c1fe208c3521564d40606893728f66e43f9b3b945`，源码/wheel/安装目录96个Python模块与34个随包文件零差异。证据：`.scratch/oct17-tools-parity.json`。仅重装GeoHarness，未修改运行依赖。
+- 当前目录安装版合成串联通过，三页、隐藏名录身份a/b正确，实际交付工程和事实/声明/方法文件；模型调用0次、quality_status=draft、visual_acceptance=unverified。证据：`.scratch/oct17-installed-acceptance.json`。源码和安装版CLI version/dry-run均通过，16工具；MCP未连接。
+- 独立审查再派发两次仍未执行任务，不能计为通过。真实数据/真实模型业务验收、逐页像素质量和无人值守完成率继续待验证；原始业务台账未被迁移，仍使用显式recover入口。
