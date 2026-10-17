@@ -81,7 +81,8 @@ async def test_pixel_request_keeps_images_max_and_excludes_engineering_and_repai
                      chunk(args=raw[20:], finish="tool_calls")])
     requests, options, closed = install_transport(monkeypatch, stream)
     config = GeoConfig(api_key="private-test-key", map_review=MapReviewConfig(
-        reasoning_effort="max", request_extra_body={"thinking": {"type": "disabled"}}))
+        reasoning_effort="max", max_tokens=131072,
+        request_extra_body={"thinking": {"type": "disabled"}}))
     evidence = {"backend": "qgis", "render_metadata": {
         "native_facts": {"frames": {"main_map": {
             "page_index": 0, "purpose": "Overview; numbering on the detail page",
@@ -95,6 +96,7 @@ async def test_pixel_request_keeps_images_max_and_excludes_engineering_and_repai
     assert request["stream"] is True
     assert request["extra_body"]["reasoning_effort"] == "max"
     assert request["extra_body"]["thinking"] == {"type": "enabled"}
+    assert request.get("max_tokens", request.get("max_completion_tokens")) == 131072
     body = json.dumps(request, ensure_ascii=False)
     assert "data:image/png;base64," in body
     assert "private_engineering_marker" not in body

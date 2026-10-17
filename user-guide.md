@@ -336,7 +336,7 @@ QGIS 首版前的 `preflight` 会给出有界标注点密度风险，供决定�
 
 审查采用流式接收。`timeout_seconds` 是图片准备和生成的总截止（默认180秒），`read_timeout_seconds` 是网络空闲超时（默认90秒）。持续收到思考增量不表示审查已完成。诊断记录首响应、首思考、首答案时间、用量和完成原因，不保存思考正文；区分 `total_deadline`、`transport_timeout`、`output_budget` 和不完整流。失败保持 `unverified`，不自动降低模型或思考强度，也不自动追加重绘。
 
-当前 `max` 模型的实测中，16384输出token可能全部被思考占用而没有最终答案。配置示例使用 `map_review.max_tokens: 32768`；这是生成预算上限，并不要求每次耗尽。工具尊重实际配置，诊断中的 `output_token_limit/output_tokens/reasoning_tokens/finish_reason` 可区分预算耗尽与网络失败。增加预算仍受总截止约束，不保证任意输入都能完成。
+当前 `max` 模型的实测中，16384输出token可能全部被思考占用而没有最终答案。按后续要求，审图输出预算从32768提高四倍，配置示例使用 `map_review.max_tokens: 131072`，工具配置也允许此上限；这是生成预算上限，并不要求每次耗尽。工具尊重实际配置，诊断中的 `output_token_limit/output_tokens/reasoning_tokens/finish_reason` 可区分预算耗尽与网络失败。实际可用上限仍由模型服务决定，增加预算仍受180秒总截止约束，不保证任意输入都能完成。
 
 有放大图和密集重点点时，Python 可使用 `geoharness.cartography.layout` 的 create_map_figure、place_point_labels、save_map_figure。它预留主图、放大图、图例、说明的独立区域，按渲染后的文字边界避让；放不下的名字保留省略记录，使用编号对应名单。保存 `.layout.json` 记录分区相交、标签相交/裁切和图例/说明越界，与实际图片 SHA256 绑定。布局报告用于制图阶段的几何检查；geo_map_review 仍直接检查图片，不以该报告代替或阻断像素审查。
 

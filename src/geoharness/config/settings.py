@@ -143,7 +143,7 @@ class MapReviewConfig(BaseModel):
         default=60, gt=0, le=86400, allow_inf_nan=False,
         description="Transient review outage cooldown; server Retry-After may extend it.",
     )
-    max_tokens: int = Field(default=8192, ge=256, le=65536)
+    max_tokens: int = Field(default=8192, ge=256, le=131072)
     max_image_side: int = Field(default=1800, ge=256, le=4096)
     auto_repair: bool = Field(default=False, deprecated=True,
         description="Legacy setting; geo_map_review is always read-only and ignores it.")
