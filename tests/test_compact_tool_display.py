@@ -23,7 +23,8 @@ def test_overlay_leaves_upstream_and_dependency_target_unchanged(tmp_path):
     sentinel.write_text("dependency", encoding="utf-8")
     with frontend_overlay(source) as overlay:
         assert (overlay / "node_modules/sentinel").read_text() == "dependency"
-        assert "resultLineCount" in (overlay / "src/components/ToolCallDisplay.tsx").read_text()
+        assert "resultLineCount" in (overlay / "src/components/ToolCallDisplay.tsx").read_text(
+            encoding="utf-8")
         assert component.read_text() == "original"
     assert not overlay.exists()
     assert sentinel.read_text() == "dependency"

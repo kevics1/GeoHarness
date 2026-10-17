@@ -348,3 +348,5 @@
 阶段4主Agent实现read_raster/write_raster/raster_backdrop，标准库+既有Rasterio/Numpy，无新依赖；依据官方Rasterio resampling/mask实现更新transform并保持band-first。测试首次跨CRS恰在像元边界因浮点舍入多裁一行，调整fixture为像元内部几何而不修改原生窗口算法；输出write-back检查通过。71项执行/产物/栅格相关测试及ruff通过。修正文档mask_raster的indexes=int可返回二维这一真实兼容行为；新封装固定三维。
 
 阶段5：主体/zoom失败在原冻结输入上最多试测三个候选，候选不导出、不自动应用；返回native_preflight_passed/failed的实际测量。按完整要求选择集和focus范围给出显式范围patch，缺失/重复键或源数量不足不伪造范围解。失败spec返回绑定原spec_ref/input_digest的可复制edit_call，随后仍须新preflight。旧公式建议明确unverified_formula。11项原生QGIS/候选闭环/联合布局通过，ruff首次行宽问题已修复。
+
+阶段6：121项源码整合通过，204.17秒；自检补保留候选自动尺寸适配（4项通过）及数字503/timeout文件名不误判重试（1项通过）。全src和新增测试ruff通过。构建时无隔离pip缺hatchling，改用既有uv build；仅重装geoharness不动依赖。wheel SHA=230f9a8c016c46060ad13a13afa13dbb1953de8b1c6048b003bfd061c2a4ea8d；101模块/1前端/34随包文件源码、wheel、安装一致。安装版29项通过，另1项测试隐式GBK读UTF8自身失败，改显式编码后补测通过。安装版真实合成三页工具链含栅格处理、facts/claims、冻结创建、第二页读取与实际交付通过，0模型调用且draft/unverified。隔离-I CLI缺用户site中的既有Typer依赖，正常安装版CLI version/dry-run通过；未改上游依赖。独立审查仍只得到确认语，无有效结论。详见diagnostics/2026-10-17-invocation-reliability-validation.md。
