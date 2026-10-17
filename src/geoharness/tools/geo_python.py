@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_python_render
 from geoharness.config.settings import CartographyConfig, ExecutionConfig, GeoConfig
 from geoharness.execution import execute_python
-from geoharness.tools.invocation import PYTHON_INVOCATION_GUIDE
+from geoharness.qgis.artifacts import returned_preview_paths
 
 
 def qgis_diagnostic_files(root: Path) -> tuple[Path, ...]:
@@ -207,13 +207,9 @@ class InputRequirement(BaseModel):
     metric: bool = False
     valid_geometry: bool = False
 
-    code: str = Field(min_length=1, description=("Complete Python script saved as analysis.py. Every call is a fresh process; import/define all names; read sources via DATA_REFS/read_vector/resolve_data; write only to RUN_DIR; never invent helper names or guessed run paths."))
+
 class GeoPythonInput(BaseModel):
-    code: str = Field(min_length=1, description=(
-        "Complete Python script saved as analysis.py. Every call is a fresh process; "
-        "import/define all names; read sources via DATA_REFS/read_vector/resolve_data; "
-        "write only to RUN_DIR; never invent helper names or guessed run paths."
-    ))
+    code: str = Field(min_length=1, description="Complete Python script saved as analysis.py.")
     name: str = Field(
         default="analysis",
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
@@ -228,19 +224,16 @@ class GeoPythonInput(BaseModel):
     )
     input_refs: dict[str, str] = Field(default_factory=dict, max_length=64,
         description="Named exact DATA_REFS IDs or returned artifact paths. Injected as "
-        "INPUTS[name]: Path; use this (or an exact returned path) for prior outputs, never "
-        "a guessed RUN_DIR.")
+        "INPUTS[name]: Path; use for CSV/GeoPackage dependencies across fresh runs.")
     input_requirements: dict[str, InputRequirement] = Field(default_factory=dict, max_length=64,
         description="Optional requirements by input_refs alias: fields, key (unique/non-null), "
         "finite_fields, layer, crs, metric, valid_geometry. Actual files are checked before code.")
     expected_outputs: list[str] = Field(default_factory=list, max_length=64,
-        description="Relative output files required for stage success; missing files fail. "
-        "Declare every required artifact and write it under RUN_DIR.")
+        description="Relative output files required for stage success; missing files fail.")
     stage_id: str = Field(default='', pattern=r'^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63})?$',
         description="Stable analysis step ID, reused after fixes; stores trusted completion.")
     depends_on: list[str] = Field(default_factory=list, max_length=32,
         description="Prior successful stage IDs whose unchanged artifacts this step requires.")
-
 
     @field_validator('expected_outputs')
     @classmethod
@@ -272,6 +265,8 @@ class GeoPythonInput(BaseModel):
         return value
 
 
+class GeoPythonTool(BaseTool):
+    name: str = "geo_python"
     description: str = (
         "Write and run Python for combined spatial analysis or custom maps. "
         "GeoPandas, Shapely, pandas, matplotlib (Agg) and rasterio are available. "
@@ -332,7 +327,6 @@ class GeoPythonInput(BaseModel):
         "use it instead of Point.buffer(0). "
         "Inspect results and send generated PNG maps to geo_map_review before delivery. "
         "Application guards are not an OS sandbox; run only trusted analysis code."
-        + " " + PYTHON_INVOCATION_GUIDE
     )
     input_model: type[BaseModel] = GeoPythonInput
 
