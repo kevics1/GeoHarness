@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from openharness.api.client import ApiMessageCompleteEvent, ApiMessageRequest, ApiRetryEvent
+from openharness.api.errors import RequestFailure
 from openharness.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
 from pydantic import ValidationError
 
@@ -56,6 +57,37 @@ def mock_client(monkeypatch, responses, **settings):
 
     monkeypatch.setattr(client._sdk_client.chat.completions, "create", create)
     return client, calls
+
+
+@pytest.mark.asyncio
+async def test_explicit_max_never_recovers_to_none_and_records_safe_metrics(monkeypatch):
+    client, calls = mock_client(monkeypatch, [streamed(
+        chunk(reasoning="private text", finish="length", usage=(37, 16384)),
+    )], reasoning_effort="max", request_extra_body={"thinking": {"type": "disabled"}},
+        empty_response_fallback_model="test-model(none)",
+        empty_response_fallback_extra_body={"reasoning_effort": "none"})
+    _ = [event async for event in client.stream_message(request())]
+    assert len(calls) == 1
+    assert calls[0]["model"] == request().model
+    assert calls[0]["extra_body"] == {
+        "thinking": {"type": "enabled"}, "reasoning_effort": "max"}
+    metrics = list(client.request_metrics)
+    assert len(metrics) == 1
+    assert metrics[0]["reasoning_effort"] == "max"
+    assert metrics[0]["first_token_seconds"] is not None
+    assert metrics[0]["elapsed_seconds"] >= metrics[0]["first_token_seconds"]
+    assert metrics[0]["input_tokens"] == 37
+    assert "private text" not in json.dumps(metrics)
+
+
+@pytest.mark.asyncio
+async def test_failed_request_also_records_duration_without_exception_body(monkeypatch):
+    client, _ = mock_client(monkeypatch, [streamed(ValueError("secret provider body"))])
+    with pytest.raises(RequestFailure):
+        _ = [event async for event in client.stream_message(request())]
+    metrics = list(client.request_metrics)
+    assert metrics and metrics[0]["error_type"] == "ValueError"
+    assert "secret provider body" not in json.dumps(metrics)
 
 
 @pytest.mark.asyncio

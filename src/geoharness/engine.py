@@ -278,6 +278,9 @@ class GeoQueryEngine(QueryEngine):
         return scope(state) if state is not None and scope is not None else nullcontext()
 
     def _persist_query_mode(self) -> None:
+        metrics = getattr(self._api_client, "request_metrics", None)
+        if metrics is not None:
+            self.tool_metadata["geo_request_metrics"] = list(metrics)
         state = getattr(self, "_query_recovery_state", None)
         if state is not None and state.fallback_active:
             self.tool_metadata["geo_query_recovery"] = {

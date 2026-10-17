@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
@@ -28,6 +29,7 @@ from openharness.engine.messages import ConversationMessage, TextBlock, ToolUseB
 from pydantic import ValidationError
 
 from geoharness.config.settings import AgentConfig
+from geoharness.reasoning import request_extensions
 
 
 @dataclass
@@ -54,6 +56,7 @@ class _RequestState:
     reported_usage: UsageSnapshot = field(default_factory=UsageSnapshot)
     include_stream_usage: bool = True
     record_usage: Callable[[UsageSnapshot], None] | None = None
+    record_metrics: Callable[[dict[str, Any]], None] | None = None
     active_streams: list[Any] = field(default_factory=list)
     owned_streams: list[Any] = field(default_factory=list)
     raw_tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
@@ -147,7 +150,36 @@ class _CompletionProxy:
             state.reasoning_text.clear()
             state.attempt_reasoning_chars = 0
             state.attempt_raw_content_chars = 0
-        stream = await self._completions.create(**params)
+        started = monotonic()
+        first_token = None
+        response_model = None
+        reasoning_tokens = None
+        attempt_usage = UsageSnapshot()
+        recorded = False
+
+        def record(error=None):
+            nonlocal recorded
+            if recorded or state is None or state.record_metrics is None:
+                return
+            recorded = True
+            state.record_metrics({
+                "request_id": state.request_id, "attempt": state.provider_attempts,
+                "model": params.get("model"), "response_model": response_model,
+                "reasoning_effort": (params.get("extra_body") or {}).get("reasoning_effort"),
+                "elapsed_seconds": round(monotonic() - started, 3),
+                "first_token_seconds": first_token,
+                "input_tokens": attempt_usage.input_tokens,
+                "output_tokens": attempt_usage.output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "finish_reason": state.finish_reason,
+                "error_type": type(error).__name__ if error else None,
+            })
+
+        try:
+            stream = await self._completions.create(**params)
+        except BaseException as exc:
+            record(exc)
+            raise
         observes_sse = False
         if state is not None:
             state.active_streams.append(stream)
@@ -161,9 +193,12 @@ class _CompletionProxy:
                 state.raw_chunk_source = "sse"
 
         async def observed_stream() -> AsyncIterator[Any]:
+            nonlocal first_token, response_model, reasoning_tokens, attempt_usage
             previous_usage = UsageSnapshot()
+            error = None
             try:
                 async for chunk in stream:
+                    response_model = getattr(chunk, "model", None) or response_model
                     if state is not None and not observes_sse:
                         _record_packet(state, "sdk_chunk")
                     if state is not None and chunk.usage:
@@ -172,6 +207,11 @@ class _CompletionProxy:
                             input_tokens=max(chunk.usage.prompt_tokens or 0, 0),
                             output_tokens=max(chunk.usage.completion_tokens or 0, 0),
                         )
+                        attempt_usage = usage
+                        details = getattr(chunk.usage, "completion_tokens_details", None)
+                        observed = getattr(details, "reasoning_tokens", None)
+                        if isinstance(observed, int):
+                            reasoning_tokens = observed
                         delta_usage = UsageSnapshot(
                             input_tokens=max(usage.input_tokens - previous_usage.input_tokens, 0),
                             output_tokens=max(
@@ -190,6 +230,8 @@ class _CompletionProxy:
                         delta = choice.delta
                         state.finish_reason = choice.finish_reason or state.finish_reason
                         reasoning = getattr(delta, "reasoning_content", None) or ""
+                        if first_token is None and (reasoning or delta.content or delta.tool_calls):
+                            first_token = round(monotonic() - started, 3)
                         state.reasoning_chars += len(reasoning)
                         state.attempt_reasoning_chars += len(reasoning)
                         if reasoning:
@@ -207,8 +249,14 @@ class _CompletionProxy:
                                     entry["name"] = tool.function.name
                                 entry["arguments"] += tool.function.arguments or ""
                     yield chunk
+            except BaseException as exc:
+                error = exc
+                raise
             finally:
-                await _close_provider_stream(stream, state)
+                try:
+                    await _close_provider_stream(stream, state)
+                finally:
+                    record(error)
 
         return observed_stream()
 
@@ -246,6 +294,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
     ) -> None:
         super().__init__(api_key, base_url=base_url, timeout=timeout)
         self.settings = settings or AgentConfig()
+        self.request_metrics: deque[dict[str, Any]] = deque(maxlen=64)
         self.data_context_provider: Callable[[], str] | None = None
         self._request_state: ContextVar[_RequestState | None] = ContextVar(
             "geoharness_api_request", default=None,
@@ -567,9 +616,12 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         self._tool_argument_diagnostics.set(None)
         usage = UsageSnapshot()
         current = request
-        extras = dict(self.settings.request_extra_body)
-        fallback_extras = {**extras, **self.settings.empty_response_fallback_extra_body}
-        fallback_model = self.settings.empty_response_fallback_model.strip() or request.model
+        extras = request_extensions(
+            self.settings.request_extra_body, self.settings.reasoning_effort)
+        fallback_extras = ({**extras, **self.settings.empty_response_fallback_extra_body}
+                           if self.settings.reasoning_effort is None else extras)
+        fallback_model = ((self.settings.empty_response_fallback_model.strip() or request.model)
+                          if self.settings.reasoning_effort is None else request.model)
         if self._has_active_recovery(query_state, request, fingerprint):
             current = replace(request, model=query_state.model,
                               max_tokens=min(request.max_tokens, query_state.max_tokens))
@@ -583,6 +635,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
             state = _RequestState(
                 extra_body=extras, include_stream_usage=self.settings.include_stream_usage,
                 record_usage=self._record_usage,
+                record_metrics=self.request_metrics.append,
                 active_streams=query_state.active_streams if query_state is not None else [],
             )
             final: ApiMessageCompleteEvent | None = None
@@ -651,6 +704,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 repair_state = _RequestState(extra_body=fallback_extras,
                     include_stream_usage=self.settings.include_stream_usage,
                     record_usage=self._record_usage, allow_transport_retries=False,
+                    record_metrics=self.request_metrics.append,
                     active_streams=query_state.active_streams if query_state is not None else [])
                 repaired = None
                 try:

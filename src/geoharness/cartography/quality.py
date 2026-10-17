@@ -672,6 +672,7 @@ async def review_map(
     secrets = _review_secrets(config)
     diagnostics: dict[str, Any] = {
         "requested_model": settings.model or config.model,
+        "reasoning_effort": settings.reasoning_effort,
         "backend": backend,
         "stage": "configuration", "request_sent": False,
     }
@@ -791,8 +792,12 @@ async def review_map(
                     "tool_choice": "required",
                     **_token_limit_param_for_model(request.model, request.max_tokens),
                 }
-                if settings.request_extra_body:
-                    params["extra_body"] = settings.request_extra_body
+                from geoharness.reasoning import request_extensions
+
+                extensions = request_extensions(
+                    settings.request_extra_body, settings.reasoning_effort)
+                if extensions:
+                    params["extra_body"] = extensions
                 # Recovery is explicit; internal SDK retries would hide duplicate requests.
                 transport = client._client.with_options(max_retries=0)
                 diagnostics.update(stage="network", request_sent=True)

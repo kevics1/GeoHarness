@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -69,6 +69,8 @@ class AgentConfig(BaseModel):
     internal_todo_path: str = ".geoharness/tasks/TODO.md"
     include_stream_usage: bool = True
     request_extra_body: dict[str, Any] = Field(default_factory=dict)
+    reasoning_effort: Literal["low", "medium", "high", "max"] | None = Field(
+        default=None, description="Explicit thinking policy; recovery keeps the main model/mode.")
     empty_response_retries: int = Field(default=1, ge=0, le=1)
     empty_response_fallback_model: str = ""
     empty_response_fallback_extra_body: dict[str, Any] = Field(default_factory=dict)
@@ -123,6 +125,7 @@ class MapReviewConfig(BaseModel):
         default_factory=dict,
         description="Optional provider request extensions; empty inherits provider defaults.",
     )
+    reasoning_effort: Literal["low", "medium", "high", "max"] | None = None
     # Accepted for existing configuration files; generation has no count or
     # cumulative review-time limit. timeout_seconds still bounds each request.
     max_repairs: int = Field(default=4, ge=0, deprecated=True,

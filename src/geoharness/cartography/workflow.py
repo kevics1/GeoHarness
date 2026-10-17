@@ -341,6 +341,7 @@ async def _review_once(
                     "generation_unlimited",
                 }},
                 "request_extra_body": settings.request_extra_body,
+                "reasoning_effort": settings.reasoning_effort,
             },
             sort_keys=True,
             default=str,
