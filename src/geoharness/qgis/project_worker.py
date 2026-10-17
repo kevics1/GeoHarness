@@ -36,7 +36,7 @@ def _layout_input_digest(payload: dict[str, Any]) -> str:
     bound = {key: value for key, value in payload.items() if key not in {
         "action", "map_id", "output_path", "output_format", "project_format",
         "strict_layout", "_frozen_frames", "_consume_plan",
-        "_creation_spec", "_layout_origin", "_layout_zoom_history",
+        "_creation_spec", "_layout_origin", "_layout_zoom_history", "_candidate_probe",
     }}
     bound["layout"] = {key: value for key, value in (payload.get("layout") or {}).items()
                        if key != "layout_plan"}
@@ -1496,6 +1496,8 @@ def _create_layout(
         if not subject_facts["valid"]:
             error = ValueError("Declared map-frame subjects are missing or incompletely covered")
             error.diagnostics = {"code": "frame_subject_contract_failed", "subjects": subject_facts}
+            error.diagnostics["candidates"] = _measure_layout_candidates(
+                project, layers, extent, payload, context, subjects=subject_facts)
             raise error
     if minimum_zoom is not None and detail is not None:
         zoom = map_item.scale() / detail.scale()
@@ -1538,10 +1540,85 @@ def _create_layout(
                                f"required={minimum_zoom}); use the measured frame/scale "
                                "diagnostics; preserve all required subjects")
                 error.diagnostics = diagnostics
+                error.diagnostics["candidates"] = _measure_layout_candidates(
+                    project, layers, extent, payload, context, zoom_diagnostics=diagnostics)
                 raise error
     _validate_layout_bounds(layout)
     project.layoutManager().addLayout(layout)
     return layout
+
+
+def _measure_layout_candidates(project, layers, extent, payload, context, *,
+                                subjects=None, zoom_diagnostics=None):
+    """Probe at most three alternatives without exporting or applying one to the draft."""
+    from qgis.core import QgsLayoutItemMap, QgsRectangle
+
+    from geoharness.qgis.layout_candidates import apply_candidate, subject_fit_patches
+
+    if payload.get("_candidate_probe") or payload.get("_consume_plan"):
+        return []
+    spec = payload.get("layout") or {}
+    base_digest = _layout_input_digest(payload)
+    fitted = []
+    if subjects:
+        policy = payload.get("_extent_policy") or {}
+        focus_bounds = {}
+        for frame_id, field in (("main_map", "main_frame"), ("detail_map", "detail_frame")):
+            focus = (spec.get(field) or {}).get("focus_layers")
+            if focus:
+                focus_bounds[frame_id] = _rect_values(_focus_bbox(project, layers, focus))
+        fitted = subject_fit_patches(subjects, spec, minimum_span=policy.get(
+            "minimum_span_geographic" if project.crs().isGeographic()
+            else "minimum_span_projected", 0), padding=policy.get("extent_padding", 0),
+            focus_bounds=focus_bounds)
+        if not fitted:
+            return []
+    choices = []
+    if fitted:
+        choices.append(("fit_declared_subjects", fitted))
+    elif zoom_diagnostics:
+        for item in zoom_diagnostics.get("suggestions", []):
+            if item.get("strategy") == "enlarge_detail_frame" and item.get("patches"):
+                choices.append(("enlarge_detail_frame", item["patches"]))
+    if spec.get("detail_frame") is not None or spec.get("detail_extent") is not None:
+        choices.append(("separate_detail_page", [*fitted,
+            {"path": ["layout", "detail_placement"], "value": "page"}]))
+    if spec.get("label_table"):
+        choices.append(("separate_roster_page", [*fitted,
+            {"path": ["layout", "label_table", "placement"], "value": "pages"}]))
+    results, seen = [], set()
+    for strategy, patches in choices[:3]:
+        candidate = apply_candidate(payload, patches)
+        digest = _layout_input_digest(candidate)
+        if digest in seen or digest == base_digest:
+            continue
+        seen.add(digest)
+        record = {"strategy": strategy, "base_input_digest": base_digest, "patches": patches,
+                  "requires_native_preflight": True, "automatic_application": False,
+                  "scope": "all declared selections; no count/coverage/zoom relaxation"}
+        measured = None
+        try:
+            candidate_extent = (QgsRectangle(*candidate["map_extent"])
+                if candidate.get("_explicit_map_extent") else extent)
+            measured = _create_layout(project, layers, candidate_extent, candidate, context)
+            frames = _plan_frames(measured, project, layers, candidate)
+            checks = _declared_frame_evidence(project, layers, candidate, frames)
+            main, detail = (measured.itemById(name) for name in ("main_map", "detail_map"))
+            zoom = (main.scale() / detail.scale()
+                    if isinstance(detail, QgsLayoutItemMap) else None)
+            record.update(validation_status="native_preflight_passed",
+                          subjects_valid=checks["valid"],
+                          actual_zoom=zoom, frames=frames,
+                          page_count=measured.pageCollection().pageCount(),
+                          effective_parameters=_layout_metadata(measured)["effective_parameters"])
+        except (ValueError, RuntimeError) as exc:
+            record.update(validation_status="failed", error_summary=str(exc)[:500],
+                          failure_code=getattr(exc, "diagnostics", {}).get("code"))
+        finally:
+            if measured is not None:
+                project.layoutManager().removeLayout(measured)
+        results.append(record)
+    return results
 
 
 def _detail_zoom_satisfied(actual: float, required: float) -> bool:
@@ -1605,10 +1682,12 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float, *,
                 "patches": [{"path": ["layout", key], "value": value}
                             for key, value in dimensions.items() if spec.get(key) != value],
                 "requires_native_preflight": True,
+                "validation_status": "unverified_formula",
+                "executable": False,
                 "assumptions": "Keep the measured main frame and both extents unchanged; "
                                "the raw needed size is a measurement, not a new API field. "
-                               "Only patches within public_limits are executable candidates; "
-                               "coupled scales must be measured again.",
+                               "Patches within public_limits are eligible for native measurement; "
+                               "only native_preflight_passed candidates have been checked.",
             },
             {
                 "strategy": "smaller_detail_extent_if_subjects_fit",
@@ -1619,6 +1698,8 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float, *,
                 },
                 "crs": detail_facts["crs"],
                 "automatic_application": False,
+                "validation_status": "unverified_formula",
+                "executable": False,
                 "also_clear_if_present": "layout.detail_frame.focus_layers",
                 "required_check": "Candidate assumes unchanged measured frames/main scale. "
                                   "Verify every required subject remains covered before using; "
@@ -1628,6 +1709,8 @@ def _detail_zoom_diagnostics(main: Any, detail: Any, required_zoom: float, *,
                 "strategy": "separate_detail_map",
                 "patches": [{"path": ["layout", "detail_placement"], "value": "page"}],
                 "requires_native_preflight": True,
+                "validation_status": "unverified_formula",
+                "executable": False,
                 "instruction": "If required subjects do not fit, retain their coverage and "
                                "use the real separate detail page. This does not promise the "
                                "requested zoom when the subject covers the whole overview.",

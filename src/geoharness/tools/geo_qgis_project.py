@@ -935,6 +935,25 @@ class GeoQgisProjectTool(BaseTool):
             result = ToolResult(output=json.dumps(visible, ensure_ascii=False),
                                 is_error=result.is_error,
                                 metadata={**result.metadata, 'spec_ref': spec_reference})
+        elif spec_reference and result.is_error:
+            # Candidate edits are bound to the exact immutable draft that failed, never
+            # silently retargeted to a newer source/layout revision.
+            candidates = (result.metadata.get("diagnostics") or {}).get("candidates", [])
+            calls = [{"strategy": item["strategy"], "base_spec_ref": spec_reference,
+                      "base_input_digest": item["base_input_digest"],
+                      "measured_zoom": item.get("actual_zoom"),
+                      "edit_call": {"action": "spec", "spec_ref": spec_reference,
+                                    "patches": item["patches"]}}
+                     for item in candidates
+                     if item.get("validation_status") == "native_preflight_passed"]
+            recovery = {"spec_ref": spec_reference,
+                        "inspect_call": {"action": "inspect", "spec_ref": spec_reference},
+                        "candidate_edit_calls": calls,
+                        "note": "Edits target this immutable spec only; preflight the new spec "
+                                "and use its returned create_call. No candidate was applied."}
+            result = ToolResult(output=result.output + "\n" + json.dumps(recovery,
+                ensure_ascii=False), is_error=True,
+                metadata={**result.metadata, **recovery})
         return result
 
     async def _execute(self, arguments, context, snapshot_directory=None,

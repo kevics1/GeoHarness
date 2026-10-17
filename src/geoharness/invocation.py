@@ -22,7 +22,8 @@ QGIS_CAUTIONS = (
     "Each frame: FIT focus_layers OR explicit extent, never both. "
     "render_layers must include focus_layers/label_layers; a detail needs a range source.",
     "Keep stable layer_key and declared subject requirements. Extent tightening must "
-    "preserve coverage; actual zoom is main_scale/detail_scale after native fitting.",
+    "preserve coverage; actual zoom is main_scale/detail_scale after native fitting. "
+    "Use returned candidate_edit_calls on their exact base_spec_ref, then preflight again.",
     "Diagnostic detail_path/offset/limit are read-only help/inspect selectors. "
     "Do not copy them into create/preflight/spec.",
     "Roster key_field (or first field) is unique/non-null; top_n requires sort_by and "
