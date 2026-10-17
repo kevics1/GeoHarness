@@ -694,9 +694,10 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
             repair_request = self._argument_recovery_request(current, final, state)
             if repair_request is not None:
                 recovery, aliases = repair_request
-                recovery = replace(recovery, model=fallback_model, max_tokens=min(
-                    current.max_tokens, self.settings.empty_response_max_tokens
-                    or current.max_tokens))
+                recovery = replace(recovery, model=fallback_model, max_tokens=(
+                    current.max_tokens if self.settings.reasoning_effort is not None else min(
+                        current.max_tokens, self.settings.empty_response_max_tokens
+                        or current.max_tokens)))
                 yield ApiRetryEvent(message=(
                     f"工具参数因输出截断未完成；仅恢复 {len(aliases)} 个残缺调用，"
                     f"临时使用 {fallback_model}。完整调用和既有结果保留，不重复执行。"

@@ -241,8 +241,9 @@ async def test_exhausted_provider_token_budget_has_actionable_unverified_status(
     "finish_reason, expected", [("tool_calls", "passed"), ("length", "unverified")],
 )
 @pytest.mark.parametrize("options", [{}, {"thinking": {"type": "disabled"}}])
+@pytest.mark.parametrize("effort", [None, "max"])
 async def test_owned_reviewer_passes_provider_options_and_records_transport_evidence(
-    tmp_path, monkeypatch, finish_reason, expected, options,
+    tmp_path, monkeypatch, finish_reason, expected, options, effort,
 ):
     from PIL import Image
 
@@ -285,13 +286,16 @@ async def test_owned_reviewer_passes_provider_options_and_records_transport_evid
     Image.new("RGB", (10, 10)).save(path)
     config = GeoConfig(
         model="configured-main-model", api_key="test-only",
-        map_review=MapReviewConfig(request_extra_body=options),
+        map_review=MapReviewConfig(request_extra_body=options, reasoning_effort=effort),
     )
     result = await review_map(path, config=config, task="Check", evidence={})
     assert result.status == expected
     assert requests[0]["model"] == config.model
     assert requests[0]["stream"] is False
-    if options:
+    if effort:
+        assert requests[0]["extra_body"] == {
+            **options, "thinking": {"type": "enabled"}, "reasoning_effort": "max"}
+    elif options:
         assert requests[0]["extra_body"] == options
     else:
         assert "extra_body" not in requests[0]

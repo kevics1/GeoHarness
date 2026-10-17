@@ -152,8 +152,10 @@ async def build_geo_runtime(
     # Refresh between model turns, including continue_pending; do not duplicate
     # data profiles in the persisted conversation or expose configuration secrets.
     from geoharness.data.task_context import model_data_context
+    from geoharness.task_budget import budget_context
 
-    api_client.data_context_provider = lambda: model_data_context(
+    api_client.data_context_provider = lambda: budget_context(
+        engine.tool_metadata, config) + model_data_context(
         engine.tool_metadata, cwd=cwd, config=config,
     )
 

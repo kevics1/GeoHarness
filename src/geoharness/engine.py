@@ -48,6 +48,9 @@ class GeoQueryEngine(QueryEngine):
         reset_map_workflow(self.tool_metadata)
         config = self.tool_metadata.get("geoharness_config")
         if config is not None:
+            from geoharness.task_budget import start_task
+
+            start_task(self.tool_metadata, config)
             begin_map_request(self.tool_metadata, cwd=self._cwd, config=config,
                               continuation=continuation)
         if user_message.text.strip() and not self._tool_metadata.pop(
@@ -95,6 +98,13 @@ class GeoQueryEngine(QueryEngine):
             self._settle_usage()
 
     async def continue_pending(self, *, max_turns: int | None = None) -> AsyncIterator[StreamEvent]:
+        from geoharness.task_budget import budget_status, start_task
+
+        config = self.tool_metadata.get("geoharness_config")
+        if config is not None and budget_status(self.tool_metadata, config).get(
+                "phase") == "deadline":
+            # Explicit user continuation opens a new time window; automatic batches do not.
+            start_task(self.tool_metadata, config)
         context = QueryContext(
             api_client=self._api_client, tool_registry=self._tool_registry,
             permission_checker=self._permission_checker, cwd=self._cwd,
@@ -152,6 +162,15 @@ class GeoQueryEngine(QueryEngine):
                 # run_query appends its tool results after yielding the final
                 # ToolExecutionCompleted; preserve that final mutation as well.
                 self._messages[:] = messages
+                from geoharness.task_budget import budget_status
+
+                if config is not None and budget_status(self.tool_metadata, config).get(
+                        "phase") == "deadline":
+                    yield ErrorEvent(message=(
+                        "已到任务时间目标，停止自动追加回合。已有工具结果和产物已保留；"
+                        "未完成检查仍为未验证，可明确继续处理。"
+                    )), None
+                    return
                 if not automatic or not self.has_pending_continuation():
                     raise
                 last_results = [

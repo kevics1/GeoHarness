@@ -63,6 +63,8 @@ class AgentConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     max_tokens: int = Field(default=16384, ge=1024, le=65536)
+    task_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
+    delivery_reserve_seconds: float = Field(default=180, ge=0, le=3600)
     auto_continue: bool = Field(default=True, description=(
         "Continue pending tool results after a turn batch when new successful progress exists."
     ))

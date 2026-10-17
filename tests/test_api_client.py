@@ -91,6 +91,21 @@ async def test_failed_request_also_records_duration_without_exception_body(monke
 
 
 @pytest.mark.asyncio
+async def test_max_argument_recovery_keeps_effort_model_and_output_budget(monkeypatch):
+    client, calls = mock_client(monkeypatch, [
+        streamed(chunk(tool_calls=[tool_delta('{"code":"cut')], finish="length")),
+        streamed(chunk(tool_calls=[tool_delta('{"code":"fixed"}', name="geoharness_repair_0")],
+                       finish="tool_calls")),
+    ], reasoning_effort="max", empty_response_fallback_model="test-model(none)",
+        empty_response_max_tokens=1024)
+    events = [event async for event in client.stream_message(request())]
+    assert events[-1].message.tool_uses[0].input == {"code": "fixed"}
+    assert len(calls) == 2
+    assert all(c["model"] == request().model and c["max_tokens"] == 16384
+               and c["extra_body"]["reasoning_effort"] == "max" for c in calls)
+
+
+@pytest.mark.asyncio
 async def test_verified_data_context_refreshes_without_changing_saved_messages(monkeypatch):
     client, calls = mock_client(monkeypatch, [
         streamed(chunk(text="one", finish="stop")),
