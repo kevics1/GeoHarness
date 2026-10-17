@@ -109,7 +109,7 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
                                       'RasterShapeError', 'inconsistent with given indexes')):
         hints.append('Inspect ndim/shape at read, stack and write boundaries. rasterio read(1) '
                      'is 2D; another [0] removes a spatial axis. mask_raster returns '
-                     '(array, transform), with array=(bands, rows, columns). RGB writers '
+                     '(array, transform), normally band-first (indexes=int gives 2D). RGB writers '
                      'require 3D band-first arrays and matching count/height/width.')
     if any(text in stderr for text in ('FileNotFoundError', 'does not exist in the file system',
                                       'No such file or directory')):
@@ -145,7 +145,8 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
     if "NameError:" in stderr and "is not defined" in stderr:
         hints.append("Each geo_python call starts fresh: define/import every function and "
                      "variable in this script. resolve_data, read_vector, native_layer, "
-                     "mask_raster, entity_join, score_risk and sample_raster_points are injected; "
+                     "mask_raster, read_raster, write_raster, raster_backdrop, entity_join, "
+                     "score_risk and sample_raster_points are injected; "
                      "earlier scripts do not "
                      "supply definitions to this run.")
         if "name 'print_stats' is not defined" in stderr:
@@ -292,8 +293,13 @@ class GeoPythonTool(BaseTool):
         "Unknown/ambiguous/stale refs are rejected; never force one shapefile encoding. "
         "INPUTS:dict[alias,Path] comes from input_refs; GEO_DATA is metadata by path and "
         "PREVIOUS_OUTPUTS:list[Path] contains prior artifacts, newest first. "
-        "Helpers: mask_raster(path,CRS-bearing GeoSeries/GeoDataFrame,**options)->"
-        "(array,transform); native_layer(ref,derivation=None,name=None,style=None,"
+        "Helpers: read_raster(path,bands=None,out_shape=(rows,columns),resampling='nearest',"
+        "geometries=None)->RasterData(array masked band-first,crs,transform,nodata); "
+        "write_raster(path,RasterData or array,crs=...,transform=...,nodata=...) writes GeoTIFF; "
+        "raster_backdrop(source,output,band=1,out_shape=None,geometries=None,rgb=False) "
+        "makes a display-only uint8 stretch (zero nodata). Prefer these for standard "
+        "clip/resample/backdrop work. mask_raster(path,CRS-bearing GeoSeries/GeoDataFrame,"
+        "**options)->(array,transform); native_layer(ref,derivation=None,name=None,style=None,"
         "label_field=None,label_style=None,layer_name=None) retains source/provenance; "
         "entity_join(source,table,key=...) joins by identity; score_risk uses explicit "
         "assumed weights; sample_raster_points(path,points,band=1) handles point CRS. "
@@ -481,7 +487,15 @@ class GeoPythonTool(BaseTool):
             "projection": "Reproject GeoDataFrame/GeoSeries, not iterrows() pandas Series rows",
             "native_layer": "ref, derivation=None -> layer retaining original source/provenance",
             "mask_raster": "CRS-aware GeoSeries/GeoDataFrame masking -> (array, Affine transform); "
-                           "array shape=(bands, rows, columns); source data unchanged",
+                           "default array shape=(bands, rows, columns); indexes=int gives 2D; "
+                           "source data unchanged",
+            "read_raster": "path,bands=None,out_shape=(rows,columns),resampling='nearest',"
+                           "geometries=None -> RasterData(array masked 3D,crs,transform,nodata)",
+            "write_raster": "path,RasterData or 3D array,crs=None,transform=None,nodata=... "
+                            "-> GeoTIFF Path; raw arrays require CRS/transform",
+            "raster_backdrop": "source,output,band=1,out_shape=None,geometries=None,"
+                               "percentiles=(2,98),rgb=False,resampling='nearest' -> Path; "
+                               "display stretch only, not analytical reclassification",
         }
         if status != "succeeded":
             if reserved:

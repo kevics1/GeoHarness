@@ -52,6 +52,19 @@ def _artifact_contracts():
     return sys.modules[name]
 
 
+def _raster_helpers():
+    import importlib.util
+
+    name = "_geoharness_raster_helpers"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).with_name("raster.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def _child_environment(run_dir: Path) -> dict[str, str]:
     """Pass only runtime essentials; never copy the parent's credential environment."""
     result = {
@@ -688,6 +701,11 @@ def mask_raster(raster_path: Any, geometries: Any, **options: Any) -> Any:
     from rasterio.mask import mask
     from shapely.geometry import box
 
+    unsupported = set(options) - set(inspect.signature(mask).parameters)
+    if unsupported:
+        raise TypeError(f"mask_raster unsupported options={sorted(unsupported)}; "
+                        "rasterio.mask.mask uses nodata, not fill_value; "
+                        f"installed signature={inspect.signature(mask)}")
     if not isinstance(geometries, (gpd.GeoSeries, gpd.GeoDataFrame)) or geometries.crs is None:
         raise ValueError("mask_raster requires a GeoSeries/GeoDataFrame with verified source CRS; "
                          "bare Shapely geometries have no CRS")
@@ -866,6 +884,7 @@ def _child_main() -> None:
 
     contracts = _contracts()
     _artifact_contracts()
+    raster_helpers = _raster_helpers()
     tracker = contracts.EntityTracker()
     _install_guards(spec, tracker)
     input_checks = {}
@@ -885,6 +904,9 @@ def _child_main() -> None:
         "PREVIOUS_OUTPUTS": [Path(value) for value in spec.get("previous_outputs", [])],
         "INPUTS": {key: Path(value) for key, value in spec.get("input_artifacts", {}).items()},
         "mask_raster": mask_raster,
+        "read_raster": raster_helpers.read_raster,
+        "write_raster": raster_helpers.write_raster,
+        "raster_backdrop": raster_helpers.raster_backdrop,
         "entity_join": contracts.entity_join,
         "score_risk": contracts.score_risk,
         "sample_raster_points": contracts.sample_raster_points,

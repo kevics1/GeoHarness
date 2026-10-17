@@ -572,3 +572,26 @@ Python 强调每次运行都是新进程、使用真实返回路径、核对字�
 render 必须包含 focus/label、只读诊断选择器不能带进修改请求、冻结创建只用返回的
 `action+plan_ref`，以及名录稳定键和真实布局测量。部分跨字段错误会返回精确字段、
 关联字段和实际缺失图层，不静默修改用户要求。
+
+## Python 栅格快捷操作
+
+`read_raster(path, bands=None, out_shape=None, resampling="nearest", geometries=None)`
+返回 `RasterData`，包含 `array`、`crs`、`transform`、`nodata`。`array` 始终是带 mask 的
+`(bands, rows, columns)` 三维数组；`bands=1` 也保留波段轴。`out_shape` 是 `(rows, columns)`，
+改变分辨率时同步更新变换矩阵；裁剪使用带 CRS 的 GeoSeries/GeoDataFrame，并变换到源栅格 CRS。
+裁剪范围对齐实际像元窗口，坐标边界附近的浮点舍入可能增加一个边界像元，仍以返回 transform 为准。
+
+`write_raster(path, data, crs=None, transform=None, nodata=...)` 写 GeoTIFF。
+`data` 可直接使用 `read_raster` 返回值；原始数组必须是三维并显式提供 CRS 与 Affine。
+该接口拒绝把二维 RGB 错误数组当作单波段、拒绝无 CRS/无效变换、拒绝有效像元与 NoData 冲突。
+原始 Rasterio 仍可使用；`read(1)` 是二维，`mask_raster(..., indexes=1)` 也可为二维，
+不能不看实际 `shape` 就追加 `[0]`。
+
+`raster_backdrop(source, output, band=1, out_shape=None, geometries=None, percentiles=(2,98),
+rgb=False, resampling="nearest")` 生成显示用灰度/RGB底图，保留地理信息和掩膜，
+零值保留给 NoData，有效灰度使用 1–255。它是显示拉伸，不是分析重分类或风险计算；
+不修改源栅格，插值方法由调用者按数据类型选择。
+
+TIFF 输出会读回检查 band/row/column、CRS 和变换矩阵；这只验证栅格元信息契约，
+不代表所有像元或科学分析正确。错误分类区分 API 参数、数组维度、权限等确定性原因，
+只有已识别的瞬态失败建议原样重试。

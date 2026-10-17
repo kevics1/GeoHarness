@@ -12,6 +12,10 @@ from geoharness.data.artifacts import assert_usable_artifact, sha256_file
 def classify_failure(message: str) -> dict:
     rules = (
         ("syntax", ("SyntaxError", "IndentationError", "invalid_json")),
+        ("api_contract", ("unexpected keyword argument", "unsupported options=")),
+        ("array_shape", ("RasterShapeError", "Source shape", "tuple index out of range",
+                          "inconsistent with given indexes")),
+        ("permission", ("PermissionError", "outside allowed data/runtime directories")),
         ("dependency", ("ModuleNotFoundError", "Required dependency")),
         ("entity_integrity", ("Entity/geometry mismatch", "Entity key")),
         ("crs_geometry", ("CRS", "geometry", "NaN", "nonfinite")),

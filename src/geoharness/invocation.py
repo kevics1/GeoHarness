@@ -8,7 +8,8 @@ PYTHON_CAUTIONS = (
     "Inspect actual intermediate columns/CRS and library signatures before use; "
     "input_requirements does not type-check arbitrary code.",
     "Rasterio read(1) is 2D: do not blindly append [0]. mask_raster returns "
-    "(array, transform), array=(bands, rows, columns); inspect shape before stacking/writing.",
+    "(array, transform), normally band-first (indexes=int gives 2D); inspect shape before "
+    "stacking/writing. Prefer read_raster/write_raster for an always-3D array contract.",
     "Keep verified CRS/transform/nodata with raster arrays; use nodata, not fill_value, "
     "for rasterio.mask.mask. Write only RUN_DIR; preserve source data.",
     "After failure inspect the measured cause, change that input/code, and rerun only "

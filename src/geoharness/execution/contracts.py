@@ -9,6 +9,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -331,6 +332,23 @@ def artifact_metadata(path: Path, *, succeeded: bool) -> dict:
             table = pd.read_csv(path)
             record.update(row_count=len(table), schema={str(k): str(v)
                           for k, v in table.dtypes.items()})
+        elif path.suffix.lower() in {".tif", ".tiff"}:
+            import rasterio
+
+            with rasterio.open(path) as source:
+                if source.crs is None or min(source.count, source.height, source.width) <= 0:
+                    raise ValueError("Raster output requires CRS and positive "
+                                     "band/row/column sizes")
+                transform = tuple(source.transform)
+                if not all(math.isfinite(v) for v in transform) \
+                        or source.transform.determinant == 0:
+                    raise ValueError("Raster output has invalid/nonfinite transform")
+                record.update(crs=str(source.crs),
+                              shape=[source.count, source.height, source.width],
+                              transform=list(transform), dtypes=list(source.dtypes),
+                              validation_state="passed",
+                              validation_scope="raster shape/CRS/transform metadata only; "
+                                               "pixel/scientific correctness unverified")
     except Exception as exc:
         record.update(state="failed", validation_state="failed", error_summary=str(exc))
     return record
