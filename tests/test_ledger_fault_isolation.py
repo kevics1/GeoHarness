@@ -150,6 +150,10 @@ async def test_delivery_registration_failure_preserves_copied_manifest(tmp_path,
     assert not result.is_error, result.output
     assert result.metadata['quality_status'] == 'draft'
     assert result.metadata['receipt_status'] == 'failed'
+    assert result.metadata['delivery_status'] == 'copied_unregistered'
+    assert 'delivery files exist' in result.metadata['next_action']
+    assert 'receipt_path' not in result.metadata
+    assert result.metadata['map_receipt']['quality_status'] == 'draft'
     assert Path(result.metadata['primary_map']).is_file()
     manifest = json.loads(Path(result.metadata['manifest_path']).read_text(encoding='utf-8'))
     assert 'injected registration failure' in manifest['ledger_errors'][0]
@@ -198,3 +202,35 @@ async def test_health_read_calls_preserve_history_window_and_root_pagination(tmp
         text += image['value']
     assert text == job['versions'][3]['image_path']
     assert receipt.read_bytes() == before
+
+
+async def test_delivery_postcopy_read_failure_returns_copied_unregistered_files(
+    tmp_path, monkeypatch,
+):
+    from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
+
+    path = tmp_path / "preview.png"
+    Image.new("RGB", (8, 8), "red").save(path)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    original = jobs.map_job_receipt
+    reads = 0
+
+    def read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 3:
+            raise ValueError("injected postcopy receipt read failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(jobs, "map_job_receipt", read)
+    result = await GeoDeliverTool().execute(GeoDeliverInput(primary_map=str(path)), context)
+    assert reads == 3
+    assert not result.is_error, result.output
+    assert result.metadata["delivery_status"] == "copied_unregistered"
+    assert result.metadata["receipt_status"] == "failed"
+    assert result.metadata["quality_status"] == "draft"
+    assert "receipt_path" not in result.metadata
+    assert Path(result.metadata["primary_map"]).read_bytes() == path.read_bytes()
+    manifest = json.loads(Path(result.metadata["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["ledger_errors"] == ["injected postcopy receipt read failure"]
+    assert manifest["map_receipt"]["quality_status"] == "draft"

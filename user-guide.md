@@ -549,3 +549,5 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 
 
 若复制成果已经完成而台账登记在最后失败，交付仍返回实际目录和delivery.json，标记receipt_status=failed、quality_status=draft并保留ledger_errors；这不把草稿提升为已核验成果。活跃修改期间不能迁移同一地图台账，普通只读健康查询仍可使用。无效矢量输出会给出有界行号和有效性原因；坐标变换后应再次验证，不能因原投影中有效就跳过目标投影检查。
+
+交付复制结束后的台账读取或登记失败，会返回 `delivery_status="copied_unregistered"`、`receipt_status="failed"`、`quality_status="draft"`、真实目录和 `next_action`。此时不生成过时的 `map-receipt.json`；先保存已返回的文件，再检查或恢复台账。复制前默认候选校验仍会拒绝不可读台账，显式selected草稿恢复除外。

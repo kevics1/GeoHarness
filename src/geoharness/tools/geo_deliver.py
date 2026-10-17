@@ -162,20 +162,23 @@ class GeoDeliverTool(BaseTool):
 
             ledger_errors = []
 
-            def read_receipt(*args, **kwargs):
+            def unregistered_receipt():
+                return {"job_id": None, "map_id": None, "status": "draft",
+                        "quality_status": "draft", "versions": [],
+                        "stages": {key: {"status": "unverified"} for key in (
+                            "data_checked", "rendered", "layout_checked", "visual_checked",
+                            "packaged", "delivered")}}
+
+            def read_receipt(*args, after_copy=False, **kwargs):
                 try:
                     return map_job_receipt(*args, **kwargs)
                 except (OSError, ValueError) as exc:
-                    if arguments.version_policy != "selected" or not (
-                            arguments.primary_map or arguments.files):
+                    if not after_copy and (arguments.version_policy != "selected" or not (
+                            arguments.primary_map or arguments.files)):
                         raise ValueError(f"Ledger unavailable: {exc}. Inspect/recover the map, "
                             "or explicitly use version_policy=selected with actual draft files")
                     ledger_errors.append(str(exc))
-                    return {"job_id": None, "map_id": None, "status": "draft",
-                            "quality_status": "draft", "versions": [],
-                            "stages": {key: {"status": "unverified"} for key in (
-                                "data_checked", "rendered", "layout_checked", "visual_checked",
-                                "packaged", "delivered")}}
+                    return unregistered_receipt()
 
             files = [resolve(value) for value in arguments.files]
             primary = resolve(arguments.primary_map) if arguments.primary_map else None
@@ -458,6 +461,7 @@ class GeoDeliverTool(BaseTool):
                 cwd=workspace,
                 config=config,
                 artifact_path=primary or (preview if project_files else None),
+                after_copy=True,
             )
             verified = (
                 verified
@@ -492,7 +496,7 @@ class GeoDeliverTool(BaseTool):
                 ),
             }
             manifest = destination / "delivery.json"
-            if receipt.get("job_id"):
+            if receipt.get("job_id") and not payload["ledger_errors"]:
                 from geoharness.cartography.jobs import record_map_delivery
 
                 try:
@@ -508,12 +512,22 @@ class GeoDeliverTool(BaseTool):
                     payload['quality_status'] = 'draft'
                 if receipt.get("status") == "stale" or receipt.get("quality_status") != "passed":
                     payload["quality_status"] = "draft"
-                receipt_file = destination / "map-receipt.json"
-                receipt_file.write_text(
-                    json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8"
+                if payload.get("receipt_status") != "failed":
+                    receipt_file = destination / "map-receipt.json"
+                    receipt_file.write_text(
+                        json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    payload["map_receipt"] = receipt_summary(receipt)
+                    payload["receipt_path"] = str(receipt_file)
+            if payload["ledger_errors"]:
+                # Copying is complete, but an old receipt cannot certify this delivery.
+                receipt = unregistered_receipt()
+                payload.update(
+                    delivery_status="copied_unregistered", receipt_status="failed",
+                    quality_status="draft", map_receipt=receipt_summary(receipt),
+                    next_action="The delivery files exist at delivery_dir. Inspect/recover the "
+                                "map ledger before retrying registration; quality is unverified.",
                 )
-                payload["map_receipt"] = receipt_summary(receipt)
-                payload["receipt_path"] = str(receipt_file)
             from geoharness.cartography.delivery_summary import write_delivery_summary
 
             payload.update(write_delivery_summary(
