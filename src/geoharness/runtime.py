@@ -78,6 +78,12 @@ async def build_geo_runtime(
     # 1. Load GeoHarness config (from ~/.geoharness/config.yaml)
     config = config_override or load_geo_config(config_path)
     logger.info("GeoHarness config loaded: model=%s", config.model)
+    from geoharness.cartography.review_config import review_configuration
+
+    reviewer = review_configuration(config)
+    logger.info("Image reviewer: model=%s source=%s reasoning=%s format=%s",
+                reviewer["model"], reviewer["model_source"], reviewer["reasoning_effort"],
+                reviewer["response_format"])
 
     # 2. Build API client directly (bypasses resolve_auth profile override)
     api_client = _build_api_client(config)

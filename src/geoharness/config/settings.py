@@ -128,6 +128,11 @@ class MapReviewConfig(BaseModel):
         description="Optional provider request extensions; empty inherits provider defaults.",
     )
     reasoning_effort: Literal["low", "medium", "high", "max"] | None = None
+    response_format: Literal["tool", "json"] = Field(
+        default="tool",
+        description=("Review response contract: function calling or JSON text; "
+                     "no automatic fallback."),
+    )
     # Accepted for existing configuration files; generation has no count or
     # cumulative review-time limit. timeout_seconds still bounds each request.
     max_repairs: int = Field(default=4, ge=0, deprecated=True,
@@ -153,6 +158,12 @@ class MapReviewConfig(BaseModel):
     diagnostics_max_chars: int = Field(default=2048, ge=128, le=8192)
     max_validation_errors: int = Field(default=12, ge=1, le=50)
     layout: MapLayout = Field(default_factory=MapLayout)
+
+    @field_validator("reasoning_effort", "response_format", mode="before")
+    @classmethod
+    def normalize_review_options(cls, value: Any) -> Any:
+        """Hand-edited option spelling is case insensitive; model identifiers are not."""
+        return value.strip().lower() if isinstance(value, str) else value
 
 # Pattern for ${VAR} expansion in config values
 _VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
@@ -419,6 +430,13 @@ def _parse_permissions(raw: dict[str, Any] | None) -> PermissionsConfig:
     )
 
 
+def resolve_config_path(config_path: Path | None = None) -> Path:
+    """Resolve the same explicit/environment/default location for CLI and runtime."""
+    if config_path is None and os.environ.get("GEOH_CONFIG_PATH"):
+        config_path = Path(os.environ["GEOH_CONFIG_PATH"])
+    return (config_path or Path.home() / ".geoharness" / "config.yaml").expanduser()
+
+
 def load_geo_config(config_path: Path | None = None) -> GeoConfig:
     """Load GeoHarness configuration from YAML file.
 
@@ -433,13 +451,8 @@ def load_geo_config(config_path: Path | None = None) -> GeoConfig:
         GeoConfig dataclass with all configuration.
     """
     # Determine config directory and file
-    if config_path is None and os.environ.get("GEOH_CONFIG_PATH"):
-        config_path = Path(os.environ["GEOH_CONFIG_PATH"]).expanduser()
-    if config_path is None:
-        config_dir = Path.home() / ".geoharness"
-        config_path = config_dir / "config.yaml"
-    else:
-        config_dir = config_path.parent
+    config_path = resolve_config_path(config_path)
+    config_dir = config_path.parent
 
     # Load .env file first (does not override existing env vars)
     _load_env(config_dir)

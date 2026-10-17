@@ -35,7 +35,7 @@ class PixelReview(BaseModel):
         default_factory=list, max_length=5)
 
 
-def pixel_prompt(task: str, evidence: dict[str, Any]) -> str:
+def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "tool") -> str:
     """Only page purpose is context; engineering tables never enter this request."""
     metadata = evidence.get("render_metadata") or {}
     page_index = metadata.get("review_page_index", 0)
@@ -60,8 +60,11 @@ def pixel_prompt(task: str, evidence: dict[str, Any]) -> str:
         "风格偏好不单独判为错误。无法判断的部分写入limitations；"
         "关键内容无法检查时为unverified，有error/warning时为issues，"
         "只有完成当前页检查且无error/warning时为passed。"
-        "通过record_map_review提交结果；若返回文本，必须为同结构JSON对象，不含Markdown。\n"
-        "当前页用途与检查目标：" + json.dumps(scope, ensure_ascii=False, default=str)
+        + ("通过record_map_review提交结果；若返回文本，必须为同结构JSON对象，不含Markdown。\n"
+           if response_format == "tool" else
+           "直接返回JSON对象，不调用函数，不含Markdown；字段须符合以下JSON Schema："
+           + json.dumps(PixelReview.model_json_schema(), ensure_ascii=False) + "\n")
+        + "当前页用途与检查目标：" + json.dumps(scope, ensure_ascii=False, default=str)
     )
 
 
@@ -75,22 +78,41 @@ async def collect_stream(transport: Any, params: dict, diagnostics: dict,
     text, names, arguments = [], [], []
     finish, usage, model = None, None, None
     seen_call = False
+    last_event = None
+    diagnostics.update(stream_events=0, reasoning_chars=0, answer_chars=0,
+                       tool_argument_chars=0, max_event_gap_seconds=0.0)
     async with stream:
         async for chunk in stream:
+            now = time.monotonic()
+            elapsed = round(now - started, 3)
+            diagnostics["stream_events"] += 1
+            diagnostics["last_event_seconds"] = elapsed
+            if last_event is not None:
+                diagnostics["max_event_gap_seconds"] = round(max(
+                    diagnostics["max_event_gap_seconds"], now - last_event), 3)
+            last_event = now
             model = chunk.model
             if chunk.usage is not None:
                 usage = chunk.usage
+                diagnostics.update(input_tokens=usage.prompt_tokens,
+                                   output_tokens=usage.completion_tokens,
+                                   total_tokens=usage.total_tokens)
+                detail = getattr(usage, "completion_tokens_details", None)
+                if detail is not None and detail.reasoning_tokens is not None:
+                    diagnostics["reasoning_tokens"] = detail.reasoning_tokens
             for choice in chunk.choices:
                 if choice.index != 0:
                     diagnostics["failure_kind"] = "ambiguous_response"
                     raise incomplete("The model returned multiple visual review choices.")
                 delta = choice.delta
-                if getattr(delta, "reasoning_content", None):
-                    diagnostics.setdefault("first_reasoning_seconds",
-                                           round(time.monotonic() - started, 3))
+                reasoning = getattr(delta, "reasoning_content", None)
+                if isinstance(reasoning, str) and reasoning:
+                    diagnostics.setdefault("first_reasoning_seconds", elapsed)
+                    diagnostics["last_reasoning_seconds"] = elapsed
+                    diagnostics["reasoning_chars"] += len(reasoning)
                 if delta.content:
-                    diagnostics.setdefault("first_answer_seconds",
-                                           round(time.monotonic() - started, 3))
+                    diagnostics.setdefault("first_answer_seconds", elapsed)
+                    diagnostics["answer_chars"] += len(delta.content)
                     text.append(delta.content)
                 for call in delta.tool_calls or []:
                     if call.index != 0:
@@ -101,11 +123,13 @@ async def collect_stream(transport: Any, params: dict, diagnostics: dict,
                         if call.function.name:
                             names.append(call.function.name)
                         if call.function.arguments:
-                            diagnostics.setdefault("first_answer_seconds",
-                                                   round(time.monotonic() - started, 3))
+                            diagnostics.setdefault("first_answer_seconds", elapsed)
+                            diagnostics["tool_argument_chars"] += len(call.function.arguments)
                             arguments.append(call.function.arguments)
-                if choice.finish_reason is not None:
+                if choice.finish_reason:
                     finish = choice.finish_reason
+                    diagnostics.update(finish_reason=finish, finish_seconds=elapsed)
+    diagnostics["stream_completed"] = True
     diagnostics["stage"] = "response"
     if finish is None:
         diagnostics["failure_kind"] = "incomplete_stream"

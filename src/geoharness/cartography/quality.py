@@ -680,10 +680,22 @@ async def review_map(
     }
     if pixel_only:
         diagnostics["review_mode"] = "pixels_only"
+    from geoharness.cartography.review_config import review_configuration
+
+    effective = review_configuration(config)
+    diagnostics["review_configuration"] = effective
     if not settings.enabled:
         return MapReview(status="unverified", summary="Visual map review is disabled.",
                          diagnostics={**diagnostics, "outcome": "disabled"})
     key = settings.api_key or config.api_key
+    config_errors = [error for error in effective["configuration_errors"]
+                     if client is None or not error.startswith("review_credential_")]
+    if config_errors:
+        return MapReview(
+            status="unverified", summary="Review configuration is incomplete or unresolved; "
+            "inspect review_configuration.configuration_errors before sending images.",
+            diagnostics={**diagnostics, "outcome": "failed", "failure_stage": "configuration"},
+        )
     if client is None and (not key or "${" in key):
         return MapReview(
             status="unverified", summary="No usable map review API credential configured.",
@@ -740,7 +752,7 @@ async def review_map(
     if pixel_only:
         from geoharness.cartography.pixel_review import pixel_prompt
 
-        prompt = pixel_prompt(task, evidence)
+        prompt = pixel_prompt(task, evidence, settings.response_format)
     total_expired = False
     try:
         if owned:
@@ -807,6 +819,10 @@ async def review_map(
                     "tool_choice": "required",
                     **_token_limit_param_for_model(request.model, request.max_tokens),
                 }
+                if pixel_only and settings.response_format == "json":
+                    params.pop("tools")
+                    params.pop("tool_choice")
+                    params["response_format"] = {"type": "json_object"}
                 from geoharness.reasoning import request_extensions
 
                 extensions = request_extensions(
@@ -1056,6 +1072,10 @@ async def review_map(
         diagnostics["error_type"] = type(exc).__name__
         if total_expired:
             diagnostics["failure_kind"] = "total_deadline"
+            if diagnostics.get("finish_reason"):
+                diagnostics["stage"] = "response_tail"
+            elif "response_headers_seconds" in diagnostics:
+                diagnostics["stage"] = "generation"
         elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or (
             type(exc).__name__ == "APITimeoutError"
         ):

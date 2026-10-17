@@ -94,12 +94,69 @@ def dry_run(
             table.add_row("ToolRegistry", f"{len(bundle.tool_registry.list_tools())} tools")
             table.add_row("MCP Manager", "configured (not connected)")
             table.add_row("QueryEngine", type(bundle.engine).__name__)
+            from geoharness.cartography.review_config import review_configuration
+            from geoharness.config.settings import load_geo_config
+
+            review = review_configuration(load_geo_config(config))
+            table.add_row("Image reviewer", f"{review['model']} ({review['model_source']})")
+            table.add_row("Review contract", review["response_format"])
+            table.add_row("Review reasoning", review["reasoning_effort"] or "provider default")
             console.print(table)
         except Exception as e:
             console.print(f"[red]运行时组装失败: {e}[/red]")
             raise typer.Exit(1)
 
     asyncio.run(_check())
+
+
+@app.command()
+def review_doctor(
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="指定配置文件路径"),
+    live: bool = typer.Option(False, "--live", help="显式发送一次图片测试请求"),
+    image: Optional[Path] = typer.Option(None, "--image", help="检查指定图片，需同时使用 --live"),
+    output: Path = typer.Option(
+        Path(".geoharness/diagnostics"), "--output", help="独立诊断报告目录，不写地图台账"),
+) -> None:
+    """查看独立审图配置；--live 测试图片能力，--live --image 审查实际图片。"""
+    import asyncio
+    import json
+
+    from pydantic import ValidationError
+
+    from geoharness.cartography.review_config import review_configuration
+    from geoharness.cartography.review_doctor import run_review_probe
+    from geoharness.config.settings import load_geo_config, resolve_config_path
+
+    if image is not None and not live:
+        raise typer.BadParameter("--image 需要 --live；默认配置检查不发送图片。")
+    try:
+        settings = load_geo_config(config)
+        summary = review_configuration(settings)
+        summary["config_path"] = str(resolve_config_path(config).resolve())
+        console.print(
+            json.dumps(summary, ensure_ascii=False, indent=2), markup=False, soft_wrap=True)
+        if summary["configuration_errors"]:
+            raise typer.Exit(1)
+        if live:
+            result = asyncio.run(run_review_probe(settings, output.resolve(), image))
+            # Full findings and diagnostics stay in the report, keeping CLI output bounded.
+            keys = ("status", "probe_kind", "review_completed", "image_capability_verified",
+                    "business_quality_verified", "report_path")
+            console.print(json.dumps({key: result[key] for key in keys},
+                                     ensure_ascii=False, indent=2), markup=False, soft_wrap=True)
+            if result["status"] != "succeeded":
+                raise typer.Exit(1)
+    except ValidationError as exc:
+        details = [{"field": ".".join(str(part) for part in error["loc"]),
+                    "type": error["type"]} for error in exc.errors(
+                        include_input=False, include_context=False, include_url=False)]
+        console.print(json.dumps({"configuration_errors": details}, ensure_ascii=False),
+                      markup=False, soft_wrap=True)
+        raise typer.Exit(1) from exc
+    except (OSError, ValueError) as exc:
+        # Configuration validation can contain private input values in exception messages.
+        console.print(f"审图诊断无法完成 ({type(exc).__name__})；请检查配置及图片路径。")
+        raise typer.Exit(1) from exc
 
 
 @app.command()
@@ -227,10 +284,17 @@ qgis:
   max_output_chars: 12000
   max_search_results: 20
 
-# 实际成图视觉检查；空 model/base_url/api_key 复用主模型
+# 独立图片审查；直接填写下列字段，留空的 model/base_url/api_key 各自复用主配置。
 map_review:
   enabled: true
-  timeout_seconds: 90
+  model: ""
+  base_url: ""
+  api_key: ""
+  reasoning_effort: null  # null 不强制思考参数；max 仅用于支持它的审图模型。
+  request_extra_body: {}
+  response_format: tool  # tool: 函数调用；json: JSON文本（网关需支持json_object）。
+  timeout_seconds: 180
+  read_timeout_seconds: 90
   max_tokens: 8192
   layout:
     legend_outside: true

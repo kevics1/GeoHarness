@@ -60,7 +60,11 @@ qgis:
 map_review:
   enabled: true
   model: cbcn/deepseek-v4.1-flash(max)
+  # Independently configurable; empty fields reuse the corresponding main setting.
+  base_url: ""
+  api_key: ""  # May also use ${GEOH_REVIEW_API_KEY} from your private .env.
   reasoning_effort: max
+  response_format: tool  # tool=function calling; json=JSON text (json_object support needed).
   # geo_map_review only reads images and reports findings; it never repairs or rebuilds.
   # Map generation and review have no version/count/cumulative-time budget.
   # Legacy max_repairs/max_reviews_per_request/total_timeout_seconds are ignored.

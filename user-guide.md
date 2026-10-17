@@ -620,6 +620,57 @@ TIFF 输出会读回检查 band/row/column、CRS 和变换矩阵；这只验证�
 `reasoning_effort=max`，并让空响应及截断参数恢复保持主模型与思考模式，
 不使用配置中的 none 备用模型。未设置此字段时保留旧恢复行为。
 `map_review.reasoning_effort` 单独配置；示例配置将主模型与审图均设为 max。
+
+图片审查可以使用独立模型和服务。在用户配置文件 `~/.geoharness/config.yaml` 中
+直接编辑 `map_review`；Windows 默认位置是用户目录下的 `.geoharness/config.yaml`。
+无需修改代码。以下模型名是占位符，必须换成服务提供方实际支持的标识：
+
+```yaml
+map_review:
+  enabled: true
+  model: "实际审图模型标识"
+  base_url: "实际 OpenAI 兼容 API Base URL"
+  api_key: "${GEOH_REVIEW_API_KEY}"
+  reasoning_effort: max
+  request_extra_body: {}
+  response_format: tool
+  max_tokens: 131072
+  timeout_seconds: 180
+  read_timeout_seconds: 90
+```
+
+`model/base_url/api_key` 中每个空字段分别继承主配置对应字段。可直接填写 API key，
+也可通过私有 `.env` 引用；诊断摘要不显示密钥或服务地址。当前审图客户端使用
+OpenAI 兼容的 Chat Completions 图片接口，不能直接填其他协议的原生端点。
+主模型及 `agent.reasoning_effort` 不受这些字段影响。
+
+`reasoning_effort: null` 表示不强制发送统一思考参数，不等于关闭思考；此时
+`request_extra_body` 原样生效（其中若仍包含 `thinking/reasoning_effort`，它们仍会发送）。
+显式 `max` 会启用思考并覆盖旧扩展中的冲突值。更换模型时，应按照实际提供方能力
+设置思考扩展与输出预算，不自动降强度、不自动换模型或重试另一种返回格式。
+审图 `reasoning_effort` 和 `response_format` 忽略大小写及两端空格；模型标识原样发送。
+
+`response_format: tool` 使用 `record_map_review` 函数调用；`json` 不发送函数，
+使用 JSON 文本（提供方需支持 `response_format: {type: json_object}`）。两者使用相同
+问题结构及本地校验；不完整、非法或截断结果均为 `unverified`。改变这些设置会使旧
+审图缓存失效。保存配置后重启运行中的 GeoHarness 会话，新会话和每次 CLI 诊断读取新值。
+
+```powershell
+# 只读配置检查，不联网；显示实际配置路径、模型来源和参数
+geoh review-doctor
+# 显式联网：随机小图检查数字与颜色/形状识别，不认证地图质量
+geoh review-doctor --live
+# 显式联网：只检查指定图片，不渲染、不写业务地图台账
+geoh review-doctor --live --image "实际地图.png"
+# 如启动时指定了其他配置，诊断时使用同一个路径
+geoh review-doctor --config "实际配置.yaml"
+```
+
+每次联网诊断只有一次模型请求，完整结果保存在返回的独立报告路径。
+实际地图出现 `issues` 仍可表示审查已完成，不能把命令成功等同于地图无问题。
+流式诊断记录首响应、最后事件、推理/回答字符数和完成标记，不保存思考正文。
+`failure_kind=total_deadline` 且阶段为 `generation` 表示已接收响应但总时限到达；
+`response_tail` 表示完成标记之后收流尚未结束，均不能统称网络服务故障。
 模型别名是否由第三方网关正确解释仍需核验实际响应，字段本身不证明服务端执行了 max。
 `max_tokens` 是思考与回答共用的输出上限，和思考强度不同；预算耗尽会明确保持未完成状态。
 

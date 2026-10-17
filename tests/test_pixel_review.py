@@ -194,7 +194,54 @@ async def test_total_deadline_is_distinct_from_transport_timeout(image, monkeypa
     assert result.status == "unverified"
     assert result.diagnostics["failure_kind"] == "total_deadline"
     assert result.diagnostics["first_reasoning_seconds"] >= 0
+    assert result.diagnostics["failure_stage"] == "generation"
+    assert result.diagnostics["reasoning_chars"] == len("secret")
+    assert result.diagnostics["stream_events"] == 1
     assert stream.closed
+
+
+async def test_independent_json_reviewer_uses_own_model_and_validates_same_contract(
+    image, monkeypatch,
+):
+    stream = Stream([chunk(content=json.dumps(PASS), finish="stop")])
+    requests, _, _ = install_transport(monkeypatch, stream)
+    config = GeoConfig(model="main", api_key="main-key", map_review=MapReviewConfig(
+        model="vision", api_key="vision-key", base_url="https://vision.invalid/v1",
+        response_format="json", reasoning_effort="max"))
+    result = await quality.review_map(image, config=config, task="Inspect", evidence={},
+                                      pixel_only=True)
+    assert result.status == "passed"
+    assert requests[0]["model"] == "vision"
+    assert requests[0]["response_format"] == {"type": "json_object"}
+    assert "tools" not in requests[0] and "tool_choice" not in requests[0]
+    assert requests[0]["extra_body"]["reasoning_effort"] == "max"
+    assert "JSON Schema" in requests[0]["messages"][0]["content"][0]["text"]
+    assert result.diagnostics["review_configuration"]["model_source"] == "map_review"
+    assert "vision-key" not in json.dumps(result.model_dump())
+
+
+async def test_empty_finish_marker_does_not_complete_review(image, monkeypatch):
+    stream = Stream([chunk(content=json.dumps(PASS), finish="")])
+    install_transport(monkeypatch, stream)
+    result = await quality.review_map(image, config=GeoConfig(api_key="test"), task="Inspect",
+                                      evidence={}, pixel_only=True)
+    assert result.status == "unverified"
+    assert result.diagnostics["failure_kind"] == "incomplete_stream"
+
+
+async def test_response_tail_timeout_never_accepts_unclosed_review(image, monkeypatch):
+    class Tail(Stream):
+        async def __aiter__(self):
+            yield chunk(content=json.dumps(PASS), finish="stop")
+            await asyncio.sleep(1)
+
+    install_transport(monkeypatch, Tail([]))
+    config = GeoConfig(api_key="test", map_review=MapReviewConfig(timeout_seconds=.05))
+    result = await quality.review_map(image, config=config, task="Inspect", evidence={},
+                                      pixel_only=True)
+    assert result.status == "unverified"
+    assert result.diagnostics["failure_stage"] == "response_tail"
+    assert result.diagnostics["finish_reason"] == "stop"
 
 
 async def test_cancelled_owned_stream_closes_transport(image, monkeypatch):

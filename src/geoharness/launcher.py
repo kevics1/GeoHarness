@@ -319,6 +319,12 @@ async def _run_print_mode(
     await start_runtime(bundle)
 
     print(f"GeoHarness v0.1.0 | model={config.model} | cwd={cwd}")
+    from geoharness.cartography.review_config import review_configuration
+
+    reviewer = review_configuration(config)
+    print(f"Image reviewer={reviewer['model']} ({reviewer['model_source']}) | "
+          f"reasoning={reviewer['reasoning_effort'] or 'provider default'} | "
+          f"format={reviewer['response_format']}")
     print("Type 'exit' to quit.")
     sys.stdout.flush()
 

@@ -23,7 +23,7 @@ _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDic
 _REPAIR_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 # Bump only when the response contract/compatibility changes. Legacy failed
 # cache entries can then recover without repeatedly resending unchanged images.
-REVIEW_CONTRACT_VERSION = 8
+REVIEW_CONTRACT_VERSION = 9
 _BUDGET_LOCK = threading.RLock()
 
 
@@ -348,6 +348,7 @@ async def _review_once(
                 }},
                 "request_extra_body": settings.request_extra_body,
                 "reasoning_effort": settings.reasoning_effort,
+                "response_format": settings.response_format,
             },
             sort_keys=True,
             default=str,
@@ -408,8 +409,12 @@ async def _review_once(
             "service_retry_at": retry_at if waiting else None,
             "service_retry_after_seconds": max(0.0, retry_at - time.time()) if waiting else 0.0,
             "next_action": next_action,
-            "quality_note": "A service failure leaves visual quality unverified; "
-                            "it does not establish that the map is correct.",
+            "quality_note": (
+                "Visual review completed for this image and scope."
+                if completed else
+                "Visual review is incomplete; map quality remains unverified. "
+                "Inspect failure_kind before attributing the failure to the network."
+            ),
         }
         review.diagnostics.update(evidence)
         return evidence
