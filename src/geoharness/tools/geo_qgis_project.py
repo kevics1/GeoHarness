@@ -485,7 +485,7 @@ MapEdit = Annotated[QgisStyleEdit | QgisLabelEdit | QgisFrameEdit | QgisLayerEdi
 class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["create", "inspect", "export", "preflight", "spec", "help"]
+    action: Literal["create", "inspect", "export", "preflight", "spec", "help", "recover"]
     section: Literal["workflow", "layer", "roster", "style", "labels", "frame", "layout",
                      "edits"] = "workflow"
     detail_path: list[str | int] = Field(default_factory=list, max_length=16,
@@ -574,6 +574,12 @@ class GeoQgisProjectInput(BaseModel):
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisProjectInput:
         selectors = {"detail_path", "offset", "limit"}
+        if self.action == "recover" or (self.action == "inspect" and self.map_id and not (
+                self.project_path or self.spec_ref or self.plan_ref)):
+            allowed = {"action", "map_id", *(selectors if self.action == "inspect" else set())}
+            if not self.map_id or self.model_fields_set - allowed:
+                raise ValueError("Ledger inspect/recover accepts only map_id and read selectors")
+            return self
         if self.model_fields_set & selectors and self.action not in {"help", "inspect"}:
             raise ValueError("Diagnostic selectors are read-only; use help or inspect")
         if self.action == "help":
@@ -699,6 +705,32 @@ class GeoQgisProjectTool(BaseTool):
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        if arguments.action == "recover" or (arguments.action == "inspect" and arguments.map_id
+                and not (arguments.project_path or arguments.spec_ref or arguments.plan_ref)):
+            from geoharness.cartography.jobs import inspect_map_ledger
+
+            try:
+                payload = inspect_map_ledger(cwd=context.cwd, config=config,
+                    map_id=arguments.map_id, recover=arguments.action == "recover",
+                    offset=arguments.offset if not arguments.detail_path else 0,
+                    limit=arguments.limit)
+                visible = payload
+                if arguments.detail_path or len(json.dumps(payload, ensure_ascii=False)) > (
+                        config.qgis.inspection_max_chars):
+                    from geoharness.qgis.inspection import view
+
+                    details = {key: value for key, value in payload.items() if key != "migration"}
+                    visible = {key: payload[key] for key in (
+                        "map_id", "status", "requires_recovery", "migration") if key in payload}
+                    visible["diagnostic"] = view(details, call={"action": "inspect",
+                        "map_id": arguments.map_id}, path=arguments.detail_path,
+                        offset=arguments.offset if arguments.detail_path else 0,
+                        limit=arguments.limit, max_chars=config.qgis.inspection_max_chars - 600)
+                return ToolResult(output=json.dumps(visible, ensure_ascii=False),
+                                  metadata={"render_executed": False, **payload})
+            except (OSError, ValueError) as exc:
+                return ToolResult(output=f"Map ledger recovery/inspection failed: {exc}",
+                                  is_error=True, metadata={"render_executed": False})
         if arguments.action == "help":
             from geoharness.qgis.inspection import help_output, view
             from geoharness.qgis.specification import contract_help

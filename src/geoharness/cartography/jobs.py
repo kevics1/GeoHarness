@@ -131,7 +131,10 @@ def _job_path(directory: Path, job_id: str) -> Path:
 
 
 def _job(directory: Path, job_id: str) -> dict[str, Any]:
-    value = _read(_job_path(directory, job_id), {})
+    from geoharness.cartography import ledger_store
+
+    path = _job_path(directory, job_id)
+    value = ledger_store.load(path) if ledger_store.is_current(path) else _read(path, {})
     if value.get("job_id") != job_id or not isinstance(value.get("versions"), list):
         raise ValueError("Map job receipt is missing or invalid")
     return value
@@ -450,7 +453,12 @@ def _layout_status(
 def _save(directory: Path, job: dict[str, Any], index: dict[str, Any]) -> None:
     job["updated_at"] = _now()
     index["jobs"][job["job_id"]]["updated_at"] = job["updated_at"]
-    _atomic(_job_path(directory, job["job_id"]), job)
+    from geoharness.cartography import ledger_store
+
+    path = _job_path(directory, job["job_id"])
+    if path.exists() and not ledger_store.is_current(path):
+        ledger_store.migrate(path)
+    ledger_store.write(path, job)
     _atomic(directory / "index.json", index)
 
 
@@ -930,7 +938,11 @@ def _layer_key(value: Any) -> str | None:
 def map_mutation_state(metadata, *, cwd, config, map_id) -> dict:
     """Read current revision and editable head without rehashing historical packages."""
     with _LOCK:
-        job = _job(_directory(cwd, config), map_id)
+        from geoharness.cartography import ledger_store
+
+        directory = _directory(cwd, config)
+        path = _job_path(directory, map_id)
+        job = ledger_store.head(path) if ledger_store.is_current(path) else _job(directory, map_id)
         return {"map_id": map_id, "latest_version": job.get("current_version") or 0,
                 "latest_spec_ref": (job.get("editable_draft") or {}).get("spec_ref", ""),
                 "mutation": copy.deepcopy(job.get("mutation") or {})}
@@ -941,6 +953,13 @@ def record_map_draft(map_id, metadata, *, cwd, config, spec_ref) -> None:
         raise ValueError("Editable draft requires an actual qgis-spec reference")
     with _LOCK:
         directory = _directory(cwd, config)
+        from geoharness.cartography import ledger_store
+
+        path = _job_path(directory, map_id)
+        if ledger_store.is_current(path):
+            ledger_store.update_head(path, {"editable_draft": {
+                "spec_ref": spec_ref, "updated_at": _now()}})
+            return
         job, index = _job(directory, map_id), _index(directory)
         job["editable_draft"] = {"spec_ref": spec_ref, "updated_at": _now()}
         _save(directory, job, index)
@@ -949,9 +968,45 @@ def record_map_draft(map_id, metadata, *, cwd, config, spec_ref) -> None:
 def record_map_mutation(map_id, metadata, *, cwd, config, value) -> None:
     with _LOCK:
         directory = _directory(cwd, config)
+        from geoharness.cartography import ledger_store
+
+        path = _job_path(directory, map_id)
+        if ledger_store.is_current(path):
+            head = ledger_store.head(path)
+            ledger_store.update_head(path, {"mutation": {**(head.get("mutation") or {}), **value}})
+            return
         job, index = _job(directory, map_id), _index(directory)
         job["mutation"] = {**(job.get("mutation") or {}), **value}
         _save(directory, job, index)
+
+
+def inspect_map_ledger(*, cwd, config, map_id, recover=False, offset=0, limit=8):
+    """Diagnose a registered ledger without hydrating or trusting all its history."""
+    from geoharness.cartography import ledger_store
+
+    with _LOCK:
+        directory = _directory(cwd, config)
+        index = _index(directory)
+        job_id = _find(index, map_id, None)
+        if job_id is None:
+            raise ValueError("Unknown map_id; use an actual returned map identity")
+        path = _job_path(directory, job_id)
+        value = {"map_id": job_id, "receipt_bytes": path.stat().st_size,
+                 "status": "legacy", "requires_recovery": True,
+                 "recover_call": {"action": "recover", "map_id": job_id}}
+        if recover:
+            value["migration"] = ledger_store.migrate(path)
+        if ledger_store.is_current(path):
+            head = ledger_store.head(path)
+            value.update(status="current", requires_recovery=False,
+                         latest_version=head.get("current_version"),
+                         latest_spec_ref=(head.get("editable_draft") or {}).get("spec_ref", ""),
+                         version_count=head["version_count"], mutation=head.get("mutation"),
+                         history=ledger_store.history(path, offset, limit))
+            if offset + limit < head["version_count"]:
+                value["next_call"] = {"action": "inspect", "map_id": job_id,
+                                      "offset": offset + limit, "limit": limit}
+        return value
 
 
 def _layer_metadata(report: dict, name: str, source_index: int) -> dict:

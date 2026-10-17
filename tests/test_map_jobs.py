@@ -586,7 +586,9 @@ def test_persisted_reports_are_bounded_redacted_and_do_not_include_source_object
     raw = (tmp_path / config.cartography.jobs_dir / job_id / "receipt.json").read_text()
     assert config.api_key not in raw and "secret code" not in raw
     assert '"gdf"' not in raw and len(raw) < 14000
-    assert "count within buffer" in raw and "[redacted]" in raw
+    stored = json.dumps(map_job_receipt(metadata, cwd=tmp_path, config=config, map_id=job_id))
+    assert config.api_key not in stored and "secret code" not in stored and '"gdf"' not in stored
+    assert "count within buffer" in stored and "[redacted]" in stored
 
 
 def test_parallel_aliases_create_one_job_and_valid_atomic_json(tmp_path):

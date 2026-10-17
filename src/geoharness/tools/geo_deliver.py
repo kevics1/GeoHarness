@@ -62,7 +62,7 @@ class GeoDeliverInput(BaseModel):
     )
 
 
-def _source(path: Path, roots: list[Path]) -> Path:
+def _source(path: Path, roots: list[Path], *, check_producer=True) -> Path:
     path = path.resolve()
     matched = [root for root in roots if path.is_relative_to(root)]
     if not matched:
@@ -91,7 +91,8 @@ def _source(path: Path, roots: list[Path]) -> Path:
         raise ValueError(f"Delivery input is not an existing file: {path}")
     from geoharness.data.artifacts import assert_usable_artifact
 
-    assert_usable_artifact(path)
+    if check_producer:
+        assert_usable_artifact(path)
     return path
 
 
@@ -127,10 +128,54 @@ class GeoDeliverTool(BaseTool):
 
         def resolve(value: str) -> Path:
             path = Path(value).expanduser()
-            return _source(path if path.is_absolute() else workspace / path, roots)
+            path = path if path.is_absolute() else workspace / path
+            try:
+                return _source(path, roots)
+            except ValueError:
+                # A review is produced after the original run manifest. Only
+                # its exact hash-bound ledger reference can authorize that file;
+                # this does not upgrade its quality or trust arbitrary JSON.
+                target = _source(path, roots, check_producer=False)
+                if target.suffix.lower() != ".json" or target.stat().st_size > 1024*1024:
+                    raise
+                from geoharness.cartography.jobs import map_job_receipt
+
+                report = json.loads(target.read_text(encoding="utf-8"))
+                if not isinstance(report, dict) or not isinstance(report.get("image_path"), str):
+                    raise ValueError("Review evidence must be an object with an image_path")
+                image = Path(report.get("image_path", ""))
+                _source(image if image.is_absolute() else workspace / image, roots)
+                receipt = map_job_receipt(context.metadata, cwd=workspace, config=config,
+                                         artifact_path=image)
+                references = [stage.get("report_reference", {}) for version in
+                    receipt.get("versions", []) for stage in [
+                        *version.get("stages", {}).values(),
+                        *version.get("page_reviews", {}).values()]]
+                digest = hashlib.sha256(target.read_bytes()).hexdigest()
+                if not any(reference.get("path") == str(target) and
+                           reference.get("sha256") == digest for reference in references):
+                    raise ValueError("Review is not an unchanged registered evidence file")
+                return target
 
         def publish() -> dict:
             from geoharness.cartography.jobs import map_job_receipt
+
+            ledger_errors = []
+
+            def read_receipt(*args, **kwargs):
+                try:
+                    return map_job_receipt(*args, **kwargs)
+                except (OSError, ValueError) as exc:
+                    if arguments.version_policy != "selected" or not (
+                            arguments.primary_map or arguments.files):
+                        raise ValueError(f"Ledger unavailable: {exc}. Inspect/recover the map, "
+                            "or explicitly use version_policy=selected with actual draft files")
+                    ledger_errors.append(str(exc))
+                    return {"job_id": None, "map_id": None, "status": "draft",
+                            "quality_status": "draft", "versions": [],
+                            "stages": {key: {"status": "unverified"} for key in (
+                                "data_checked", "rendered", "layout_checked", "visual_checked",
+                                "packaged", "delivered")}}
 
             files = [resolve(value) for value in arguments.files]
             primary = resolve(arguments.primary_map) if arguments.primary_map else None
@@ -151,7 +196,7 @@ class GeoDeliverTool(BaseTool):
                             or not preview.is_relative_to(root):
                         raise ValueError("Project preview reference must stay inside its folder.")
                     selection_source = resolve(str(preview))
-            initial_receipt = map_job_receipt(context.metadata, cwd=workspace, config=config,
+            initial_receipt = read_receipt(context.metadata, cwd=workspace, config=config,
                 map_id=arguments.map_id, artifact_path=selection_source)
             if initial_receipt.get("job_id") and initial_receipt.get("artifact_registered"):
                 selection["selected_version"] = initial_receipt.get("selected_version")
@@ -326,10 +371,9 @@ class GeoDeliverTool(BaseTool):
                 and review.layout_patch.model_dump(exclude_none=True)
             ):
                 review_status = "issues"
-            from geoharness.cartography.jobs import map_job_receipt
             from geoharness.cartography.tracking import receipt_summary
 
-            receipt = map_job_receipt(
+            receipt = read_receipt(
                 context.metadata,
                 cwd=workspace,
                 config=config,
@@ -409,7 +453,7 @@ class GeoDeliverTool(BaseTool):
             # A file can change and be restored while the copy is running. Check
             # copied package bytes against the original evidence, as well as
             # refreshing the source receipt after the copy.
-            receipt = map_job_receipt(
+            receipt = read_receipt(
                 context.metadata,
                 cwd=workspace,
                 config=config,
@@ -435,6 +479,7 @@ class GeoDeliverTool(BaseTool):
                 "project_note": ("Reference QGIS layout differs from the main image."
                                  if project_fidelity == "reference" else ""),
                 "quality_status": "passed" if verified else "draft",
+                "ledger_errors": list(dict.fromkeys(ledger_errors)),
                 "snapshot_status": "changed" if snapshot_changed else "passed",
                 "map_id": receipt.get("map_id"),
                 "map_receipt": receipt_summary(receipt),

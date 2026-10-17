@@ -52,6 +52,7 @@ class _Owner:
         self.context, self.map_id = context, map_id
         self.task, self.operation = asyncio.current_task(), operation
         self.status = "completed"
+        self.ledger_error = None
         self.started = jobs._now()
 
     def stage(self, stage):
@@ -87,6 +88,10 @@ async def map_mutation(context, *, map_id, operation):
             jobs.record_map_mutation(map_id, context.metadata, cwd=context.cwd,
                 config=context.metadata["geoharness_config"], value={
                     "status": owner.status, "finished_at": jobs._now()})
+        except (OSError, ValueError) as exc:
+            # Cleanup failure must not replace a completed native result or the
+            # original exception/cancellation. Ownership still ends below.
+            owner.ledger_error = str(exc)
         finally:
             _CURRENT.reset(token)
             _OWNERS.pop(key, None)
@@ -146,8 +151,7 @@ def guard_map_mutations(execute):
                                                   project_path=arguments.project_path) or ""
             job = jobs.ensure_map_job(context.metadata, cwd=context.cwd, config=config,
                                      map_id=identity, artifact_path=artifact)
-            async with map_mutation(context, map_id=job,
-                    operation="automatic_review" if reviewing else action) as owner:
+            async def perform(owner, arguments):
                 if packet:
                     check_plan_binding(context, packet.get("binding"))
                 if not reviewing and arguments.spec_ref:
@@ -171,18 +175,40 @@ def guard_map_mutations(execute):
                     raw = json.loads(json.dumps(raw))
                     if raw.get("layout"):
                         raw["layout"].pop("layout_plan", None)
-                    ref, _ = save_spec({**raw, "map_id": job}, cwd=context.cwd,
-                                       settings=config.qgis)
-                    jobs.record_map_draft(job, context.metadata, cwd=context.cwd,
-                                          config=config, spec_ref=ref)
+                    try:
+                        ref, _ = save_spec({**raw, "map_id": job}, cwd=context.cwd,
+                                           settings=config.qgis)
+                        jobs.record_map_draft(job, context.metadata, cwd=context.cwd,
+                                              config=config, spec_ref=ref)
+                    except (OSError, ValueError) as exc:
+                        return ToolResult(output=result.output + "\nRendered artifact retained; "
+                            f"draft registration failed: {exc}", is_error=True,
+                            metadata={**result.metadata, "render_executed": True,
+                                      "receipt_status": "failed", "quality_status": "draft"})
                 if reviewing or action == "create":
-                    state = _state(context, job)
+                    try:
+                        state = _state(context, job)
+                    except (OSError, ValueError) as exc:
+                        return ToolResult(output=result.output + f"\nLedger refresh failed: {exc}",
+                            is_error=True, metadata={**result.metadata,
+                                "render_executed": (not reviewing or bool(
+                                    result.metadata.get("repair_count"))),
+                                "receipt_status": "failed", "quality_status": "draft"})
                     public = {key: state[key] for key in
                               ("map_id", "latest_version", "latest_spec_ref")}
                     if packet and not packet.get("binding"):
                         public["version_binding"] = "legacy_unbound; preflight for revision checks"
                     result = _enrich(result, public)
                 return result
+            async with map_mutation(context, map_id=job,
+                    operation="automatic_review" if reviewing else action) as owner:
+                result = await perform(owner, arguments)
+            if owner.ledger_error:
+                return ToolResult(output=result.output + "\nMap metadata cleanup failed; "
+                    "actual outputs retained: " + owner.ledger_error, is_error=True,
+                    metadata={**result.metadata, "receipt_status": "failed",
+                              "quality_status": "draft", "cleanup_error": owner.ledger_error})
+            return result
         except MapMutationConflict as exc:
             recovery = _state(context, exc.recovery["map_id"])
             return ToolResult(output=json.dumps({"status": "mutation_conflict", "reason": str(exc),

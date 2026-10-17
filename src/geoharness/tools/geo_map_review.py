@@ -208,7 +208,8 @@ class GeoMapReviewTool(BaseTool):
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
         first = await self._review_one(arguments, context)
-        if first.is_error or first.metadata.get("review_page_index", 0):
+        if (first.is_error or first.metadata.get("review_page_index", 0)
+                or first.metadata.get("receipt_status") == "unregistered"):
             return first
         identity = first.metadata["map_id"]
         async with repair_loop_lock(context.metadata, identity):
@@ -377,6 +378,24 @@ class GeoMapReviewTool(BaseTool):
                               is_error=current.is_error,
                               metadata=review_execution_payload(metadata))
 
+    async def _review_without_ledger(self, arguments, context, path, error):
+        """Review pixels locally without certifying or automatically repairing a map job."""
+        config = context.metadata["geoharness_config"]
+        result, budget = await review_with_budget(path, config=config, task=arguments.task,
+            evidence={"backend": "unknown", "ledger_unavailable": True},
+            retry_invalid_response=arguments.retry_invalid_response,
+            retry_service_failure=arguments.retry_service_failure,
+            metadata=context.metadata, map_id=arguments.map_id or path.stem,
+            client=context.metadata.get("map_review_client"))
+        result.diagnostics.update(ledger_error=error, repair_authorized=False,
+                                  quality_status="draft", receipt_status="unregistered")
+        report = save_review(path, {"image_path": str(path), **result.model_dump(), **budget})
+        return ToolResult(output=json.dumps(review_execution_payload(result.model_dump()),
+            ensure_ascii=False) + f"\nLocal review retained: {report}; map quality is draft.",
+            metadata={"image_path": str(path), "review_path": str(report),
+                      "review_status": result.status, "quality_status": "draft",
+                      "receipt_status": "unregistered", "ledger_error": error})
+
     async def _review_one(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         assert isinstance(arguments, GeoMapReviewInput)
         config = context.metadata.get("geoharness_config")
@@ -433,6 +452,8 @@ class GeoMapReviewTool(BaseTool):
                 if registered.is_error:
                     return registered
         except (OSError, ValueError) as exc:
+            if arguments.auto_repair is False or arguments.retry_service_failure:
+                return await self._review_without_ledger(arguments, context, path, str(exc))
             return ToolResult(output=f"Error: map receipt unavailable: {exc}", is_error=True)
         evidence = dict(arguments.evidence)
         verified = _verified_render_evidence(path, digest, existing, roots)

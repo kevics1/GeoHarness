@@ -1,7 +1,6 @@
 """One task owns native map mutations; receipts retain observable recovery state."""
 
 import asyncio
-import json
 
 import pytest
 from openharness.tools.base import ToolExecutionContext
@@ -104,9 +103,9 @@ async def test_old_prepared_binding_rejected_with_latest_editable_draft(tmp_path
     binding = plan_binding(context, map_id=identity, spec_ref=old_ref)
     check_plan_binding(context, binding)
     receipt_path = tmp_path / config.cartography.jobs_dir / identity / "receipt.json"
-    raw = json.loads(receipt_path.read_text(encoding="utf-8"))
-    raw["current_version"] = 1
-    receipt_path.write_text(json.dumps(raw), encoding="utf-8")
+    from geoharness.cartography.ledger_store import update_head
+
+    update_head(receipt_path, {"current_version": 1})
     record_map_draft(identity, context.metadata, cwd=tmp_path, config=config, spec_ref=new_ref)
     with pytest.raises(MapMutationConflict, match="stale") as failure:
         check_plan_binding(context, binding)
