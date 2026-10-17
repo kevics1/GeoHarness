@@ -15,7 +15,8 @@ _ISSUE_CODES = {
 }
 
 
-def _existing_receipt(metadata: dict[str, Any], map_id: str, config: GeoConfig) -> dict:
+def _existing_receipt(metadata: dict[str, Any], map_id: str, config: GeoConfig,
+                      *, image_sha256: str = "") -> dict:
     state = metadata.get("map_job_state", {})
     if not isinstance(state, dict) or not state.get("cwd"):
         return {}
@@ -32,6 +33,12 @@ def _existing_receipt(metadata: dict[str, Any], map_id: str, config: GeoConfig) 
         if not path.is_relative_to(root) or path.stat().st_size > 16 * 1024 * 1024:
             return {}
         receipt = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(receipt, dict) and receipt.get("storage"):
+            from geoharness.cartography import ledger_store
+
+            if path.parent.name != identity or not ledger_store.is_current(path):
+                return {}
+            return ledger_store.review_tail(path, exclude_image_sha256=image_sha256)
         return receipt if isinstance(receipt, dict) and receipt.get("job_id") == identity else {}
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
@@ -48,8 +55,11 @@ def build_review_iteration_context(
         "generation_unlimited": True,
         "previous_visual_reviews": [],
     }
-    receipt = receipt if isinstance(receipt, dict) else _existing_receipt(metadata, map_id, config)
-    if receipt.get("job_id") not in (None, map_id):
+    receipt = receipt if isinstance(receipt, dict) else _existing_receipt(
+        metadata, map_id, config, image_sha256=image_sha256)
+    aliases = metadata.get("map_job_state", {}).get("aliases", {})
+    identity = aliases.get(map_id, map_id) if isinstance(aliases, dict) else map_id
+    if receipt.get("job_id") not in (None, identity):
         return result
     versions = receipt.get("versions", [])
     if not isinstance(versions, list):
