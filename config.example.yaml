@@ -6,15 +6,18 @@ api_key: local
 mcp: {}
 agent:
   max_tokens: 16384
+  reasoning_effort: max
+  task_budget_seconds: 1200  # Task target, not a hard interruption of atomic writes.
+  delivery_reserve_seconds: 180
   # Continue exhausted batches when successful tool results show new progress.
   auto_continue: true
   # Set false only if the provider rejects stream_options.include_usage.
   include_stream_usage: true
   request_extra_body: {}
-  # Only an empty model response triggers this explicitly configured, single retry.
-  # The main model remains (max); this local gateway's (none) alias disables reasoning.
+  # An explicit reasoning_effort keeps main/recovery model and effort identical.
+  # Alternative recovery remains available when reasoning_effort is unset.
   empty_response_retries: 1
-  empty_response_fallback_model: cbcn/deepseek-v4.1-flash(none)
+  empty_response_fallback_model: ""
   empty_response_fallback_extra_body: {}
   # Recovery does not increase the main request's token limit.
   empty_response_max_tokens: 8192
@@ -56,18 +59,18 @@ qgis:
   max_search_results: 20
 map_review:
   enabled: true
-  model: cbcn/deepseek-v4.1-flash(none)
+  model: cbcn/deepseek-v4.1-flash(max)
+  reasoning_effort: max
+  auto_repair: false  # Agent merges batch review findings into one build.
   # Map generation and review have no version/count/cumulative-time budget.
   # Legacy max_repairs/max_reviews_per_request/total_timeout_seconds are ignored.
-  timeout_seconds: 45
-  max_tokens: 4096
+  timeout_seconds: 90
+  max_tokens: 16384
   diagnostics_max_chars: 2048
   # Temporarily cache retryable service failures; Retry-After may extend this cooldown.
   service_failure_ttl_seconds: 60
   max_validation_errors: 12
-  request_extra_body:
-    thinking:
-      type: disabled
+  request_extra_body: {}
   layout:
     legend_outside: true
 delivery:

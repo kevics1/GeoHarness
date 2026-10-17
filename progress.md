@@ -350,3 +350,12 @@
 阶段5：主体/zoom失败在原冻结输入上最多试测三个候选，候选不导出、不自动应用；返回native_preflight_passed/failed的实际测量。按完整要求选择集和focus范围给出显式范围patch，缺失/重复键或源数量不足不伪造范围解。失败spec返回绑定原spec_ref/input_digest的可复制edit_call，随后仍须新preflight。旧公式建议明确unverified_formula。11项原生QGIS/候选闭环/联合布局通过，ruff首次行宽问题已修复。
 
 阶段6：121项源码整合通过，204.17秒；自检补保留候选自动尺寸适配（4项通过）及数字503/timeout文件名不误判重试（1项通过）。全src和新增测试ruff通过。构建时无隔离pip缺hatchling，改用既有uv build；仅重装geoharness不动依赖。wheel SHA=230f9a8c016c46060ad13a13afa13dbb1953de8b1c6048b003bfd061c2a4ea8d；101模块/1前端/34随包文件源码、wheel、安装一致。安装版29项通过，另1项测试隐式GBK读UTF8自身失败，改显式编码后补测通过。安装版真实合成三页工具链含栅格处理、facts/claims、冻结创建、第二页读取与实际交付通过，0模型调用且draft/unverified。隔离-I CLI缺用户site中的既有Typer依赖，正常安装版CLI version/dry-run通过；未改上游依赖。独立审查仍只得到确认语，无有效结论。详见diagnostics/2026-10-17-invocation-reliability-validation.md。
+
+第五轮启动：恢复根目录计划，工作树仅既有.env.example及未跟踪产物。先读真实配置/源码/历史基线；没有真实模型请求。按诊断技能与文件计划推进，主Agent串行，避免已知并行职责冲突。
+
+第五轮阶段验证：请求43项通过；SQLite/历史/后端43项通过；build/版本6项通过；批量/逐页历史/预算/续跑20项通过；构建及审图参数37项通过。跨模块237通过（263.48秒），修复后的补充73通过（106.24秒），max截断参数预算与时钟2项通过。以上有重叠，不累计为独立数量。
+错误已处理：初版漏导入Literal使Pydantic延迟构建失败；测试预期ValueError需改上游RequestFailure；历史fixture缺任务index导致预算分配新身份（并非新增生产缺陷）；build回执含追加台账文本需raw_decode保留尾部；批量主图单页通过不能直接当整套通过，现明确缺页与每页像素状态。CLI实际入口version而非--version。首次打包后删除无用时钟计数，已重新构建并核验。
+独立审查执行器再次忽略具体任务仅返回确认语，已停用；不计为审查通过。主Agent完成diff与证据边界自检。
+安装：wheel SHA256=83686c6c9d9291c5d4da1d822bdaccf6b032ab9736be6fef9425a5ed3e3aa8a8；103模块/1前端/34随包文件源码/wheel/安装零差异；只重装本项目。本机max/审图只读/1200s目标及180s交付预留已迁移，私有备份、凭证及provider保留。.env.example哈希保持b2665ac001462f3915270c2f11259bafe3e8ed30a9e882a163b3edaa69c6fbcd。version与dry-run通过，MCP未连接。
+
+第五轮安装验收：关键17项通过（21.20秒）；真实公开安装工具合成三页链完成，仅一个project_create，无模型调用，实际复制交付但质量保持draft/视觉unverified。完整证据见diagnostics/2026-10-17-max-latency-validation.md。没有声称原任务已低于20分钟或网关真实max已验证。

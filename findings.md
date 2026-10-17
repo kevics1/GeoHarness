@@ -293,3 +293,11 @@
 - QGIS有24个顶层输入、19个defs、schema27877字符；help_output删除description/default和defs，重要规则不能只藏在详情中。
 - 第二页已由native_facts.page_previews返回并写project.json.files，Python精确白名单只收顶层preview/output/project_manifest，导致合理读取被拒。
 - 现有上游React ToolCallDisplay失败时展开5/8行；正常结果仅NL。需GeoHarness自有展示扩展，不能改上游文件或把is_error改为成功。React源码约96KB，可建立临时源码overlay并复用现有node_modules，不复制依赖。
+
+## Oct17 第五轮基线
+
+只读诊断42.84分钟：172工具调用、103QGIS（38spec/31preflight/23create/6help/5inspect），86已短引用；53native作业529.39s、25Python86.40s、37审图408.97s。主模型max，恢复none，审图none且thinking.disabled；37审图reasoning=0。SQLite存在30审图历史但review_context读locator得到空versions，workflow重建覆盖已传历史。详见diagnostics/2026-10-17-max-reasoning-latency-analysis.md。
+
+优先预测：统一请求策略可消除静默none；SQLite有界读取可恢复上下文；build可把三次模型往返压为一次且仅一个native作业；显式单控制器可去掉7次隐藏重建。均用离线回归/合成原生验证，不对未经实测的业务质量或20分钟达标作保证。
+
+第五轮结果：用build替代同轮spec编辑/preflight/create三次模型往返，仍一次冻结和原生质量校验。批量审图减少工具往返而不隐瞒逐页服务请求；同页历史已从SQLite正确恢复。20分钟是有交付预留的目标，不强杀原子工具。当前真实网关max遵从及业务耗时p50/p95仍待固定输入对照；不对不可靠schema裁剪或删思考历史作猜测性优化。
