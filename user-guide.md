@@ -537,3 +537,12 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 `extent_geometry(west=...,south=...,east=...,north=...,crs=...)` 返回带CRS的GeoSeries；交给 `mask_raster` 会转换到栅格真实CRS。不要把顺序不明的四元组直接传给box，也不要给裸Shapely对象猜CRS。
 
 使用 `artifact_facts(INPUTS["result"],key="id",numeric_fields=["d_fire_m"],predicates=[{"name":"within500","field":"d_fire_m","op":"<=","value":500}],metric_crs="EPSG:32648")` 从落盘文件复算行数、缺失数、统计量、条件计数及面积（指定metric_crs时）。面积为逐要素面积之和，重叠可能重复；不是自动求并集或重新预测火势。返回源文件SHA256和验证范围。`check_claims(facts,[{"path":["counts","within500","count"],"expected":13}])` 对比明确声明并返回实际值及是否相符；空声明不会通过。将facts、claims结果和评分方法另存为JSON，加入 `expected_outputs` 和交付files。此检查不审计任意自然语言，也不证明评分权重或风险方法科学有效。缺失路网时间仍应保留unknown，不应无说明地填充为某个分钟数。
+
+
+## 名录身份、布局进展与逐页审核
+
+`layout.label_table.key_field` 可指定稳定、唯一且非空的源ID，独立于 `fields` 中的显示编号；省略时仍使用第一个显示字段。`keys` 始终按此身份字段选择。可将 `fields` 设为 `["label_no","name"]`、`key_field` 设为 `"id"`；未选记录的label_no可为空，源ID仍须全表唯一且非空。排序、精度和分页不会改变source_keys。field_widths中多写未显示字段时会明确列出错误键及实际显示字段。
+
+布局自动拟合遇到不改变尺寸的候选会停止该候选，返回实测zoom和原因；重复状态返回 `layout_no_progress`。这不放松必要要素覆盖和hard zoom，也不设置累计制图版本上限。应根据诊断换分页、纸张或详图布局，而不是反复提交同一输入。
+
+原生导出为每个图框记录当前页、purpose和实际启用标签的label_sources（包含图框样式覆盖），并保留实际标签落位。审核只对当前页图片负责；总览关闭编号时不会授权加回编号的修复。`label_not_placed` 需绑定原生feature_ids，已落位的工程断言不能驱动修改；标签可读性或压盖仍需原图pixel证据。矛盾意见保留在诊断，不自动转为视觉通过。多页地图仍须逐页检查才有完整视觉结论。severity_reason仅为可选说明，不授权任何动作。

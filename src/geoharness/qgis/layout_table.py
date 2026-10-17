@@ -9,7 +9,9 @@ import math
 def select_roster(records, spec):
     """Select explicitly; keep original records intact for complete-roster export."""
     records = list(records)
-    key = spec["fields"][0]
+    key = spec.get("key_field") or spec["fields"][0]
+    if any(key not in record for record in records):
+        raise ValueError(f"Roster key_field {key!r} is missing")
     if spec.get("keys") is not None:
         wanted = {json.dumps(value, sort_keys=True) for value in spec["keys"]}
         found = {json.dumps(record[key], sort_keys=True) for record in records}
@@ -51,20 +53,23 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
 
     layer = layers[spec["layer_index"]]
     fields = spec["fields"]
-    layout.setCustomProperty("geoharness/roster_key_field", json.dumps(fields[0]))
+    key_field = spec.get("key_field") or fields[0]
+    layout.setCustomProperty("geoharness/roster_key_field", json.dumps(key_field))
     if not isinstance(layer, QgsVectorLayer) or any(
         field not in layer.fields().names() for field in fields
     ) or len(set(fields)) != len(fields):
         raise ValueError("label_table requires distinct existing vector attributes")
-    values = [feature[fields[0]] for feature in layer.getFeatures()]
+    if key_field not in layer.fields().names():
+        raise ValueError(f"label_table key_field {key_field!r} is not an existing attribute")
+    values = [feature[key_field] for feature in layer.getFeatures()]
     identities = [json.dumps(value, default=str) for value in values]
     if (any(value == NULL or value is None for value in values)
             or len(set(identities)) != len(values)):
-        raise ValueError("label_table first field must be a unique non-null roster key")
+        raise ValueError(f"label_table key {key_field!r} must be unique and non-null")
     records = [{field.name(): (None if feature[field.name()] == NULL else feature[field.name()])
                 for field in layer.fields()} for feature in layer.getFeatures()]
     selected_records = select_roster(records, spec)
-    values = [record[fields[0]] for record in selected_records]
+    values = [record[key_field] for record in selected_records]
     if context is not None:
         import csv
 
@@ -111,7 +116,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
         table.setDisplayedFields(fields)
         table.setMaximumNumberOfFeatures(len(selected))
         table.setFilterFeatures(True)
-        expression = QgsExpression.quotedColumnRef(fields[0]) + " IN (" + ",".join(
+        expression = QgsExpression.quotedColumnRef(key_field) + " IN (" + ",".join(
             QgsExpression.quotedValue(value) for value in selected) + ")"
         table.setFeatureFilter(expression)
         # Keep the native editable table in exactly the selected record order,
@@ -120,7 +125,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
 
         ordering = QgsLayoutTableColumn()
         ordering.setAttribute('CASE '
-                              + ' '.join('WHEN ' + QgsExpression.quotedColumnRef(fields[0])
+                              + ' '.join('WHEN ' + QgsExpression.quotedColumnRef(key_field)
                                          + ' = ' + QgsExpression.quotedValue(value)
                                          + f' THEN {rank}' for rank, value in enumerate(selected))
                               + ' END')
@@ -170,7 +175,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
                 raise error
             selected = selected[:capacity]
             table.setMaximumNumberOfFeatures(len(selected))
-            table.setFeatureFilter(QgsExpression.quotedColumnRef(fields[0]) + " IN (" + ",".join(
+            table.setFeatureFilter(QgsExpression.quotedColumnRef(key_field) + " IN (" + ",".join(
                 QgsExpression.quotedValue(value) for value in selected) + ")")
             table.refreshAttributes()
         pending = pending[len(selected):]

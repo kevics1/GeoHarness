@@ -309,7 +309,11 @@ class QgisLabelTable(BaseModel):
 
     layer_index: LayerReference = Field(description="Exact layer_key or 0-based source index.")
     fields: list[str] = Field(min_length=2, max_length=8, description=(
-        "Existing fields in display order. First field is a unique non-null stable roster key."
+        "Existing fields in display order; identity is key_field or first field when omitted."
+    ))
+    key_field: str = Field(default='', description=(
+        "Existing unique non-null stable source ID. May be hidden from fields; use this "
+        "when the first display field is a rank/number with nulls outside the selected roster."
     ))
     headers: dict[str, str] = Field(default_factory=dict, max_length=8,
                                    description="Optional display headings for existing fields.")
@@ -331,7 +335,7 @@ class QgisLabelTable(BaseModel):
     sort_by: str = Field(default="", description="Existing field for deterministic roster order.")
     descending: bool = False
     keys: list[str | int | float] | None = Field(default=None, min_length=1, description=(
-        "Explicit first-field values to include. Mutually exclusive with top_n."
+        "Explicit key_field (or first field) values to include. Mutually exclusive with top_n."
     ))
     field_widths: dict[str, float] = Field(default_factory=dict, description=(
         "Positive relative field widths, e.g. {name:3, risk:1}; unlisted fields use 1."
@@ -344,8 +348,11 @@ class QgisLabelTable(BaseModel):
     def validate_selection(self):
         if self.top_n is not None and (not self.sort_by or self.keys is not None):
             raise ValueError("top_n requires sort_by and cannot be combined with keys")
-        if any(key not in self.fields or not math.isfinite(value) or value <= 0
-               for key, value in self.field_widths.items()):
+        unknown = sorted(set(self.field_widths) - set(self.fields))
+        if unknown:
+            raise ValueError(f"field_widths has undisplayed fields {unknown}; "
+                             f"displayed fields={self.fields}")
+        if any(not math.isfinite(value) or value <= 0 for value in self.field_widths.values()):
             raise ValueError("field_widths requires positive finite weights for displayed fields")
         if any(key not in self.fields or value < 0 or value > 10
                for key, value in self.precision.items()):
@@ -1250,9 +1257,14 @@ class GeoQgisProjectTool(BaseTool):
                 field not in frame.columns or field == frame.geometry.name for field in table.fields
             ):
                 raise ValueError("label_table requires distinct existing vector attributes")
-            key = frame[table.fields[0]]
+            key_field = table.key_field or table.fields[0]
+            if key_field not in frame.columns or key_field == frame.geometry.name:
+                raise ValueError(f"label_table key_field {key_field!r} is not an existing "
+                                 "vector attribute")
+            key = frame[key_field]
             if key.isna().any() or key.duplicated().any():
-                raise ValueError("label_table first field must be a unique non-null roster key")
+                raise ValueError(f"label_table key {key_field!r} must be unique and non-null; "
+                                 "set key_field to a stable source ID separate from display rank")
             from geoharness.qgis.layout_table import select_roster
 
             select_roster(frame.drop(columns=frame.geometry.name).to_dict("records"),

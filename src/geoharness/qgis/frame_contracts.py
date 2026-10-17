@@ -62,4 +62,10 @@ def joint_paper_proposal(spec: dict, regions: dict, zoom: float, required: float
         else:
             needed = max(map_height, detail_height)
         candidate["height_mm"] = spec.get("height_mm", 210) + needed - map_height
-    return candidate if paper_limits(original or spec, candidate)["within_limits"] else None
+    dimensions = {"width_mm": 297, "height_mm": 210, "sidebar_width_mm": 60,
+                  "detail_height_ratio": 0.4}
+    changed = any(not math.isclose(candidate.get(key, default), spec.get(key, default),
+                                  rel_tol=1e-10, abs_tol=1e-7)
+                  for key, default in dimensions.items())
+    return (candidate if changed and paper_limits(original or spec, candidate)["within_limits"]
+            else None)

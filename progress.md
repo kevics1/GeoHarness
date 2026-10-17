@@ -324,3 +324,5 @@
 阶段1验收：86项定向pytest通过，ruff通过，source CLI version/dry-run通过（16工具，MCP未连接）。独立review子任务三次未执行指定审查，不能计为独立审查通过；保留自检和故障注入证据。
 
 阶段2：新增可选input_requirements，子进程在文件guard生效后读取实际schema/key/CRS；literal INPUTS未绑定预检失败。新增extent_geometry、artifact_facts、check_claims。65项执行/字段/CRS/事实/隔离回归通过，ruff通过。事实检查仅覆盖显式声明，不代表科学方法或自然语言全部通过。
+
+阶段3：22项布局/逐页审核/语义进展回归通过（包含真实原生QGIS双页和隐藏ID名录串联，无模型请求）；ruff通过。尺寸无进展候选被排除，重复布局有结构化诊断；保留hard zoom与覆盖约束。

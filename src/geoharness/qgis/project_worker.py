@@ -276,6 +276,7 @@ def _plan_frames(layout: Any, project: Any, layers: list[Any], payload: dict) ->
                                                        bbox.height() / extent.height()],
             "page_index": item.page()}
         frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
+        result[name]["purpose"] = frame.get("purpose", "")
         result[name]["label_layers"] = frame.get("label_layers")
     if any((spec.get(name) or {}).get("requirements") for name in ("main_frame", "detail_frame")):
         subjects = _declared_frame_evidence(project, layers, payload, result)
@@ -1219,8 +1220,14 @@ def _create_layout(
         raise error
     state = _json_digest(spec)
     if state in _fit_states or _fit_attempt > 12:
-        raise ValueError("Native layout sizing did not converge; retain subject coverage and "
-                         "use a larger or separate detail map")
+        error = ValueError("Native layout sizing did not converge; retain subject coverage and "
+                           "use a larger or separate detail map")
+        error.diagnostics = {"code": "layout_no_progress" if state in _fit_states else
+                            "layout_fit_attempt_limit", "attempt": _fit_attempt,
+                            "repeated_state": state in _fit_states, "state_digest": state,
+                            "remedy": "Change the measured constraint or layout strategy; "
+                                      "do not retry an unchanged candidate or crop subjects."}
+        raise error
     fit_states = _fit_states | {state}
     width, height = spec.get("width_mm", 297), spec.get("height_mm", 210)
     title = payload.get("title", "")
@@ -1256,6 +1263,7 @@ def _create_layout(
         item.setLayers([layers[index] for index in reversed(render)])
         item.setKeepLayerSet(True)
         frame = spec.get("main_frame" if name == "main_map" else "detail_frame") or {}
+        item.setCustomProperty("geoharness/purpose", frame.get("purpose", ""))
         if frame.get("label_layers") is not None:
             from qgis.core import QgsMapLayerStyle, QgsVectorLayer
 
@@ -1522,7 +1530,10 @@ def _create_layout(
                         _adaptations=[*adaptations, *changes])
                 diagnostics["coupled_fit_progress"] = {
                     "previous_zoom": history[-1] if history else None,
-                    "improved": progress}
+                    "improved": progress, "candidate_changes_dimensions": resized is not None,
+                    "reason": "no_dimension_progress" if resized is None else
+                              "no_measured_zoom_progress" if not progress else
+                              "automatic_fit_unavailable"}
                 error = ValueError(f"detail frame is not magnified enough (zoom={zoom:.8f}, "
                                f"required={minimum_zoom}); use the measured frame/scale "
                                "diagnostics; preserve all required subjects")
@@ -2059,6 +2070,7 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
         QgsFeatureRequest,
         QgsGeometry,
         QgsLayoutItemMap,
+        QgsMapLayerStyle,
         QgsRectangle,
         QgsRenderContext,
         QgsVectorLayer,
@@ -2078,7 +2090,7 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
         settings = item.mapSettings(extent,
             QSizeF(physical.width() * dpi / 25.4, physical.height() * dpi / 25.4), dpi, True)
         points, bboxes = [], []
-        source_indices = []
+        source_indices, label_sources = [], []
         for layer in settings.layers():
             source_index = layer.customProperty("geoharness/source_index", None)
             if source_index is not None:
@@ -2086,6 +2098,21 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
                 source_indices.append(source_index)
             if not isinstance(layer, QgsVectorLayer) or layer.renderer() is None:
                 continue
+            # Inspect the map item's saved label override, not the project layer's
+            # global flag (overview and detail may deliberately label different layers).
+            override = (item.layerStyleOverrides().get(layer.id())
+                        if item.keepLayerStyles() else None)
+            original = QgsMapLayerStyle()
+            original.readFromLayer(layer)
+            try:
+                if override:
+                    QgsMapLayerStyle(override).writeToLayer(layer)
+                if (layer.labelsEnabled() and layer.labeling() is not None
+                        and layer.labeling().settings().drawLabels):
+                    label_sources.append(source_index)
+            finally:
+                if override:
+                    original.writeToLayer(layer)
             transform = QgsCoordinateTransform(layer.crs(), item.crs(), layout.project())
             inverse = QgsCoordinateTransform(item.crs(), layer.crs(), layout.project())
             request = QgsFeatureRequest().setFilterRect(inverse.transformBoundingBox(extent))
@@ -2138,6 +2165,8 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
                     "scope": "sampled_visible_polygon_feature_bboxes"})
         frames[name] = {"extent": _rect_values(extent), "render_layers": sorted(source_indices),
             "page_index": item.page(),
+            "purpose": str(item.customProperty("geoharness/purpose", "")),
+            "label_sources": label_sources,
             "rect_page_mm": [rect.x() - layout.pageCollection().page(item.page()).pos().x(),
                              rect.y() - layout.pageCollection().page(item.page()).pos().y(),
                              rect.width(), rect.height()] if millimeters else None,

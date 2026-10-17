@@ -128,6 +128,8 @@ class ReviewStrategy(BaseModel):
 class MapIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
     severity: Literal["error", "warning", "info"]
+    severity_reason: str = Field(default='', max_length=300,
+        description='Optional explanation of severity; descriptive, never a repair instruction.')
     description: str
     location: str = ""
     issue_id: str = Field(default="", max_length=80)
@@ -141,8 +143,12 @@ class MapIssue(BaseModel):
         default_factory=list, max_length=64,
     )
     fact_refs: list[str] = Field(default_factory=list, max_length=12)
+    feature_ids: list[Annotated[int, Field(strict=True)]] = Field(
+        default_factory=list, max_length=512,
+        description="Exact native feature IDs for label placement assertions; never display ranks.")
     evidence_kind: Literal["pixel", "native", "semantic"] = "pixel"
-    native_assertion: Literal["none", "legend_node_absent", "focus_off_center"] = "none"
+    native_assertion: Literal["none", "legend_node_absent", "focus_off_center",
+                              "label_not_placed"] = "none"
     issue_code: Literal[
         "label_overlap", "symbol_overlap", "label_missing", "layer_occlusion",
         "extent_whitespace", "footer_density", "legend_mismatch", "other",
@@ -592,6 +598,23 @@ def _reconcile_native_assertions(result: MapReview, evidence: dict, diagnostics:
     facts = metadata.get("native_facts") or {}
     disputed = []
     for issue in result.issues:
+        if issue.issue_code == "label_missing" or issue.native_assertion == "label_not_placed":
+            frame = facts.get('frames', {}).get(issue.frame_id, {})
+            label_sources = frame.get('label_sources')
+            if (label_sources is not None and issue.source_indices
+                    and set(issue.source_indices).isdisjoint(label_sources)):
+                disputed.append({'issue_id': issue.issue_id,
+                    'reason': 'Labels are disabled for these sources in this saved frame; '
+                              'review the intended label-bearing page instead.'})
+            elif issue.native_assertion == 'label_not_placed' and issue.feature_ids:
+                placed = {(label.get('layer_index'), label.get('feature_id'))
+                          for label in frame.get('labels', []) if not label.get('is_unplaced')}
+                wanted = {(source, feature) for source in issue.source_indices
+                          for feature in issue.feature_ids}
+                if wanted and wanted <= placed:
+                    disputed.append({'issue_id': issue.issue_id,
+                        'reason': 'All cited feature labels are natively placed in this frame; '
+                                  'pixel overlap/readability still needs visual evidence.'})
         if issue.native_assertion == "legend_node_absent":
             rows = [row for legend in (metadata.get("layout") or {}).get("legends", {}).values()
                     if legend.get("page_index", 0) == metadata.get("review_page_index", 0)
@@ -686,6 +709,9 @@ async def review_map(
         "native工程事实与pixel视觉判断分开：legend节点存在不证明文字像素可读，"
         "renderer颜色不证明叠加后编码可见。native_assertion只描述可直接核验的工程断言；"
         "focus已居中不能据偏移印象改中心，仍可指出占幅。"
+        "按review_page_index和frame.purpose审当前页；label_sources为空表示此图框有意关闭标签，"
+        "不能要求总览页承担详图页的编号。label_not_placed必须给feature_ids，使用native ID，"
+        "不能把视窗外要素计为缺失标签；已落位标签是否压盖/可读仍需用pixel问题描述。"
         "layer_occlusion不能自动增粗描边；核对描边相对实际纸面面宽及同位置点的真实"
         "绘制顺序/符号fill alpha，保留原分类编码。无坐标或几何证据不改范围/分类。"
         "通过record_map_review提交结构化结论。该工具只记录检查结果，不执行任何动作。"
