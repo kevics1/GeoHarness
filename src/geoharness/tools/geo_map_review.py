@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from geoharness.cartography.mutation_control import current_owner, guard_map_mutations
 from geoharness.cartography.quality import (
@@ -51,6 +51,15 @@ class GeoMapReviewInput(BaseModel):
     auto_repair: bool | None = Field(
         default=None, description="False disables evidence-bound automatic presentation repair.",
     )
+    all_pages: bool = Field(default=False, description=(
+        "Review all verified pages of the same registered QGIS package in one tool call. "
+        "Review-only; merge findings into one build. No guessed page paths or hidden rebuilds."))
+
+    @model_validator(mode="after")
+    def validate_review_controller(self):
+        if self.all_pages and self.auto_repair is True:
+            raise ValueError("all_pages is review-only; omit auto_repair or set it to false")
+        return self
 
 
 def _verified_render_evidence(
@@ -169,8 +178,10 @@ class GeoMapReviewTool(BaseTool):
     name = "geo_map_review"
     description = (
         "Read actual map pixels and review layer visibility, legends, text and layout. "
-        "Use after a Python or QGIS workflow produces a PNG map. Returns issues and "
-        "suggestions using the verified backend's units; QGIS suggestions use qgis_patch "
+        "Use after a Python or QGIS workflow produces a PNG map. "
+        "Use all_pages=true for one registered QGIS package, auto_repair=false; merge "
+        "actionable findings into ONE build(spec_ref, edits). Batch mode never rebuilds. "
+        "Returns issues and suggestions in the verified backend's units; QGIS uses qgis_patch "
         "and explicit zero-based layer_index. Automatic mode applies only image/ROI-bound "
         "native presentation plans, re-renders in the same map job and reviews the "
         "actual new PNG. Returns the selected candidate, final_render and repair_stop_reason; "
@@ -191,7 +202,98 @@ class GeoMapReviewTool(BaseTool):
 
         # Include the first review: parallel callers share one provider request and repair loop.
         async with repair_loop_lock(context.metadata, "review-and-repair"):
+            if arguments.all_pages:
+                try:
+                    return await self._review_all_pages(arguments, context)
+                except (OSError, ValueError) as exc:
+                    return ToolResult(output=f"Batch review stopped ({type(exc).__name__}); "
+                        "completed reports retained. Inspect the returned project/report files.",
+                        is_error=True, metadata={"render_executed": False})
             return await self._execute_locked(arguments, context)
+
+    async def _review_all_pages(self, arguments, context) -> ToolResult:
+        """Review one immutable package, serializing ledger writes and returning a short receipt."""
+        from geoharness.cartography.jobs import map_job_receipt
+        from geoharness.qgis.artifacts import returned_page_previews
+
+        single = arguments.model_copy(update={"all_pages": False, "auto_repair": False})
+        first = await self._review_one(single, context)
+        if first.is_error or first.metadata.get("receipt_status") == "unregistered":
+            return first
+        config = context.metadata["geoharness_config"]
+        image = Path(first.metadata["image_path"]).resolve()
+        identity = first.metadata["map_id"]
+        receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
+                                  map_id=identity, artifact_path=image)
+        verified = _verified_render_evidence(image, hashlib.sha256(image.read_bytes()).hexdigest(),
+                                              receipt, [context.cwd.resolve()])
+        proof = verified.get("backend_proof", {})
+        if verified.get("backend") != "qgis" or not proof.get("manifest_path"):
+            return ToolResult(
+                output=first.output + "\nBatch unavailable: no verified QGIS package.",
+                is_error=True, metadata=first.metadata)
+        root = Path(proof["manifest_path"]).parent
+        pages = returned_page_previews(verified.get("render_metadata", {}))
+        results = [first]
+        seen = {image}
+        for page in pages:
+            path = (root / page["path"]).resolve()
+            if path in seen:
+                continue
+            seen.add(path)
+            if not path.is_relative_to(root):
+                raise ValueError("Page path leaves the verified package")
+            # Recheck each page against packaged file hashes before sending any pixels.
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            bound = _verified_render_evidence(path, digest, receipt, [context.cwd.resolve()])
+            if not path.is_relative_to(root) or bound.get("backend") != "qgis":
+                return ToolResult(output="Batch stopped: a packaged page changed or is unbound.",
+                    is_error=True, metadata={"map_id": identity, "render_executed": False,
+                                            "completed_page_count": len(results)})
+            result = await self._review_one(single.model_copy(update={
+                "file_path": str(path), "map_id": identity}), context)
+            results.append(result)
+            if result.is_error:
+                return result
+        summary = []
+        for result in results:
+            body, _ = json.JSONDecoder().raw_decode(result.output.lstrip())
+            issues = body.get("issues", [])
+            diagnostics = body.get("diagnostics", {})
+            status = ("unverified" if diagnostics.get("failure_stage") else
+                      "issues" if any(i.get("severity") in {"warning", "error"}
+                                      for i in issues) else
+                      diagnostics.get("page_visual_status") or
+                      result.metadata.get("visual_review_status",
+                                          result.metadata.get("review_status", "unverified")))
+            summary.append({"page_index": result.metadata.get("review_page_index", 0),
+                "status": status,
+                "image_path": result.metadata["image_path"],
+                "review_binding": result.metadata.get("review_binding", {}),
+                "report_path": result.metadata.get("review_path"), "issue_count": len(issues),
+                "issues": issues[:5], "issues_truncated": len(issues) > 5,
+                "request_sent": result.metadata.get("request_sent", False)})
+        summary.sort(key=lambda page: page["page_index"])
+        expected = set(_unreviewed_pages(verified.get("render_metadata", {})))
+        expected.add(verified.get("review_page_index", 0))
+        missing = sorted(expected - {item["page_index"] for item in summary})
+        statuses = [item["status"] for item in summary]
+        status = ("unverified" if missing or "unverified" in statuses else
+                  "issues" if "issues" in statuses else "passed")
+        payload = {"status": status, "map_id": identity, "pages": summary,
+                   "unreviewed_page_indices": missing,
+                   "repair_controller": "agent", "render_executed": False,
+                   "next_action": (
+                       "Review complete; deliver the package if other required checks pass. "
+                       "No new build is needed." if status == "passed" else
+                       "Review incomplete; inspect per-page reports and retry only failed pages. "
+                       "Do not redraw for a service failure." if status == "unverified" else
+                       "Merge actionable findings into one build; read report_path for full "
+                       "issues. Retain unresolved limitations.")}
+        receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
+                                  map_id=identity, artifact_path=image)
+        payload["quality_status"] = receipt.get("quality_status", "draft")
+        return ToolResult(output=json.dumps(payload, ensure_ascii=False), metadata=payload)
 
     async def _execute_locked(self, arguments, context) -> ToolResult:
         assert isinstance(arguments, GeoMapReviewInput)
@@ -228,6 +330,12 @@ class GeoMapReviewTool(BaseTool):
                 # Recovery is review-only; a service outage must not cause a new map.
                 enabled = False
             while True:
+                from geoharness.task_budget import budget_status
+
+                if enabled and budget_status(context.metadata, config).get("phase") in {
+                        "delivery", "deadline"}:
+                    stop = "Task delivery reserve reached; issues retained, no hidden rebuild."
+                    break
                 if current.metadata.get("review_page_index", 0):
                     stop = ("Additional page review is review-only; "
                             "repair the registered main package.")
@@ -461,6 +569,7 @@ class GeoMapReviewTool(BaseTool):
         evidence["backend"] = verified["backend"]
         evidence.update(build_review_iteration_context(
             context.metadata, identity, config, receipt=existing, image_sha256=digest,
+            page_index=verified.get("review_page_index", 0),
         ))
         # A user supplied layer list must not select the targets of native fixes.
         if "render_metadata" in verified:

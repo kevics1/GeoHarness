@@ -33,6 +33,22 @@ def test_sqlite_context_reads_bounded_history_without_full_load(tmp_path, monkey
     assert "storage" not in json.dumps(value)
 
 
+def test_history_is_scoped_to_the_reviewed_page(tmp_path):
+    cfg, identity, receipt, metadata = history(tmp_path)
+    job = ledger_store.load(receipt)
+    for version in job["versions"]:
+        n = version["version"]
+        version["page_reviews"] = {"1": {"image_sha256": f"detail-{n}", "report": {
+            "status": "issues", "issues": [{"severity": "warning",
+                "issue_code": "label_missing", "description": "Detail labels"}]}}}
+    ledger_store.write(receipt, job)
+    value = build_review_iteration_context(metadata, identity, cfg, page_index=1,
+                                           image_sha256="detail-4")
+    assert [v["version"] for v in value["previous_visual_reviews"]] == [2, 3]
+    assert all(v["page_index"] == 1 and v["issues"][0]["issue_code"] == "label_missing"
+               for v in value["previous_visual_reviews"])
+
+
 @pytest.mark.asyncio
 async def test_workflow_does_not_overwrite_sqlite_history_with_empty_context(tmp_path, monkeypatch):
     cfg, identity, _, metadata = history(tmp_path)

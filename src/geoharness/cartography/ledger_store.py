@@ -256,7 +256,7 @@ def history(receipt, offset=0, limit=8):
 
 
 @_errors
-def review_tail(receipt, *, exclude_image_sha256="", limit=2):
+def review_tail(receipt, *, exclude_image_sha256="", limit=2, page_index=0):
     """Thaw only a bounded tail of visual reports, never the entire ledger."""
     if type(limit) is not int or not 1 <= limit <= 2:
         raise ValueError("Review history requires 1<=limit<=2")
@@ -270,14 +270,16 @@ def review_tail(receipt, *, exclude_image_sha256="", limit=2):
             "SELECT payload,digest FROM versions ORDER BY number DESC LIMIT 32")
         for payload, digest in rows:
             value = _checked(payload, digest)
-            if (value.get("image_sha256") == exclude_image_sha256
-                    or "visual_checked" not in value.get("stages", {})):
+            visual = value.get("page_reviews", {}).get(str(page_index))
+            if visual is None and page_index == 0:
+                visual = value.get("stages", {}).get("visual_checked")
+            image_digest = (visual or {}).get("image_sha256", value.get("image_sha256"))
+            if not visual or image_digest == exclude_image_sha256:
                 continue
             # Only the visual stage is required; do not thaw unrelated analysis reports.
             versions.append({"version": value.get("version"),
-                "image_sha256": value.get("image_sha256"),
-                "stages": {"visual_checked": _thaw(
-                    value["stages"]["visual_checked"], connection, cache)}})
+                "image_sha256": image_digest,
+                "stages": {"visual_checked": _thaw(visual, connection, cache)}})
             if len(versions) == limit:
                 break
         return {"job_id": head["job_id"], "versions": versions[::-1]}

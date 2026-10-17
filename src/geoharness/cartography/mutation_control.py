@@ -29,6 +29,7 @@ def _state(context, map_id):
     if state["latest_spec_ref"]:
         state["inspect_call"] = {"action": "inspect", "spec_ref": state["latest_spec_ref"]}
         state["preflight_call"] = {"action": "preflight", "spec_ref": state["latest_spec_ref"]}
+        state["build_call"] = {"action": "build", "spec_ref": state["latest_spec_ref"]}
     return state
 
 
@@ -127,9 +128,10 @@ def guard_map_mutations(execute):
         action = getattr(arguments, "action", "")
         reviewing = self.name == "geo_map_review"
         if config is None or (not reviewing and action not in {
-                "spec", "preflight", "create", "export"}):
+                "spec", "preflight", "build", "create", "export"}):
             return await execute(self, arguments, context, **kwargs)
-        if reviewing and (arguments.auto_repair is False or arguments.retry_service_failure):
+        if reviewing and (arguments.auto_repair is False or arguments.retry_service_failure
+                          or getattr(arguments, "all_pages", False)):
             return await execute(self, arguments, context, **kwargs)
         from geoharness.qgis.prepared import load_preflight
         from geoharness.qgis.specification import load_spec, save_spec
@@ -174,9 +176,11 @@ def guard_map_mutations(execute):
                     if ref:
                         jobs.record_map_draft(job, context.metadata, cwd=context.cwd,
                                               config=config, spec_ref=ref)
-                if not reviewing and action == "create":
-                    raw = packet["parameters"] if packet else arguments.model_dump(
-                        exclude={"action", "plan_ref"}, exclude_unset=True)
+                if not reviewing and action in {"create", "build"}:
+                    ref = result.metadata.get("spec_ref")
+                    raw = (load_spec(ref, cwd=context.cwd, settings=config.qgis) if ref else
+                           packet["parameters"] if packet else arguments.model_dump(
+                               exclude={"action", "plan_ref"}, exclude_unset=True))
                     raw = json.loads(json.dumps(raw))
                     if raw.get("layout"):
                         raw["layout"].pop("layout_plan", None)
@@ -190,7 +194,7 @@ def guard_map_mutations(execute):
                             f"draft registration failed: {exc}", is_error=True,
                             metadata={**result.metadata, "render_executed": True,
                                       "receipt_status": "failed", "quality_status": "draft"})
-                if reviewing or action == "create":
+                if reviewing or action in {"create", "build"}:
                     try:
                         state = _state(context, job)
                     except (OSError, ValueError) as exc:
@@ -201,6 +205,8 @@ def guard_map_mutations(execute):
                                 "receipt_status": "failed", "quality_status": "draft"})
                     public = {key: state[key] for key in
                               ("map_id", "latest_version", "latest_spec_ref")}
+                    if state.get("build_call"):
+                        public["build_call"] = state["build_call"]
                     if packet and not packet.get("binding"):
                         public["version_binding"] = "legacy_unbound; preflight for revision checks"
                     result = _enrich(result, public)

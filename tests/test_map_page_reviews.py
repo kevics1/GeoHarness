@@ -3,6 +3,7 @@
 import hashlib
 import json
 
+import pytest
 from PIL import Image
 
 from geoharness.cartography.jobs import (
@@ -12,6 +13,84 @@ from geoharness.cartography.jobs import (
     record_map_version,
 )
 from geoharness.config.settings import GeoConfig
+
+
+async def test_batch_reviews_verified_pages_once_without_hidden_builds(tmp_path):
+    from openharness.api.client import ApiMessageCompleteEvent
+    from openharness.api.usage import UsageSnapshot
+    from openharness.engine.messages import ConversationMessage
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+    config, metadata, job, image, _, _ = setup_pages(tmp_path)
+
+    class Reviewer:
+        calls = 0
+
+        async def stream_message(self, request):
+            self.calls += 1
+            yield ApiMessageCompleteEvent(message=ConversationMessage.from_user_text(
+                json.dumps({"status": "passed", "summary": "Synthetic pixels checked",
+                            "issues": []})), usage=UsageSnapshot())
+
+    reviewer = Reviewer()
+    metadata.update(geoharness_config=config, map_review_client=reviewer)
+    context = ToolExecutionContext(cwd=tmp_path, metadata=metadata)
+    args = GeoMapReviewInput(file_path=str(image), task="Inspect both pages", all_pages=True)
+    result = await GeoMapReviewTool().execute(args, context)
+    assert not result.is_error, result.output
+    body = json.loads(result.output)
+    assert body["status"] == "passed"
+    assert [p["page_index"] for p in body["pages"]] == [0, 1]
+    assert not body["render_executed"] and reviewer.calls == 2
+    assert map_job_receipt(metadata, cwd=tmp_path, config=config, map_id=job)[
+        "latest_version"] == 1
+    again = await GeoMapReviewTool().execute(args, context)
+    assert not again.is_error, again.output
+    assert reviewer.calls == 2
+    assert not any(p["request_sent"] for p in json.loads(again.output)["pages"])
+
+
+async def test_batch_cannot_pass_a_declared_page_without_returned_preview(tmp_path, monkeypatch):
+    from openharness.api.client import ApiMessageCompleteEvent
+    from openharness.api.usage import UsageSnapshot
+    from openharness.engine.messages import ConversationMessage
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+    config, metadata, job, image, _, _ = setup_pages(tmp_path)
+    manifest = tmp_path / "project.json"
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["native_facts"]["page_previews"] = value["native_facts"]["page_previews"][:1]
+    value["layout"]["effective_parameters"] = {"detail_placement": "page"}
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    record_map_version(job, metadata, cwd=tmp_path, config=config, image_path=image,
+                       project_dir=tmp_path, layout=value["layout"], preflight=None)
+
+    class Reviewer:
+        async def stream_message(self, request):
+            yield ApiMessageCompleteEvent(message=ConversationMessage.from_user_text(
+                json.dumps({"status": "passed", "summary": "Pixels checked", "issues": []})),
+                usage=UsageSnapshot())
+
+    metadata.update(geoharness_config=config, map_review_client=Reviewer())
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(file_path=str(image),
+        task="Inspect", all_pages=True), ToolExecutionContext(cwd=tmp_path, metadata=metadata))
+    assert not result.is_error, result.output
+    body = json.loads(result.output)
+    assert body["status"] == "unverified"
+    assert body["unreviewed_page_indices"] == [1]
+
+
+def test_batch_cannot_enable_second_repair_controller():
+    from pydantic import ValidationError
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput
+
+    with pytest.raises(ValidationError, match="review-only"):
+        GeoMapReviewInput(file_path="map.png", task="Inspect", all_pages=True, auto_repair=True)
 
 
 def sha(path):

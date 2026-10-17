@@ -505,7 +505,7 @@ MapEdit = Annotated[QgisStyleEdit | QgisLabelEdit | QgisFrameEdit | QgisLayerEdi
 class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["create", "inspect", "export", "preflight", "spec", "help", "recover"]
+    action: Literal["build", "create", "inspect", "export", "preflight", "spec", "help", "recover"]
     section: Literal["workflow", "layer", "roster", "style", "labels", "frame", "layout",
                      "edits"] = "workflow"
     detail_path: list[str | int] = Field(default_factory=list, max_length=16,
@@ -517,11 +517,12 @@ class GeoQgisProjectInput(BaseModel):
     history_limit: int | None = Field(default=None, ge=1, le=32,
         description="Ledger inspect window size from a returned read_call; preserve unchanged.")
     edits: list[MapEdit] = Field(default_factory=list, max_length=32,
-        description="Typed incremental spec operations. Use with action=spec + spec_ref; "
+        description="Typed incremental spec operations. Use with action=build/spec + spec_ref; "
                     "target returned layer_key, never reconstruct paths or rewrite all layers.")
     spec_ref: str = Field(default="", description=(
         "Returned immutable qgis-spec reference. action=spec saves/edits a draft; "
-        "action=preflight checks it. Use only action+spec_ref+optional patches."
+        "action=build applies edits, validates and exports in one native job. "
+        "action=preflight checks it. Use only action+spec_ref+optional edits/patches."
     ))
     patches: list[QgisSpecPatch] = Field(default_factory=list, max_length=64, description=(
         "Small draft edits: [{path:[layers,0,style,color],value:#ff0000}] or "
@@ -622,11 +623,12 @@ class GeoQgisProjectInput(BaseModel):
                 raise ValueError("help accepts only action and section")
             return self
         if self.spec_ref:
-            if self.action not in {"spec", "preflight", "inspect"} or self.model_fields_set - {
+            if self.action not in {"build", "spec", "preflight", "inspect"} or (
+                    self.model_fields_set - {
                 "action", "spec_ref", "patches", "edits", *(
                     selectors if self.action == "inspect" else set())
-            }:
-                raise ValueError("spec_ref accepts only action=spec/preflight/inspect, "
+            }):
+                raise ValueError("spec_ref accepts only action=build/spec/preflight/inspect, "
                                  "spec_ref and optional patches/edits")
             if self.action == "inspect" and (self.patches or self.edits):
                 raise ValueError("inspect is read-only; use action=spec to edit")
@@ -652,7 +654,7 @@ class GeoQgisProjectInput(BaseModel):
             if self.project_path:
                 raise ValueError('spec describes a new map; existing projects use inspect/export')
             return self
-        if self.action in {"create", "preflight", "spec"}:
+        if self.action in {"build", "create", "preflight", "spec"}:
             if not self.layers:
                 raise ValueError("create requires at least one local layer")
             if not any(layer.role == "map" for layer in self.layers):
@@ -720,15 +722,16 @@ class GeoQgisProjectTool(BaseTool):
     name = "geo_qgis_project"
     description = (
         "Authoritative QGIS map contract: local data/data: refs -> editable project and "
-        "PNG/PDF exported from that same layout. Build with spec, inspect the returned "
-        "spec_ref, then use typed edits by layer_key (layer/style/labels/frame/roster). "
+        "PNG/PDF exported from that same layout. Save spec once, then build(spec_ref, "
+        "edits by layer_key) to validate and export in ONE native job and model roundtrip. "
+        "Batch related layer/style/labels/frame/roster edits into that build. "
         "Use help(section=style/labels/frame/layout/edits) for actual runtime schemas, "
         "not Processing help or geo_cartography bridge fields. Read the always-visible "
         "help cautions before composing arguments. render_layers includes focus/label layers; "
         "detail needs focus_layers or detail_extent. Diagnostic selectors are help/inspect "
         "only. Roster keys are unique/non-null; top_n needs sort_by and excludes keys. "
-        "Preflight every changed "
-        "spec_ref; create accepts ONLY action+returned plan_ref. Advanced full inputs and "
+        "A successful build already validates; do not repeat preflight/create. Legacy "
+        "create accepts ONLY action+returned plan_ref. Advanced full inputs and "
         "path patches remain supported. Layers draw bottom to top; native styles use "
         "style.renderer/field/categories. Each frame declares purpose and required subject "
         "coverage; explicit extent and focus_layers are mutually exclusive. Review zoom "
@@ -841,7 +844,8 @@ class GeoQgisProjectTool(BaseTool):
                 parameters = apply_edits(parameters,
                     [edit.model_dump(exclude_unset=True) for edit in arguments.edits])
                 checked = GeoQgisProjectInput.model_validate({**parameters,
-                    "action": 'spec' if arguments.action == 'spec' else 'preflight'})
+                    "action": ("create" if arguments.action == "build" else
+                               "spec" if arguments.action == "spec" else "preflight")})
                 parameters = checked.model_dump(
                     exclude={"action", "plan_ref", "spec_ref", "patches", "edits", "section"},
                     exclude_unset=True)
@@ -865,6 +869,7 @@ class GeoQgisProjectTool(BaseTool):
                                    for index, layer in enumerate(
                                        canonical_spec(parameters).get("layers", []))],
                         "preflight_call": {"action": "preflight", "spec_ref": reference},
+                        "build_call": {"action": "build", "spec_ref": reference},
                         "note": "Draft schema checked; data/native layout have not been checked."},
                         ensure_ascii=False), metadata={"spec_ref": reference,
                                                        "render_executed": False})
@@ -872,6 +877,8 @@ class GeoQgisProjectTool(BaseTool):
             except (OSError, ValueError) as exc:
                 return ToolResult(output=f"Error: map specification failed: {exc}", is_error=True,
                                   metadata={"deterministic_error": True, "render_executed": False})
+        if arguments.action == "build":
+            arguments = arguments.model_copy(update={"action": "create"})
         if arguments.plan_ref:
             from geoharness.qgis.prepared import load_preflight
 
@@ -930,9 +937,10 @@ class GeoQgisProjectTool(BaseTool):
         else:
             result = await self._execute(arguments, context, source_bindings=_source_bindings)
         if spec_reference and not result.is_error:
-            visible = json.loads(result.output)
+            raw = result.output.lstrip()
+            visible, end = json.JSONDecoder().raw_decode(raw)
             visible["spec_ref"] = spec_reference
-            result = ToolResult(output=json.dumps(visible, ensure_ascii=False),
+            result = ToolResult(output=json.dumps(visible, ensure_ascii=False) + raw[end:],
                                 is_error=result.is_error,
                                 metadata={**result.metadata, 'spec_ref': spec_reference})
         elif spec_reference and result.is_error:

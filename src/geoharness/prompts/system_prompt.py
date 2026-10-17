@@ -174,7 +174,11 @@ _TOOL_CATALOG = """\
     use actual schema keys: layer.style.color, layer.label_style.size_pt,
     layout.width_mm/height_mm; do not invent color/type on a layer, paper_size or
     page_width_mm. Array append uses the exact next index; existing styles stay stored.
-    Preflight the spec_ref. Create the frozen plan with ONLY action and plan_ref.
+    Prefer action=build with spec_ref and combined edits: data/native validation and export
+    run once. Do not additionally preflight/create a successful unchanged build.
+    Legacy frozen creation remains preflight(spec_ref), then ONLY action and plan_ref.
+    Review a QGIS package with geo_map_review(all_pages=true,auto_repair=false); merge
+    findings into one build. Do not alternate an internal repair loop with manual repairs.
   - Choose EXPLICIT extent OR focus_layers (FIT), never both for the same frame.
     Label rosters use fields[0] as a unique nonnull key; columns counts parallel full
     tables, not property fields. top_n requires sort_by; omit selection for all rows.

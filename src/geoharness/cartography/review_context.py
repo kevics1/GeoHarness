@@ -16,7 +16,7 @@ _ISSUE_CODES = {
 
 
 def _existing_receipt(metadata: dict[str, Any], map_id: str, config: GeoConfig,
-                      *, image_sha256: str = "") -> dict:
+                      *, image_sha256: str = "", page_index: int = 0) -> dict:
     state = metadata.get("map_job_state", {})
     if not isinstance(state, dict) or not state.get("cwd"):
         return {}
@@ -38,7 +38,8 @@ def _existing_receipt(metadata: dict[str, Any], map_id: str, config: GeoConfig,
 
             if path.parent.name != identity or not ledger_store.is_current(path):
                 return {}
-            return ledger_store.review_tail(path, exclude_image_sha256=image_sha256)
+            return ledger_store.review_tail(path, exclude_image_sha256=image_sha256,
+                                            page_index=page_index)
         return receipt if isinstance(receipt, dict) and receipt.get("job_id") == identity else {}
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
@@ -46,7 +47,7 @@ def _existing_receipt(metadata: dict[str, Any], map_id: str, config: GeoConfig,
 
 def build_review_iteration_context(
     metadata: dict[str, Any], map_id: str, config: GeoConfig, *,
-    receipt: dict[str, Any] | None = None, image_sha256: str = "",
+    receipt: dict[str, Any] | None = None, image_sha256: str = "", page_index: int = 0,
 ) -> dict[str, Any]:
     """Read at most two earlier visual summaries; expose no raw provider diagnostics."""
     result = {
@@ -55,8 +56,9 @@ def build_review_iteration_context(
         "generation_unlimited": True,
         "previous_visual_reviews": [],
     }
-    receipt = receipt if isinstance(receipt, dict) else _existing_receipt(
-        metadata, map_id, config, image_sha256=image_sha256)
+    supplied = isinstance(receipt, dict)
+    receipt = receipt if supplied else _existing_receipt(
+        metadata, map_id, config, image_sha256=image_sha256, page_index=page_index)
     aliases = metadata.get("map_job_state", {}).get("aliases", {})
     identity = aliases.get(map_id, map_id) if isinstance(aliases, dict) else map_id
     if receipt.get("job_id") not in (None, identity):
@@ -64,6 +66,12 @@ def build_review_iteration_context(
     versions = receipt.get("versions", [])
     if not isinstance(versions, list):
         return result
+    if supplied and page_index:
+        versions = [{"version": v.get("version"),
+                     "image_sha256": v["page_reviews"][str(page_index)].get("image_sha256"),
+                     "stages": {"visual_checked": v["page_reviews"][str(page_index)]}}
+                    for v in versions if isinstance(v, dict)
+                    and str(page_index) in v.get("page_reviews", {})]
     earlier = [version for version in versions if isinstance(version, dict)
                and version.get("image_sha256") != image_sha256]
     for version in earlier[-2:]:
@@ -89,6 +97,7 @@ def build_review_iteration_context(
         number = version.get("version")
         status = report.get("status", visual.get("status", "unverified"))
         result["previous_visual_reviews"].append({
+            "page_index": page_index,
             "version": number if isinstance(number, int) and not isinstance(number, bool) else None,
             "status": (status if status in ("passed", "issues", "unverified", "stale")
                        else "unverified"),

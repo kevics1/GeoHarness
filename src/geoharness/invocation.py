@@ -17,8 +17,9 @@ PYTHON_CAUTIONS = (
 )
 
 QGIS_CAUTIONS = (
-    "Prefer spec -> edits(spec_ref, layer_key) -> preflight -> create_call unchanged. "
-    "Frozen create accepts only action+plan_ref; changes need new preflight.",
+    "Prefer spec once, then build(spec_ref, edits by layer_key): validation and export "
+    "share one native job. Do not also preflight/create the same unchanged build. "
+    "Legacy frozen create accepts only action+plan_ref; changes need new validation.",
     "Each frame: FIT focus_layers OR explicit extent, never both. "
     "render_layers must include focus_layers/label_layers; a detail needs a range source.",
     "Keep stable layer_key and declared subject requirements. Extent tightening must "
@@ -58,6 +59,7 @@ def action_forms() -> dict:
     return {
         "help": ["action", "section", "detail_path?", "offset?", "limit?"],
         "spec": ["action", "spec_ref", "edits or patches"],
+        "build": ["action", "spec_ref", "edits or patches?"],
         "preflight": ["action", "spec_ref"],
         "create": ["action", "plan_ref"],
         "inspect": ["action", "spec_ref or plan_ref or project_path or map_id"],

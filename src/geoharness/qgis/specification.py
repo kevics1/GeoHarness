@@ -174,7 +174,8 @@ def contract_help(section: str) -> dict:
 
     result = {"section": section, "contract": "geo_qgis_project",
         "cautions": section_cautions(section),
-        "workflow": ["spec -> inspect/typed edits -> preflight(spec_ref) -> create(plan_ref)"],
+        "workflow": ["spec once -> build(spec_ref, edits); one native validation/export job",
+                     "Legacy: preflight(spec_ref) -> create(plan_ref)"],
         "rules": ["Only action+plan_ref for frozen create.",
                   "Frame references accept exact layer_key or 0-based index, never guessed names.",
                   "Explicit extent and focus_layers are mutually exclusive per frame.",

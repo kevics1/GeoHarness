@@ -281,6 +281,7 @@ async def review_with_budget(
     # History belongs to the actual artifact, not to the shared accounting UUID.
     iteration = build_review_iteration_context(
         metadata, map_id or image_map_identity(path), config, image_sha256=digest,
+        page_index=(evidence.get("render_metadata") or {}).get("review_page_index", 0),
     )
     evidence = {**evidence, **iteration}
     service_key = _review_service_key(config)
