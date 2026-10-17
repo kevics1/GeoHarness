@@ -338,3 +338,7 @@
 用户确认没有另一会话修改，以当前会话为准。6049重叠的10个文件均已精确备份，manifest及原文件哈希核验通过；8项保留文件（含.env.example）已冻结哈希。发现复制完成后第二次台账读取仍导致整体失败，并且登记失败仍写旧回执；两项故障注入已复现。补丁改为返回copied_unregistered、保留实际路径、draft和ledger_errors，不写过时map-receipt。自动编辑因匹配两处代码而断言停止，未写文件，已改为精确补丁。独立审查再次返回未执行任务的确认语，不计作有效审查。
 
 工作区整合完成：精确备份后快进到f163ab8；Git行尾/索引缓存阻止首轮merge，实际diff为空后刷新有限文件索引成功。6049定向80项通过、ruff/diff与CLI通过。重新构建并安装，96模块/34随包文件一致，安装版合成三页与实际交付通过，0模型调用且保持draft/unverified。备份和8项保留哈希复验通过；独立审查仍无有效结果，真实业务验收未运行。详见diagnostics/2026-10-17-tool-contracts-validation.md集成验收。
+
+第四轮启动：用户授权六阶段和调用前易错提醒。已有修改仅.env.example及既存未跟踪诊断，均保留。采用独立文件职责并行开发；主Agent负责UI、预览授权与最终验证。默认错误显示×→NL，模型实际结果/失败状态/会话原文保持。
+
+阶段1：真实React/Ink默认/codex两种样式、paired工具和恢复的孤立错误均实渲染通过，错误正文不进入可见文本但原对象保持。临时frontend源码overlay+junction复用既有依赖；上游component SHA不变、cleanup不删除依赖target。GitHub调研Ink/MIT现有render(stdout)满足验证，不引入ink-testing-library依赖。阶段2：共享返回产物提取，Python精确授权逐页与名录；5项子进程读取、失败job、越界、symlink、只读边界检查通过。

@@ -286,3 +286,10 @@
 复制后的台账读取故障必须与复制前候选校验区别处理：复制前默认拒绝无台账的已核验交付；复制后保存实际目录和清单，明确未登记与质量未验证。失败登记不能把旧receipt写成此次交付凭据。
 
 当前工作树已统一为验证后的实现；旧重叠改动仅保存在精确备份，不能与新SQLite契约混用。安装版合成串联可以验证工程契约与交付可达，质量仍须真实逐页像素及业务核对。
+
+## Oct17 第四轮核实
+
+- Python有9个顶层输入、schema2701字符、description4463字符；预检只编译/顶层模块/INPUTS别名，不证明任意脚本语义。输入条件目前为表格/矢量检查，栅格缺形状检查。
+- QGIS有24个顶层输入、19个defs、schema27877字符；help_output删除description/default和defs，重要规则不能只藏在详情中。
+- 第二页已由native_facts.page_previews返回并写project.json.files，Python精确白名单只收顶层preview/output/project_manifest，导致合理读取被拒。
+- 现有上游React ToolCallDisplay失败时展开5/8行；正常结果仅NL。需GeoHarness自有展示扩展，不能改上游文件或把is_error改为成功。React源码约96KB，可建立临时源码overlay并复用现有node_modules，不复制依赖。

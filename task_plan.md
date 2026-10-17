@@ -259,3 +259,16 @@
 1. 核验10个重叠文件备份及8项保留文件哈希 — complete。
 2. 补齐复制后台账读取失败的草稿交付状态及回归 — complete（47项交付、9项故障隔离定向检查通过）。
 3. 快进合并、原目录定向回归、构建安装一致性 — complete（80项通过；96模块/34随包文件零差异；安装版合成三页交付及CLI通过）。
+
+## Oct17 第四轮：易错提醒、紧凑错误展示与运行时契约
+
+用户已授权全部实施，包括两个重点工具的调用前注意事项；不改原始数据、旧图、上游依赖文件、AGENTS/Skills和已有.env.example修改，不调用真实模型/业务整图，不推送。
+
+1. TUI错误按实际非空行数折叠为小×和NL，保留真实模型结果/会话/失败状态 — complete（React/Ink两种样式及历史孤立结果已实渲染；补查启动失败清理）。
+2. QGIS逐页预览精确授权与跨工具读取回归 — complete（5项子进程/边界定向检查通过）。
+3. 按动作精简帮助保留关键规则，系统提示与工具注意事项，字段错误定位 — pending。
+4. 栅格常用封装、维度与写出检查、错误分类 — pending。
+5. 主体集合FIT/覆盖与布局实测候选，保留严格约束 — pending。
+6. 集成回归、代码审查、文档、构建安装一致性及CLI — pending。
+
+并行写入边界：主Agent负责launcher/TUI扩展、geo_python和集成；raster_contracts仅execution栅格/分类；qgis_layout仅worker/frame_contracts/layout；tool_guidance仅prompt/specification/inspection/geo_qgis_project。各执行者不提交，共享计划仅主Agent维护。

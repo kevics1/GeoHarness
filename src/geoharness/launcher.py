@@ -237,12 +237,18 @@ async def _run_react_tui(
     from openharness.ui import react_launcher
     from openharness.ui.app import run_repl
 
-    react_launcher.build_backend_command = _geo_backend_command
+    from geoharness.frontend import frontend_overlay
 
-    await run_repl(
-        prompt=prompt,
-        cwd=str(cwd),
-    )
+    original_command = react_launcher.build_backend_command
+    original_frontend = react_launcher.get_frontend_dir
+    try:
+        with frontend_overlay(original_frontend()) as frontend:
+            react_launcher.build_backend_command = _geo_backend_command
+            react_launcher.get_frontend_dir = lambda: frontend
+            await run_repl(prompt=prompt, cwd=str(cwd))
+    finally:
+        react_launcher.build_backend_command = original_command
+        react_launcher.get_frontend_dir = original_frontend
     return 0
 
 
@@ -383,7 +389,9 @@ async def _render_event(event: object) -> None:
             print(f"  参数: {preview}")
     elif isinstance(event, ToolExecutionCompleted):
         if event.is_error:
-            print(f"  [错误] {event.output[:500]}")
+            from geoharness.frontend import tool_result_summary
+
+            print(f"  {tool_result_summary(event.output, is_error=True)}")
         else:
             output = event.output
             if len(output) > 500:
