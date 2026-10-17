@@ -136,14 +136,17 @@ class MapReviewConfig(BaseModel):
                                         description="Legacy setting; review count is unlimited.")
     total_timeout_seconds: float = Field(default=120, gt=0, deprecated=True,
                                         description="Legacy setting; cumulative time is unlimited.")
-    timeout_seconds: float = Field(default=90, gt=0, le=300)
+    timeout_seconds: float = Field(default=180, gt=0, le=300)
+    read_timeout_seconds: float = Field(default=90, gt=0, le=300,
+        description="Network idle timeout for streamed pixel review; total deadline is separate.")
     service_failure_ttl_seconds: float = Field(
         default=60, gt=0, le=86400, allow_inf_nan=False,
         description="Transient review outage cooldown; server Retry-After may extend it.",
     )
     max_tokens: int = Field(default=8192, ge=256, le=65536)
     max_image_side: int = Field(default=1800, ge=256, le=4096)
-    auto_repair: bool = True
+    auto_repair: bool = Field(default=False, deprecated=True,
+        description="Legacy setting; geo_map_review is always read-only and ignores it.")
     max_rois: int = Field(default=5, ge=0, le=8)
     roi_max_side: int = Field(default=2048, ge=256, le=4096)
     max_border_fraction: float = Field(default=0.08, gt=0, le=0.25)

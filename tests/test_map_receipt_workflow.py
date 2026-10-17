@@ -121,13 +121,11 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
     footer = mapped.metadata["layout"]["footer_text"]
     for text in ("受影响 2", "未影响 1", "20 m", "EPSG:32648", "EPSG:32647"):
         assert text in footer
-    review_payload = json.loads(reviewer.requests[0].messages[0].content[0].text.split(
-        "任务及渲染证据：\n", 1,
-    )[1])["evidence"]
-    assert "versions" not in review_payload
-    assert review_payload["previous_visual_reviews"] == []
-    assert review_payload["remaining_render_versions"] is None
-    assert review_payload["generation_unlimited"] is True
+    review_prompt = reviewer.requests[0].messages[0].content[0].text
+    assert "previous_visual_reviews" not in review_prompt
+    assert "remaining_render_versions" not in review_prompt
+    assert "qgis_patch" not in review_prompt
+    assert '"page_index"' in review_prompt
     receipt = mapped.metadata["map_receipt"]
     assert receipt["quality_status"] == "passed"
     assert receipt["analysis_correctness"] == "unverified"
@@ -331,7 +329,7 @@ async def test_review_of_existing_old_version_does_not_register_new_render(tmp_p
     assert receipt["current_version"] == 1 and receipt["quality_status"] == "passed"
 
 
-async def test_same_image_updates_measured_layout_and_tracks_report_mutation(tmp_path):
+async def test_image_review_does_not_replace_packaged_layout_with_unrelated_sidecar(tmp_path):
     context, image, _, _, _ = _verified_package(tmp_path)
     context.metadata["map_review_client"] = PassingReviewer()
     geometry = {
@@ -358,8 +356,8 @@ async def test_same_image_updates_measured_layout_and_tracks_report_mutation(tmp
     )
     args = GeoMapReviewInput(file_path=str(image), task="Same pixels")
     first = await GeoMapReviewTool().execute(args, context)
-    assert first.metadata["map_receipt"]["stages"]["layout_checked"]["status"] == "issues"
-    assert first.metadata["map_receipt"]["stages"]["visual_checked"]["status"] == "unverified"
+    assert first.metadata["map_receipt"]["stages"]["layout_checked"]["status"] == "passed"
+    assert first.metadata["map_receipt"]["stages"]["visual_checked"]["status"] == "passed"
     path.write_text(json.dumps(geometry), encoding="utf-8")
     second = await GeoMapReviewTool().execute(args, context)
     assert second.metadata["map_receipt"]["quality_status"] == "passed"
@@ -367,5 +365,5 @@ async def test_same_image_updates_measured_layout_and_tracks_report_mutation(tmp
     path.write_text("{}", encoding="utf-8")
     config = context.metadata["geoharness_config"]
     receipt = map_job_receipt({}, cwd=tmp_path, config=config, artifact_path=image)
-    assert receipt["stages"]["layout_checked"]["status"] == "stale"
-    assert receipt["quality_status"] == "draft"
+    assert receipt["stages"]["layout_checked"]["status"] == "passed"
+    assert receipt["quality_status"] == "passed"

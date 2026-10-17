@@ -177,8 +177,9 @@ _TOOL_CATALOG = """\
     Prefer action=build with spec_ref and combined edits: data/native validation and export
     run once. Do not additionally preflight/create a successful unchanged build.
     Legacy frozen creation remains preflight(spec_ref), then ONLY action and plan_ref.
-    Review a QGIS package with geo_map_review(all_pages=true,auto_repair=false); merge
-    findings into one build. Do not alternate an internal repair loop with manual repairs.
+    Review a QGIS package with geo_map_review(all_pages=true). It only reads images and
+    reports visible issues; it never modifies or rebuilds a map. If repairs are needed,
+    the agent consolidates actual findings into one explicit build.
   - Choose EXPLICIT extent OR focus_layers (FIT), never both for the same frame.
     Label rosters use fields[0] as a unique nonnull key; columns counts parallel full
     tables, not property fields. top_n requires sort_by; omit selection for all rows.
@@ -220,7 +221,9 @@ _TOOL_CATALOG = """\
     estimates, missing-data policy and velocity assumptions explicitly; no invented
     certainty, no inference that all residents are reachable from a connected raw graph.
 - **geo_map_review**: Inspect an actual PNG/JPEG map produced by a Python script.
-  - Provide file_path, task and evidence (expected layers, analysis/source summary).
+  - Provide file_path and task. Do not send engineering tables or repair parameters.
+    The tool only reads images and reports visible issues and limitations; it never
+    generates QGIS patches, changes styles, rebuilds maps or selects another version.
   - Use the same map_id as geo_python. Consolidate concrete errors/warnings into
     one repair. Stop on passed, unverified, info-only suggestions or no actionable change.
     Unchanged image checks are cached; never repeat a failed check blindly.
@@ -365,8 +368,8 @@ def _build_execution_section(config: GeoConfig) -> str:
         "opacity or a separate route/detail map; preserve all required layers and methods. "
         "When the same overlap persists after one consolidated repair, change composition "
         "in the current request; do not postpone known fixes until "
-        "a new user request. Use qgis_patch only for QGIS mm/pt parameters, never Matplotlib "
-        "width/height in inches or point_size in square points. "
+        "a new user request. geo_map_review only reports pixel findings; make any later "
+        "explicit native edits with QGIS mm/pt parameters and actual layer keys. "
         "Use native cartography only when it preserves every required symbol class, "
         "background and annotation. Do not replace a rich custom map with a simpler "
         "native map to obtain an editable project. For custom Python maps use "

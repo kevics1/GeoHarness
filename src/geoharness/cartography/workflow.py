@@ -23,7 +23,7 @@ _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDic
 _REPAIR_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 # Bump only when the response contract/compatibility changes. Legacy failed
 # cache entries can then recover without repeatedly resending unchanged images.
-REVIEW_CONTRACT_VERSION = 7
+REVIEW_CONTRACT_VERSION = 8
 _BUDGET_LOCK = threading.RLock()
 
 
@@ -271,6 +271,7 @@ async def review_with_budget(
     client: Any = None,
     retry_invalid_response: bool = False,
     retry_service_failure: bool = False,
+    pixel_only: bool = False,
 ) -> tuple[MapReview, dict[str, Any]]:
     with _BUDGET_LOCK:
         identity, _ = _budget_entry(map_id or image_map_identity(path), metadata, config)
@@ -302,6 +303,7 @@ async def review_with_budget(
             client=client,
             retry_invalid_response=retry_invalid_response,
             retry_service_failure=retry_service_failure,
+            pixel_only=pixel_only,
         )
 
 
@@ -317,12 +319,14 @@ async def _review_once(
     client: Any,
     retry_invalid_response: bool,
     retry_service_failure: bool,
+    pixel_only: bool,
 ) -> tuple[MapReview, dict[str, Any]]:
     settings = config.map_review
     fingerprint = hashlib.sha256(
         json.dumps(
             {
                 "contract_version": REVIEW_CONTRACT_VERSION,
+                "pixel_only": pixel_only,
                 "backend": evidence.get("backend", "matplotlib"),
                 "enabled": settings.enabled,
                 "model": settings.model or config.model,
@@ -332,6 +336,7 @@ async def _review_once(
                 ).hexdigest(),
                 "max_tokens": settings.max_tokens,
                 "timeout_seconds": settings.timeout_seconds,
+                "read_timeout_seconds": settings.read_timeout_seconds,
                 "max_image_side": settings.max_image_side,
                 "max_rois": getattr(settings, "max_rois", 5),
                 "roi_max_side": getattr(settings, "roi_max_side", 2048),
@@ -478,6 +483,7 @@ async def _review_once(
             evidence=evidence,
             client=client,
             on_request_started=request_started,
+            **({"pixel_only": True} if pixel_only else {}),
         )
     finally:
         state["seconds"] += time.monotonic() - started

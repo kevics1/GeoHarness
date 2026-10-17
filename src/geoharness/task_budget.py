@@ -28,7 +28,7 @@ def budget_context(metadata, config):
         return ""
     return ("\nTask time target: " + json.dumps(status) + ". "
             "Merge related map fixes into one build(spec_ref, edits). Review all verified pages "
-            "with all_pages=true, auto_repair=false; do not run a second repair controller. "
+            "with all_pages=true; image review only reports findings and never rebuilds. "
             "During delivery/deadline, prioritize factual blockers and delivery of existing "
             "artifacts with precise unresolved status; stop cosmetic refinement. Never claim "
             "unverified work passed. This is a time target, not permission to weaken checks.\n")

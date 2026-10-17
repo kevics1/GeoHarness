@@ -300,10 +300,13 @@ async def test_public_review_uses_bound_manifest_over_caller_backend_claim(image
     assert not result.is_error, result.output
     assert result.metadata["backend"] == "qgis"
     prompt = reviewer.requests[0].messages[0].text
-    assert '"name": "Sites"' in prompt and '"name": "Fake"' not in prompt
+    assert '"name": "Fake"' not in prompt
+    assert '"layers"' not in prompt
     report = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
-    assert report["qgis_patch"]["layers"][0]["layer_index"] == 0
-    assert '"remaining_render_versions"' in prompt
+    assert "qgis_patch" not in report
+    assert report["status"] == "unverified"  # Old repair payload is not a pixel report.
+    assert report["diagnostics"]["failure_stage"] == "schema"
+    assert '"remaining_render_versions"' not in prompt
 
 
 async def test_unproven_caller_backend_cannot_enable_native_patch_schema(image):
@@ -319,7 +322,7 @@ async def test_unproven_caller_backend_cannot_enable_native_patch_schema(image):
     assert "layout_patch" not in schema["properties"]
     assert "qgis_patch" not in schema["properties"]
     report = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
-    assert report["qgis_patch"] is None
+    assert "qgis_patch" not in report
 
 
 def test_changed_manifest_or_preview_cannot_prove_backend(image):

@@ -391,7 +391,7 @@ async def test_only_clean_cached_pixels_can_rebind_to_a_new_native_package(
         assert report["diagnostics"]["pixel_pass_rebound_to_current_package"] is True
     else:
         assert report["diagnostics"]["review_binding"]["version"] == 1
-        assert report["qgis_patch"] is None
+        assert "qgis_patch" not in report
         assert report["diagnostics"]["repair_binding_status"] == "stale_cached_package"
 
 
@@ -446,118 +446,6 @@ def test_native_numbering_is_a_source_bound_derivation_and_cannot_overwrite():
     assert "number" not in source.columns
     with pytest.raises(ValueError, match="overwrite"):
         derive_frame(source, {"number_field": "name"})
-
-
-async def test_automatic_review_creates_once_in_same_job_and_reviews_new_png(tmp_path, monkeypatch):
-    from openharness.config.settings import PermissionSettings
-    from openharness.permissions.checker import PermissionChecker
-    from openharness.tools.base import ToolExecutionContext, ToolResult
-    from test_map_review_evidence import Reviewer
-
-    from geoharness.cartography.workflow import reserve_map_render
-    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
-    from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
-
-    image, receipt, metadata, _ = package(tmp_path)
-    response = overlapping_review().model_dump(exclude={"diagnostics"})
-    reviewer = Reviewer(response)
-    metadata.update(
-        geoharness_config=GeoConfig(),
-        map_review_client=reviewer,
-        geoharness_permission_checker=PermissionChecker(
-            PermissionSettings(allowed_tools=["geo_qgis_project"])
-        ),
-    )
-    reserve_map_render(receipt["job_id"], metadata, GeoConfig())
-    calls = []
-
-    async def create(self, arguments, context, *, _source_bindings=None):
-        calls.append((arguments, _source_bindings))
-        assert reserve_map_render(arguments.map_id, context.metadata, GeoConfig()) is None
-        new_image, _, _, _ = package(
-            tmp_path, metadata, name="repaired", color="blue", map_id=arguments.map_id
-        )
-        reviewer.response = {"status": "passed", "summary": "Capacity visible", "issues": []}
-        return ToolResult(
-            output="Created",
-            metadata={"preview_path": str(new_image), "project_dir": str(new_image.parent)},
-        )
-
-    monkeypatch.setattr(GeoQgisProjectTool, "execute", create)
-    context = ToolExecutionContext(cwd=tmp_path, metadata=metadata)
-    result = await GeoMapReviewTool().execute(
-        GeoMapReviewInput(file_path=str(image), task="Preserve capacity"), context
-    )
-    assert len(calls) == 1
-    assert calls[0][0].map_id == receipt["job_id"]
-    assert calls[0][0].layers[1].style.fill_opacity == 0
-    assert len(reviewer.requests) == 2
-    assert result.metadata["repair_count"] == 1
-    assert result.metadata["latest_image"] == str(tmp_path / "repaired" / "preview.png")
-    assert len(result.metadata["map_receipt"]["versions"]) == 2
-    assert result.metadata["latest_review_status"] == "passed"
-
-
-@pytest.mark.parametrize("outcome", ["passed_after_eight", "create_failed", "pixel_cycle"])
-async def test_unlimited_repairs_stop_on_outcome_and_expose_create_failure(
-    tmp_path, monkeypatch, outcome,
-):
-    from types import SimpleNamespace
-
-    from openharness.config.settings import PermissionSettings
-    from openharness.permissions.checker import PermissionChecker
-    from openharness.tools.base import ToolExecutionContext, ToolResult
-    from test_map_review_evidence import Reviewer
-
-    from geoharness.config.settings import MapReviewConfig
-    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
-    from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
-
-    image, receipt, metadata, _ = package(tmp_path)
-    reviewer = Reviewer(overlapping_review().model_dump(exclude={"diagnostics"}))
-    metadata.update(geoharness_config=GeoConfig(map_review=MapReviewConfig(
-        max_repairs=0, max_reviews_per_request=1, total_timeout_seconds=0.001)),
-        map_review_client=reviewer,
-        geoharness_permission_checker=PermissionChecker(
-            PermissionSettings(allowed_tools=["geo_qgis_project"])))
-    calls = []
-
-    def plan(*args, **kwargs):
-        return SimpleNamespace(digest=f"plan-{len(calls)}", source_bindings=[],
-                               parameters=SimpleNamespace(map_id=receipt["job_id"]))
-
-    async def create(self, arguments, context, **kwargs):
-        calls.append(arguments)
-        if outcome == "create_failed":
-            return ToolResult(output="Error: data fingerprint mismatch for layer 4",
-                              is_error=True, metadata={"failure_stage": "preflight"})
-        color = "white" if outcome == "pixel_cycle" and len(calls) == 2 else (
-            10 * len(calls), 20, 40)
-        rendered, _, _, _ = package(tmp_path, metadata, name=f"repair-{len(calls)}",
-                                    color=color, map_id=arguments.map_id)
-        if outcome == "passed_after_eight" and len(calls) == 8:
-            reviewer.response = {"status": "passed", "summary": "Readable", "issues": []}
-        return ToolResult(output="Created", metadata={"preview_path": str(rendered),
-                          "project_dir": str(rendered.parent)})
-
-    monkeypatch.setattr("geoharness.cartography.quality_repair.build_repair_plan", plan)
-    monkeypatch.setattr(GeoQgisProjectTool, "execute", create)
-    result = await GeoMapReviewTool().execute(GeoMapReviewInput(
-        file_path=str(image), task="Preserve capacity"),
-        ToolExecutionContext(cwd=tmp_path, metadata=metadata))
-    if outcome == "create_failed":
-        assert len(calls) == 1
-        assert "data fingerprint mismatch" in result.output
-        assert result.metadata["repair_failure"]["metadata"]["failure_stage"] == "preflight"
-        assert result.metadata["repair_failure"]["output"].endswith("layer 4")
-    elif outcome == "pixel_cycle":
-        assert len(calls) == 2
-        assert len(reviewer.requests) == 2
-        assert "previously reviewed pixels" in result.metadata["repair_stop_reason"]
-    else:
-        assert len(calls) == result.metadata["repair_count"] == 8
-        assert len(reviewer.requests) == 9
-        assert result.metadata["latest_review_status"] == "passed"
 
 
 def test_copying_an_older_selected_package_does_not_create_a_render_version(tmp_path):
@@ -888,92 +776,59 @@ def test_issue_extent_rejects_non_map_or_invalid_native_frame(frame_id, extent):
         _issue_extent(issue, review, {"extent": extent})
 
 
-@pytest.mark.parametrize("stage,error", [
-    ("repair_plan", KeyError("missing internal field")),
-    ("native_presentation_create", TypeError("broken internal create")),
-    ("new_render_review", RuntimeError("broken follow-up review")),
-])
-async def test_internal_repair_failure_preserves_completed_review(
-    tmp_path, monkeypatch, stage, error,
+@pytest.mark.parametrize("legacy_auto_repair", [True, False])
+async def test_public_image_review_preserves_package_and_never_plans_or_rebuilds(
+    tmp_path, monkeypatch, legacy_auto_repair,
 ):
-    from openharness.config.settings import PermissionSettings
-    from openharness.permissions.checker import PermissionChecker
     from openharness.tools.base import ToolExecutionContext
     from test_map_review_evidence import Reviewer
 
+    from geoharness.config.settings import MapReviewConfig
     from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
-    from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
 
     image, receipt, metadata, _ = package(tmp_path)
-    reviewer = Reviewer(overlapping_review().model_dump(exclude={"diagnostics"}))
-    metadata.update(geoharness_config=GeoConfig(), map_review_client=reviewer,
-        geoharness_permission_checker=PermissionChecker(
-            PermissionSettings(allowed_tools=["geo_qgis_project"])))
+    reviewer = Reviewer({"status": "issues", "summary": "Symbols overlap.", "issues": [{
+        "severity": "warning", "description": "Two symbols cover one another.",
+        "issue_code": "symbol_overlap", "frame_id": "main_map"}]})
+    metadata.update(geoharness_config=GeoConfig(map_review=MapReviewConfig(
+        auto_repair=legacy_auto_repair)), map_review_client=reviewer)
+    before = {path: path.read_bytes() for path in image.parent.iterdir() if path.is_file()}
 
-    def fail_plan(*args, **kwargs):
-        raise error
+    def forbidden(*args, **kwargs):
+        pytest.fail("Image-only review must not plan a fix or render another version")
 
-    async def fail_create(*args, **kwargs):
-        raise error
-
-    async def create(self, arguments, context, **kwargs):
-        from openharness.tools.base import ToolResult
-
-        rendered, _, _, _ = package(tmp_path, metadata, name="repaired", color="blue",
-                                     map_id=arguments.map_id)
-        return ToolResult(output="Created", metadata={"preview_path": str(rendered)})
-
-    original_review = GeoMapReviewTool._review_one
-
-    async def follow_up_fails(self, arguments, context):
-        if Path(arguments.file_path) != image:
-            raise error
-        return await original_review(self, arguments, context)
-
-    if stage == "repair_plan":
-        monkeypatch.setattr("geoharness.cartography.quality_repair.build_repair_plan", fail_plan)
-    elif stage == "native_presentation_create":
-        monkeypatch.setattr(GeoQgisProjectTool, "execute", fail_create)
-    else:
-        monkeypatch.setattr(GeoQgisProjectTool, "execute", create)
-        monkeypatch.setattr(GeoMapReviewTool, "_review_one", follow_up_fails)
-    result = await GeoMapReviewTool().execute(
-        GeoMapReviewInput(file_path=str(image), task="Preserve capacity"),
+    monkeypatch.setattr("geoharness.cartography.quality_repair.build_repair_plan", forbidden)
+    monkeypatch.setattr("geoharness.tools.geo_qgis_project.GeoQgisProjectTool.execute", forbidden)
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(image), task="Inspect visible problems"),
         ToolExecutionContext(cwd=tmp_path, metadata=metadata))
     assert not result.is_error
     assert result.metadata["review_status"] == "issues"
-    assert result.metadata["repair_failure"]["stage"] == stage
-    assert result.metadata["repair_failure"]["exception_type"] == type(error).__name__
-    assert Path(result.metadata["review_path"]).is_file()
-    assert result.metadata["map_receipt"]["job_id"] == receipt["job_id"]
+    assert result.metadata["render_executed"] is False
     assert len(reviewer.requests) == 1
-    if stage == "new_render_review":
-        assert result.metadata["latest_render"]["preview_path"] == str(
-            tmp_path / "repaired" / "preview.png")
+    assert len(result.metadata["map_receipt"]["versions"]) == 1
+    assert result.metadata["map_receipt"]["job_id"] == receipt["job_id"]
+    assert "selected_candidate" not in result.metadata
+    assert "final_render" not in result.metadata
+    assert all(path.read_bytes() == content for path, content in before.items())
 
 
-async def test_repair_cancellation_propagates(tmp_path, monkeypatch):
+async def test_public_image_review_propagates_cancellation(tmp_path):
     import asyncio
 
-    from openharness.config.settings import PermissionSettings
-    from openharness.permissions.checker import PermissionChecker
     from openharness.tools.base import ToolExecutionContext
-    from test_map_review_evidence import Reviewer
 
     from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
-    from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
 
     image, _, metadata, _ = package(tmp_path)
-    metadata.update(geoharness_config=GeoConfig(),
-        map_review_client=Reviewer(overlapping_review().model_dump(exclude={"diagnostics"})),
-        geoharness_permission_checker=PermissionChecker(
-            PermissionSettings(allowed_tools=["geo_qgis_project"])))
 
-    async def cancel(*args, **kwargs):
-        raise asyncio.CancelledError
+    class CancelledReviewer:
+        async def stream_message(self, request):
+            raise asyncio.CancelledError
+            yield  # Async generator transport interface.
 
-    monkeypatch.setattr(GeoQgisProjectTool, "execute", cancel)
+    metadata.update(geoharness_config=GeoConfig(), map_review_client=CancelledReviewer())
     with pytest.raises(asyncio.CancelledError):
-        await GeoMapReviewTool().execute(
-            GeoMapReviewInput(file_path=str(image), task="Preserve capacity"),
+        await GeoMapReviewTool().execute(GeoMapReviewInput(
+            file_path=str(image), task="Inspect"),
             ToolExecutionContext(cwd=tmp_path, metadata=metadata))

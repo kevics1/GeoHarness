@@ -16,7 +16,7 @@ from geoharness.tools.geo_cartography import GeoCartographyInput, GeoCartography
 
 
 @pytest.mark.parametrize("deny_review", [False, True])
-async def test_bridge_native_repair_keeps_matching_selected_package_without_extra_version(
+async def test_bridge_readonly_review_preserves_package_and_external_edits(
     tmp_path, deny_review,
 ):
     from openharness.api.client import ApiMessageCompleteEvent
@@ -44,15 +44,10 @@ async def test_bridge_native_repair_keeps_matching_selected_package_without_extr
                 roi = next(json.loads(block.text) for block in request.messages[0].content
                            if getattr(block, "type", "") == "text"
                            and block.text.startswith('{"roi_ref": "legend"'))
-                payload = {"status": "issues", "summary": "测试图例字号修正", "issues": [{
-                    "issue_id": "legend-size", "severity": "warning",
-                    "issue_code": "legend_mismatch", "description": "测试图例字号不足",
-                    "frame_id": "legend", "roi_ref": roi["roi_ref"],
-                    "bbox": [.1, .1, .9, .9], "source_indices": [0]}],
-                    "qgis_patch": {"issue_ids": ["legend-size"],
-                                   "layout": {"legend_font_size_pt": 12}}}
-            else:
-                payload = {"status": "passed", "summary": "离线测试审查通过", "issues": []}
+                payload = {"status": "issues", "summary": "测试图例字号不足", "issues": [{
+                    "severity": "warning", "issue_code": "legend_mismatch",
+                    "description": "测试图例字号不足", "frame_id": "legend",
+                    "roi_ref": roi["roi_ref"], "bbox": [.1, .1, .9, .9]}]}
             yield ApiMessageCompleteEvent(message=ConversationMessage(role="assistant", content=[
                 ToolUseBlock(id=f"review-{self.calls}", name="record_map_review", input=payload)]),
                 usage=UsageSnapshot(), stop_reason="tool_calls")
@@ -71,17 +66,19 @@ async def test_bridge_native_repair_keeps_matching_selected_package_without_extr
                 {"value": "Low", "label": "低", "color": "#00ff00"}]}])), context)
     assert not rendered.is_error, rendered.output
     metadata = rendered.metadata
-    assert client.calls == (0 if deny_review else 2)
-    assert metadata["repair_count"] == (0 if deny_review else 1)
-    assert metadata["review_status"] == ("unverified" if deny_review else "passed")
+    assert client.calls == (0 if deny_review else 1)
+    assert "repair_count" not in metadata
+    assert metadata["review_status"] == ("unverified" if deny_review else "issues"), (
+        Path(metadata["review_path"]).read_text(encoding="utf-8")
+        if metadata.get("review_path") else rendered.output)
     package = Path(metadata["project_dir"])
     assert package.is_relative_to(tmp_path / "exports")
     manifest = json.loads((package / "project.json").read_text(encoding="utf-8"))
     assert hashlib.sha256(Path(metadata["primary_map"]).read_bytes()).hexdigest() == (
         manifest["preview_sha256"])
-    assert len(metadata["map_receipt"]["versions"]) == (1 if deny_review else 2)
+    assert len(metadata["map_receipt"]["versions"]) == 1
     if not deny_review:
-        assert manifest["layout"]["effective_parameters"]["legend_font_size_pt"] == 12
+        assert manifest["layout"]["effective_parameters"]["legend_font_size_pt"] != 12
         assert (tmp_path / "exports/map.png").read_bytes() == b"user-edited-preview"
         assert Path(metadata["primary_map"]) != tmp_path / "exports/map.png"
 

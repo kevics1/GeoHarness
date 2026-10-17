@@ -91,7 +91,7 @@ async def test_empty_unknown_field_names_are_redacted_before_truncation(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_known_layout_collision_blocks_visual_call_before_repair(tmp_path):
+async def test_geometry_findings_do_not_substitute_for_public_image_review(tmp_path):
     from geoharness.cartography.layout import create_map_figure, save_map_figure
 
     reviewer = Reviewer([PASS])
@@ -102,13 +102,14 @@ async def test_known_layout_collision_blocks_visual_call_before_repair(tmp_path)
     result = await GeoMapReviewTool().execute(GeoMapReviewInput(
         file_path=str(image), task="Inspect overlaps", map_id="risk",
     ), context(tmp_path, reviewer))
-    assert result.metadata["layout_status"] == "issues"
-    assert result.metadata["review_status"] == "issues"
-    assert reviewer.requests == []
+    assert "layout_status" not in result.metadata
+    assert result.metadata["review_status"] == "passed"
+    assert len(reviewer.requests) == 1
     report = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
     assert report["image_sha256"]
-    assert report["visual_review_status"] == "unverified"
-    assert any(i["location"] == "panel_overlaps" for i in report["issues"])
+    assert report["visual_review_status"] == "passed"
+    assert report["diagnostics"]["review_mode"] == "pixels_only"
+    assert report["issues"] == []
 
 
 @pytest.mark.asyncio
@@ -125,7 +126,7 @@ async def test_stale_layout_report_cannot_prove_a_different_image(tmp_path):
     result = await GeoMapReviewTool().execute(GeoMapReviewInput(
         file_path=str(image), task="Inspect", map_id="risk",
     ), context(tmp_path, reviewer))
-    assert result.metadata["layout_status"] == "unverified"
+    assert "layout_status" not in result.metadata
     assert len(reviewer.requests) == 1
 
 
@@ -315,7 +316,7 @@ async def test_owned_reviewer_passes_provider_options_and_records_transport_evid
     assert result.diagnostics["stage"] == ("budget" if finish_reason == "length" else "schema")
     if finish_reason == "length":
         assert "unverified" in result.summary
-        assert "thinking" in result.summary
+        assert result.diagnostics["failure_kind"] == "output_budget"
 
 
 def test_review_options_inherit_provider_defaults_unless_explicitly_configured():

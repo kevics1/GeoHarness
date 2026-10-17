@@ -61,11 +61,12 @@ map_review:
   enabled: true
   model: cbcn/deepseek-v4.1-flash(max)
   reasoning_effort: max
-  auto_repair: false  # Agent merges batch review findings into one build.
+  # geo_map_review only reads images and reports findings; it never repairs or rebuilds.
   # Map generation and review have no version/count/cumulative-time budget.
   # Legacy max_repairs/max_reviews_per_request/total_timeout_seconds are ignored.
-  timeout_seconds: 90
-  max_tokens: 16384
+  timeout_seconds: 180  # Total image preparation + streamed generation deadline.
+  read_timeout_seconds: 90  # Network idle limit; active thinking may exceed this duration.
+  max_tokens: 32768  # Includes thinking and final findings; max effort can exhaust 16384.
   diagnostics_max_chars: 2048
   # Temporarily cache retryable service failures; Retry-After may extend this cooldown.
   service_failure_ttl_seconds: 60

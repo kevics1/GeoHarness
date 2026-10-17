@@ -247,6 +247,9 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
         await asyncio.to_thread(shutil.rmtree, directory, True)
     if args.action == "preflight" or result.is_error or not result.metadata.get("output_path"):
         return result
+    # The original native package has the registered manifest/ROI binding.
+    # Publication copies preserve the pixels but do not create another map version.
+    review_preview = Path(result.metadata["preview_path"])
     if project_destination is not None:
         try:
             publication = asyncio.create_task(
@@ -275,7 +278,7 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
                     **({"publication": exc.diagnostics} if hasattr(exc, "diagnostics") else {}),
                 },
             )
-    preview = Path(result.metadata["preview_path"])
+    preview = review_preview
     written = Path(result.metadata["output_path"])
     desired = Path(args.output_path)
     try:
@@ -293,11 +296,11 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
     from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
 
     checker = context.metadata.get("geoharness_permission_checker")
-    decision = checker.evaluate("geo_map_review", is_read_only=False) if checker else None
+    decision = checker.evaluate("geo_map_review", is_read_only=True) if checker else None
     if decision is not None and (not decision.allowed or decision.requires_confirmation):
         checked = ToolResult(output="Map retained; current permissions block visual review.",
             metadata={"image_path": str(preview), "review_status": "unverified",
-                      "repair_count": 0, "repair_stop_reason": "visual_review_not_authorized"})
+                      "visual_review_completed": False})
     else:
         checked = await GeoMapReviewTool().execute(GeoMapReviewInput(
             file_path=str(preview), task=args.review_task or args.title or args.layer_name,
@@ -308,46 +311,24 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
     selected_image = Path(checked.metadata["image_path"])
     digest = hashlib.sha256(selected_image.read_bytes()).hexdigest()
     metadata = dict(result.metadata)
-    candidate = checked.metadata.get("selected_candidate") or {}
-    selected_version = candidate.get("version") or checked.metadata.get("map_receipt", {}).get(
-        "selected_version")
-    initial_version = result.metadata.get("map_receipt", {}).get("current_version")
+    selected_version = result.metadata.get("map_receipt", {}).get("current_version")
+    if selected_image.resolve() != preview.resolve() or digest != result.metadata["image_sha256"]:
+        return ToolResult(
+            output="Map changed during image review; retain the package and review "
+                   "its current PNG.",
+            is_error=True, metadata={**metadata, "review_status": "unverified"},
+        )
     output_changed = (desired.resolve() != desired.absolute() or not desired.is_file()
                       or hashlib.sha256(desired.read_bytes()).hexdigest() != copied_digest)
-    if digest != result.metadata["image_sha256"] or (
-        selected_version is not None and selected_version != initial_version
-    ) or output_changed:
-        chosen = checked.metadata.get("final_render")
-        if not isinstance(chosen, dict) or not chosen.get("project_dir"):
-            return ToolResult(output="Selected map retained, but its matching native package "
-                              "could not be verified.", is_error=True, metadata=checked.metadata)
-        metadata = dict(chosen)
-        if project_destination is not None:
-            from uuid import uuid4
+    if output_changed:
+        from uuid import uuid4
 
-            # Keep the first package; a selected repair is a new, independently editable copy.
-            destination = project_destination.with_name(
-                project_destination.name + "-selected-" + uuid4().hex[:8])
-            try:
-                metadata = await asyncio.to_thread(relocate_package, metadata, destination, config)
-            except (OSError, ValueError) as exc:
-                return ToolResult(output=f"Selected map retained; package copy failed: {exc}",
-                                  is_error=True, metadata={**metadata, **checked.metadata})
-        chosen_output = Path(metadata.get("output_path") or selected_image)
-        if desired.suffix.lower() == ".pdf" and chosen_output.suffix.lower() != ".pdf":
-            return ToolResult(output="Selected PNG/project retained; no matching PDF was produced.",
-                              is_error=True, metadata={**metadata, **checked.metadata})
-        copy_source = chosen_output if desired.suffix.lower() == ".pdf" else selected_image
+        # Preserve external edits; copy the original native export to a new path.
+        desired = desired.with_stem(desired.stem + "-reviewed-" + uuid4().hex[:8])
         try:
-            if (desired.resolve() != desired.absolute() or not desired.is_file()
-                    or hashlib.sha256(desired.read_bytes()).hexdigest() != copied_digest):
-                from uuid import uuid4
-
-                # A user may edit the first preview while review is running.
-                desired = desired.with_stem(desired.stem + "-selected-" + uuid4().hex[:8])
-            await asyncio.to_thread(shutil.copy2, copy_source, desired)
+            await asyncio.to_thread(shutil.copy2, written, desired)
         except OSError as exc:
-            return ToolResult(output=f"Selected map retained; output copy failed: {exc}",
+            return ToolResult(output=f"Map retained; output copy failed: {exc}",
                               is_error=True, metadata={**metadata, **checked.metadata})
     metadata.pop("result", None)
     primary = desired if desired.suffix.lower() == ".png" else selected_image
@@ -367,8 +348,6 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
             f"QGIS map: {desired}\nEditable project: {metadata['project_file']}\n"
             f"Visual review: {checked.metadata['review_status']}\n"
             f"Report: {checked.metadata.get('review_path', 'unverified')}\n"
-            f"Repairs: {checked.metadata.get('repair_count', 0)}; "
-            f"{checked.metadata.get('repair_stop_reason', '')}\n"
             "Use the recorded primary_map PNG with geo_deliver; PDF is an additional export."
         ),
         metadata={

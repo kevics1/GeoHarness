@@ -9,12 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from geoharness.cartography.mutation_control import current_owner, guard_map_mutations
+from geoharness.cartography.pixel_review import public_payload
 from geoharness.cartography.quality import (
-    MapIssue,
-    MapReview,
     _unreviewed_pages,
     review_execution_payload,
     save_review,
@@ -23,14 +21,14 @@ from geoharness.cartography.review_context import build_review_iteration_context
 from geoharness.cartography.workflow import review_with_budget
 
 
-def _repair_stage(value):
-    owner = current_owner()
-    if owner:
-        owner.stage(value)
-    return value
+def _input_schema(schema):
+    # Accept old review-only calls, without teaching removed repair/evidence inputs.
+    for key in ("auto_repair", "evidence"):
+        schema.get("properties", {}).pop(key, None)
 
 
 class GeoMapReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_input_schema)
     file_path: str = Field(description="PNG/JPEG map image to inspect; PDF/SVG need a PNG preview.")
     task: str = Field(description="User's map requirements and the analysis goal.")
     map_id: str = Field(default="", description="Stable logical map ID; keep it across versions.")
@@ -49,7 +47,8 @@ class GeoMapReviewInput(BaseModel):
         "or redraws the map. After cooldown a new call can send one request.",
     )
     auto_repair: bool | None = Field(
-        default=None, description="False disables evidence-bound automatic presentation repair.",
+        default=None, exclude=True,
+        description="Compatibility only: this tool is always read-only.",
     )
     all_pages: bool = Field(default=False, description=(
         "Review all verified pages of the same registered QGIS package in one tool call. "
@@ -57,8 +56,8 @@ class GeoMapReviewInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_review_controller(self):
-        if self.all_pages and self.auto_repair is True:
-            raise ValueError("all_pages is review-only; omit auto_repair or set it to false")
+        if self.auto_repair is True:
+            raise ValueError("geo_map_review is read-only; automatic repair has been removed")
         return self
 
 
@@ -177,31 +176,25 @@ def _verified_render_evidence(
 class GeoMapReviewTool(BaseTool):
     name = "geo_map_review"
     description = (
-        "Read actual map pixels and review layer visibility, legends, text and layout. "
-        "Use after a Python or QGIS workflow produces a PNG map. "
-        "Use all_pages=true for one registered QGIS package, auto_repair=false; merge "
-        "actionable findings into ONE build(spec_ref, edits). Batch mode never rebuilds. "
-        "Returns issues and suggestions in the verified backend's units; QGIS uses qgis_patch "
-        "and explicit zero-based layer_index. Automatic mode applies only image/ROI-bound "
-        "native presentation plans, re-renders in the same map job and reviews the "
-        "actual new PNG. Returns the selected candidate, final_render and repair_stop_reason; "
-        "use these returned artifacts and do not repeat an already applied repair plan. "
-        "Unsupported suggestions remain issues. Review-only mode does not apply patches; "
-        "a supported manual presentation change needs a new render and pixel review. "
-        "A failed API call means unverified, never passed. Cached results are not new service "
-        "failures. Transient outages expire after service cooldown; retry_service_failure "
-        "requests reinspection of the same image. Read request_sent, image_provider_calls, "
-        "image_cache_hits, visual_review_completed and next_action; ordinary continue does "
-        "not guarantee a new provider request or visual success."
+        "Read actual map images and report visible problems: unreadable text, overlap, "
+        "occlusion, clipping, blank space and legend mismatches. Returns status, summary, "
+        "issues, limitations and image-bound reports. Read-only: never changes styles, "
+        "plans parameter patches, rebuilds maps or selects another candidate. "
+        "Use all_pages=true to inspect verified package pages. Whole-page images and "
+        "original-resolution crops are inspected directly by the image model. "
+        "A service/budget failure is unverified, never passed. Read request_sent and "
+        "diagnostics before retrying; cooldown/cache hits are not new service requests."
     )
     input_model = GeoMapReviewInput
 
-    @guard_map_mutations
+    def is_read_only(self, arguments: BaseModel) -> bool:
+        return True
+
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         from geoharness.cartography.workflow import repair_loop_lock
 
-        # Include the first review: parallel callers share one provider request and repair loop.
-        async with repair_loop_lock(context.metadata, "review-and-repair"):
+        # Serialize batch reports and ledger writes; no map mutation lock is acquired.
+        async with repair_loop_lock(context.metadata, "pixel-review"):
             if arguments.all_pages:
                 try:
                     return await self._review_all_pages(arguments, context)
@@ -209,7 +202,7 @@ class GeoMapReviewTool(BaseTool):
                     return ToolResult(output=f"Batch review stopped ({type(exc).__name__}); "
                         "completed reports retained. Inspect the returned project/report files.",
                         is_error=True, metadata={"render_executed": False})
-            return await self._execute_locked(arguments, context)
+            return await self._review_one(arguments, context)
 
     async def _review_all_pages(self, arguments, context) -> ToolResult:
         """Review one immutable package, serializing ledger writes and returning a short receipt."""
@@ -282,209 +275,18 @@ class GeoMapReviewTool(BaseTool):
                   "issues" if "issues" in statuses else "passed")
         payload = {"status": status, "map_id": identity, "pages": summary,
                    "unreviewed_page_indices": missing,
-                   "repair_controller": "agent", "render_executed": False,
+                   "review_mode": "pixels_only", "render_executed": False,
                    "next_action": (
                        "Review complete; deliver the package if other required checks pass. "
                        "No new build is needed." if status == "passed" else
                        "Review incomplete; inspect per-page reports and retry only failed pages. "
                        "Do not redraw for a service failure." if status == "unverified" else
-                       "Merge actionable findings into one build; read report_path for full "
-                       "issues. Retain unresolved limitations.")}
+                       "Read the reported image problems and limitations; "
+                       "the review did not change the map.")}
         receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
                                   map_id=identity, artifact_path=image)
         payload["quality_status"] = receipt.get("quality_status", "draft")
         return ToolResult(output=json.dumps(payload, ensure_ascii=False), metadata=payload)
-
-    async def _execute_locked(self, arguments, context) -> ToolResult:
-        assert isinstance(arguments, GeoMapReviewInput)
-        from geoharness.cartography.jobs import map_job_receipt
-        from geoharness.cartography.quality_repair import (
-            RepairUnavailable,
-            build_repair_plan,
-            verified_package,
-        )
-        from geoharness.cartography.workflow import claim_repair_attempt, repair_loop_lock
-        from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
-
-        config = context.metadata.get("geoharness_config")
-        if config is None:
-            return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
-        first = await self._review_one(arguments, context)
-        if (first.is_error or first.metadata.get("review_page_index", 0)
-                or first.metadata.get("receipt_status") == "unregistered"):
-            return first
-        identity = first.metadata["map_id"]
-        async with repair_loop_lock(context.metadata, identity):
-            current = first
-            latest_render = None
-            repaired = 0
-            stop = "review_complete"
-            repair_failure = None
-            repair_plans = []
-            first_image = Path(first.metadata["image_path"])
-            first_digest = hashlib.sha256(first_image.read_bytes()).hexdigest()
-            seen_images = {first_digest}
-            enabled = (arguments.auto_repair if arguments.auto_repair is not None
-                       else config.map_review.auto_repair)
-            if arguments.retry_service_failure:
-                # Recovery is review-only; a service outage must not cause a new map.
-                enabled = False
-            while True:
-                from geoharness.task_budget import budget_status
-
-                if enabled and budget_status(context.metadata, config).get("phase") in {
-                        "delivery", "deadline"}:
-                    stop = "Task delivery reserve reached; issues retained, no hidden rebuild."
-                    break
-                if current.metadata.get("review_page_index", 0):
-                    stop = ("Additional page review is review-only; "
-                            "repair the registered main package.")
-                    break
-                if current.metadata.get("review_status") != "issues" or not enabled:
-                    stop = (
-                        "visual_review_unverified" if enabled and current.metadata.get(
-                            "review_status") == "unverified" else
-                        "review_complete" if enabled else "review_only"
-                    )
-                    break
-                checker = context.metadata.get("geoharness_permission_checker")
-                if checker is None:
-                    stop = "Automatic create permission is unavailable; issues retained."
-                    break
-                decision = checker.evaluate("geo_qgis_project", is_read_only=False)
-                if not decision.allowed or decision.requires_confirmation:
-                    stop = "Automatic create is not currently allowed; issues retained."
-                    break
-                repair_stage = _repair_stage("presentation_evidence_validation")
-                try:
-                    image = Path(current.metadata["image_path"])
-                    receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
-                                              map_id=identity, artifact_path=image)
-                    from geoharness.cartography.jobs import map_mutation_state
-
-                    live = map_mutation_state(context.metadata, cwd=context.cwd, config=config,
-                                               map_id=identity)
-                    if receipt.get("selected_version") != live["latest_version"]:
-                        raise RepairUnavailable(
-                            "Historical image reviewed; repair the latest draft")
-                    reference = receipt.get("stages", {}).get("visual_checked", {}).get(
-                        "report_reference", {})
-                    report_path = Path(current.metadata["review_path"])
-                    if (reference.get("path") != str(report_path)
-                            or hashlib.sha256(report_path.read_bytes()).hexdigest()
-                            != reference.get("sha256")):
-                        stop = "Visual evidence changed; prior candidate retained."
-                        break
-                    report = json.loads(report_path.read_text(encoding="utf-8"))
-                    if report.get("image_sha256") != hashlib.sha256(image.read_bytes()).hexdigest():
-                        raise RepairUnavailable("Visual report belongs to a different map image.")
-                    review = MapReview.model_validate({k: v for k, v in report.items()
-                                                       if k in MapReview.model_fields})
-                    repair_stage = _repair_stage("repair_plan")
-                    state_owner = current_owner()
-                    if state_owner:
-                        state_owner.stage("repair_plan")
-                    plan = build_repair_plan(image, review, receipt,
-                                             config=config, cwd=context.cwd)
-                    repair_plans.append({"issue_ids": getattr(plan, "issue_ids", []),
-                        "binding": getattr(plan, "binding", {}),
-                        "rejected": getattr(plan, "rejected", [])})
-                    if not claim_repair_attempt(context.metadata,
-                            getattr(plan, "semantic_digest", "") or plan.digest):
-                        stop = "This presentation plan was already attempted; issues retained."
-                        break
-                    repair_stage = _repair_stage("native_presentation_create")
-                    rendered = await GeoQgisProjectTool().execute(
-                        plan.parameters, context, _source_bindings=plan.source_bindings)
-                    if rendered.is_error:
-                        repair_failure = {"stage": "native_presentation_create",
-                                          "output": rendered.output,
-                                          "metadata": rendered.metadata}
-                        stop = ("Native presentation create failed; prior candidate retained. "
-                                + rendered.output)
-                        break
-                    repair_stage = _repair_stage("new_render_validation")
-                    preview = (rendered.metadata.get("preview_path")
-                               or rendered.metadata.get("primary_map"))
-                    if not preview or not Path(preview).is_file():
-                        stop = "Native create returned no actual PNG; prior candidate retained."
-                        break
-                    repaired += 1
-                    latest_render = rendered.metadata
-                    new_digest = hashlib.sha256(Path(preview).read_bytes()).hexdigest()
-                    if new_digest in seen_images:
-                        current = ToolResult(output=current.output, metadata={
-                            **current.metadata, "image_path": str(preview),
-                        })
-                        stop = ("Presentation repair produced previously reviewed pixels; "
-                                "no repeat review.")
-                        break
-                    seen_images.add(new_digest)
-                    repair_stage = _repair_stage("new_render_review")
-                    current = await self._review_one(arguments.model_copy(update={
-                        "file_path": str(preview), "map_id": identity,
-                        "retry_invalid_response": False,
-                        "retry_service_failure": False,
-                    }), context)
-                    if current.is_error:
-                        stop = "Review of the new PNG failed; visual quality is unverified."
-                        break
-                except Exception as exc:
-                    # Preserve the completed review if an optional repair fails internally.
-                    # Cancellation and process-control BaseExceptions must still propagate.
-                    repair_failure = {"stage": repair_stage, "error": str(exc),
-                                      "exception_type": type(exc).__name__}
-                    stop = (str(exc) if isinstance(exc, RepairUnavailable)
-                            else f"Presentation repair failed at {repair_stage}; "
-                                 f"completed review retained. {exc}")
-                    break
-            latest_image = current.metadata.get("image_path", first.metadata["image_path"])
-            receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
-                                      map_id=identity, artifact_path=Path(latest_image))
-            candidate = receipt.get("delivery_candidate")
-            selected_image = candidate["image_path"] if candidate else latest_image
-            selected = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
-                                       map_id=identity, artifact_path=Path(selected_image))
-            final_render = None
-            try:
-                package = verified_package(Path(selected_image), selected, cwd=context.cwd,
-                                           config=config, require_facts=False)
-                manifest, root = package["manifest"], package["root"]
-                pdf = next((p for p in package["recorded"] if p.suffix.lower() == ".pdf"), None)
-                packaged_preview = str(root / manifest["preview"])
-                final_render = {"project_dir": str(root),
-                    "project_file": str(root / manifest["project_file"]),
-                    "project_manifest": str(root / "project.json"),
-                    "preview_path": packaged_preview, "primary_map": packaged_preview,
-                    "output_path": str(pdf) if pdf else packaged_preview,
-                    "preflight": selected.get("stages", {}).get("data_checked", {}).get("report"),
-                    **{k: manifest[k] for k in ("layout", "layers", "native_facts", "frame_checks",
-                                               "analysis", "preflight") if k in manifest}}
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
-            visual = selected.get("stages", {}).get("visual_checked", {})
-            selected_layout = selected.get("stages", {}).get("layout_checked", {})
-            selected_review = ("issues" if selected_layout.get("status") == "issues"
-                               else visual.get("status", "unverified"))
-            selected_review_path = visual.get("report_reference", {}).get("path")
-            metadata = {**current.metadata, "map_receipt": selected, "latest_image": latest_image,
-                "latest_image_sha256": hashlib.sha256(Path(latest_image).read_bytes()).hexdigest(),
-                "latest_review_status": current.metadata.get("review_status", "unverified"),
-                "latest_review_path": current.metadata.get("review_path"),
-                "latest_render": latest_render, "repair_count": repaired,
-                "repair_stop_reason": stop,
-                "repair_failure": repair_failure,
-                "repair_plans": repair_plans,
-                "selected_candidate": candidate, "final_render": final_render,
-                "image_path": selected_image, "review_status": selected_review,
-                "image_sha256": selected.get("image_sha256"), "review_path": selected_review_path,
-                "quality_status": selected.get("quality_status", "draft")}
-            return ToolResult(output=current.output + "\nPresentation repair: " + stop
-                              + "\nSelected map: " + selected_image
-                              + f"\nSelected visual status: {selected_review}; quality: "
-                              + selected.get("quality_status", "draft"),
-                              is_error=current.is_error,
-                              metadata=review_execution_payload(metadata))
 
     async def _review_without_ledger(self, arguments, context, path, error):
         """Review pixels locally without certifying or automatically repairing a map job."""
@@ -494,15 +296,18 @@ class GeoMapReviewTool(BaseTool):
             retry_invalid_response=arguments.retry_invalid_response,
             retry_service_failure=arguments.retry_service_failure,
             metadata=context.metadata, map_id=arguments.map_id or path.stem,
-            client=context.metadata.get("map_review_client"))
+            client=context.metadata.get("map_review_client"), pixel_only=True)
         result.diagnostics.update(ledger_error=error, repair_authorized=False,
                                   quality_status="draft", receipt_status="unregistered")
-        report = save_review(path, {"image_path": str(path), **result.model_dump(), **budget})
-        return ToolResult(output=json.dumps(review_execution_payload(result.model_dump()),
+        payload = public_payload(result.model_dump())
+        budget["visual_review_status"] = result.status
+        report = save_review(path, {"image_path": str(path), **payload, **budget})
+        return ToolResult(output=json.dumps(review_execution_payload(payload),
             ensure_ascii=False) + f"\nLocal review retained: {report}; map quality is draft.",
             metadata={"image_path": str(path), "review_path": str(report),
                       "review_status": result.status, "quality_status": "draft",
-                      "receipt_status": "unregistered", "ledger_error": error})
+                      "receipt_status": "unregistered", "ledger_error": error,
+                      "render_executed": False, **budget})
 
     async def _review_one(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         assert isinstance(arguments, GeoMapReviewInput)
@@ -560,9 +365,7 @@ class GeoMapReviewTool(BaseTool):
                 if registered.is_error:
                     return registered
         except (OSError, ValueError) as exc:
-            if arguments.auto_repair is False or arguments.retry_service_failure:
-                return await self._review_without_ledger(arguments, context, path, str(exc))
-            return ToolResult(output=f"Error: map receipt unavailable: {exc}", is_error=True)
+            return await self._review_without_ledger(arguments, context, path, str(exc))
         evidence = dict(arguments.evidence)
         verified = _verified_render_evidence(path, digest, existing, roots)
         evidence.pop("review_binding", None)
@@ -579,84 +382,14 @@ class GeoMapReviewTool(BaseTool):
         else:
             evidence.pop("render_metadata", None)
             evidence.pop("backend_proof", None)
-        layout_status = "unverified"
-        measured_layout = None
-        layout_issues = []
-        layout_path = path.with_suffix(".layout.json")
-        if layout_path.is_file():
-            try:
-                layout = json.loads(layout_path.read_text(encoding="utf-8"))
-                if (
-                    layout.get("image_sha256") == digest
-                    and layout.get("scope") == "layout_geometry"
-                ):
-                    keys = (
-                        "panel_overlaps",
-                        "label_overlaps",
-                        "clipped_labels",
-                        "overflow_text",
-                        "figure_text_overlaps",
-                        "clipped_figure_text",
-                        "text_panel_overlaps",
-                        "panels_outside_canvas",
-                    )
-                    if not all(isinstance(layout.get(key), list) for key in keys):
-                        raise ValueError("Layout geometry report has incomplete measured fields.")
-                    measured_layout = {**layout, "report_path": str(layout_path)}
-                    for key in keys:
-                        if layout.get(key):
-                            layout_issues.append(
-                                MapIssue(
-                                    severity="error",
-                                    location=key,
-                                    description=(
-                                        f"Measured layout defect: {key}, count={len(layout[key])}."
-                                    ),
-                                )
-                            )
-                    layout_status = "issues" if layout_issues else "passed"
-                    evidence["measured_layout"] = {
-                        "scope": "layout_geometry",
-                        "status": layout_status,
-                        **{key: layout.get(key, []) for key in keys},
-                    }
-            except (OSError, ValueError, TypeError, AttributeError):
-                layout_status = "unverified"
-        if layout_issues:
-            # Fix known collisions first; avoid paying for an image already known to fail.
-            result = MapReview(
-                status="issues",
-                summary="Layout geometry has collisions or clipped content; "
-                "repair these before requesting visual review.",
-                issues=layout_issues,
-                diagnostics={"stage": "layout", "outcome": "blocked", "request_sent": False,
-                             "visual_review_completed": False,
-                             "next_action": "repair_measured_layout_first"},
-            )
-            budget = {
-                "review_cached": False,
-                "review_budget_exhausted": False,
-                "image_sha256": digest,
-                "visual_review_status": "unverified",
-                "request_sent": False,
-                "visual_review_completed": False,
-                "next_action": "repair_measured_layout_first",
-            }
-            context.metadata.setdefault("map_workflow_state", {}).setdefault("cache", {})[
-                digest
-            ] = result.model_dump()
-        else:
-            result, budget = await review_with_budget(
-                path,
-                config=config,
-                task=arguments.task,
-                evidence=evidence,
-                retry_invalid_response=arguments.retry_invalid_response,
-                retry_service_failure=arguments.retry_service_failure,
-                metadata=context.metadata,
-                map_id=identity,
-                client=context.metadata.get("map_review_client"),
-            )
+        # Geometry checks belong to rendering; they never substitute for image review.
+        result, budget = await review_with_budget(
+            path, config=config, task=arguments.task, evidence=evidence,
+            retry_invalid_response=arguments.retry_invalid_response,
+            retry_service_failure=arguments.retry_service_failure,
+            metadata=context.metadata, map_id=identity,
+            client=context.metadata.get("map_review_client"), pixel_only=True,
+        )
         # Cached conclusions predate newer layouts too; page-zero pixels cannot accept page one.
         page_index = verified.get("review_page_index", 0)
         unreviewed = [page for page in _unreviewed_pages(verified.get("render_metadata") or {})
@@ -696,18 +429,13 @@ class GeoMapReviewTool(BaseTool):
                 result.summary = "Additional layout pages have no completed pixel review."
                 budget["visual_review_status"] = "unverified"
                 budget["visual_review_completed"] = False
-        from geoharness.cartography.quality_repair import review_semantic_state
-
-        result.diagnostics["semantic_quality"] = review_semantic_state(
-            result, verified.get("render_metadata") or {}, page_index=page_index,
-            map_id=identity)
+        budget.setdefault("visual_review_status", result.status)
         report = save_review(
             path,
             {
                 "image_path": str(path),
-                **result.model_dump(),
+                **public_payload(result.model_dump()),
                 **budget,
-                "layout_status": layout_status,
                 "backend": verified["backend"],
             },
         )
@@ -724,12 +452,9 @@ class GeoMapReviewTool(BaseTool):
                 review={
                     "image_sha256": digest,
                     "review_path": str(report),
-                    **result.model_dump(),
+                    **public_payload(result.model_dump()),
                     "visual_review_status": budget.get("visual_review_status", result.status),
                 },
-                layout_status=(layout_status if page_index == 0 and layout_status != "unverified"
-                               else None),
-                measured_layout=measured_layout if page_index == 0 else None,
             )
         except (OSError, ValueError) as exc:
             return ToolResult(
@@ -739,7 +464,7 @@ class GeoMapReviewTool(BaseTool):
             )
         return ToolResult(
             output=(
-                json.dumps(review_execution_payload(result.model_dump()),
+                json.dumps(review_execution_payload(public_payload(result.model_dump())),
                            ensure_ascii=False, indent=2)
                 + f"\nReport: {report}\nMap receipt: "
                 + json.dumps(receipt_summary(receipt), ensure_ascii=False)
@@ -758,12 +483,12 @@ class GeoMapReviewTool(BaseTool):
             ),
             metadata=review_execution_payload({
                 "review_status": result.status,
+                "render_executed": False,
                 "review_page_index": page_index,
                 "review_binding": result.diagnostics.get("review_binding", {}),
                 "backend": verified["backend"],
                 "review_path": str(report),
                 "image_path": str(path),
-                "layout_status": layout_status,
                 "map_id": identity,
                 "map_receipt": receipt,
                 **budget,

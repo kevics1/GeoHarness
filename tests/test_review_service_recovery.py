@@ -163,13 +163,13 @@ async def test_explicit_service_recovery_never_starts_automatic_redraw(image, mo
         "quality_status": "draft", "stages": {},
     })
     monkeypatch.setattr(quality_repair, "verified_package", no_package)
-    result = await GeoMapReviewTool()._execute_locked(
+    result = await GeoMapReviewTool().execute(
         GeoMapReviewInput(file_path=str(image), task="Recheck", retry_service_failure=True,
-                          auto_repair=True),
+                          auto_repair=False),
         ToolExecutionContext(cwd=image.parent, metadata={"geoharness_config": GeoConfig()}),
     )
-    assert result.metadata["repair_count"] == 0
-    assert result.metadata["repair_stop_reason"] == "review_only"
+    assert result.metadata["review_status"] == "issues"
+    assert "repair_count" not in result.metadata
 
 
 async def test_completed_cache_survives_reset_but_new_target_rechecks(image):

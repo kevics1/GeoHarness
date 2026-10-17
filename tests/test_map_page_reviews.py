@@ -89,7 +89,7 @@ def test_batch_cannot_enable_second_repair_controller():
 
     from geoharness.tools.geo_map_review import GeoMapReviewInput
 
-    with pytest.raises(ValidationError, match="review-only"):
+    with pytest.raises(ValidationError, match="read-only"):
         GeoMapReviewInput(file_path="map.png", task="Inspect", all_pages=True, auto_repair=True)
 
 

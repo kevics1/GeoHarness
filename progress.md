@@ -359,3 +359,12 @@
 安装：wheel SHA256=83686c6c9d9291c5d4da1d822bdaccf6b032ab9736be6fef9425a5ed3e3aa8a8；103模块/1前端/34随包文件源码/wheel/安装零差异；只重装本项目。本机max/审图只读/1200s目标及180s交付预留已迁移，私有备份、凭证及provider保留。.env.example哈希保持b2665ac001462f3915270c2f11259bafe3e8ed30a9e882a163b3edaa69c6fbcd。version与dry-run通过，MCP未连接。
 
 第五轮安装验收：关键17项通过（21.20秒）；真实公开安装工具合成三页链完成，仅一个project_create，无模型调用，实际复制交付但质量保持draft/视觉unverified。完整证据见diagnostics/2026-10-17-max-latency-validation.md。没有声称原任务已低于20分钟或网关真实max已验证。
+
+
+## Oct18 图片审查单一职责完成
+
+公共工具只报告实际图片问题/限制，不再自动规划参数、重绘或选择候选；保留整页+原分辨率ROI和逐页状态。明确区分输出预算、网络传输和总截止，思考正文不保存。私有配置只迁移审图180秒总截止/90秒空闲/32768输出上限，模型/max/provider/凭证保持，备份并核对完整YAML。
+
+234项源码整合通过；后续新增图片变化/只读与预算诊断后最终12项边界回归、37项安装检查通过；Ruff/diff通过。104 Python模块/1前端/34随包源码-wheel-安装零差异；CLI version/dry-run通过，MCP未连接。.env.example哈希保持。独立审查未获得有效报告，不计通过。
+
+真实安装版16k复测暴露思考耗尽，未被错记为网络故障或passed；32k同max/5图对照112.938秒返回2项问题，19819思考token+最终答案，原包所有文件摘要不变，隔离副本仍1版本、render_executed=false、质量draft。未做全业务页验收/20分钟整任务实测。证据：diagnostics/2026-10-18-pixel-review-validation.md。
