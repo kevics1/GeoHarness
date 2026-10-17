@@ -115,3 +115,12 @@ print('read/write/resample/backdrop and guards passed')
 def test_deterministic_error_categories(message, category):
     failure = classify_failure(message)
     assert failure["category"] == category and failure["retry_without_change"] is False
+
+
+def test_numeric_values_and_timeout_filenames_do_not_authorize_unchanged_retries():
+    assert not classify_failure("IndexError: list index out of range at row 503")[
+        "retry_without_change"]
+    assert not classify_failure("ValueError: invalid timeout_502.tif dimensions")[
+        "retry_without_change"]
+    assert classify_failure("HTTP 503 service unavailable")["retry_without_change"]
+    assert classify_failure("ConnectionError: service connection lost")["retry_without_change"]

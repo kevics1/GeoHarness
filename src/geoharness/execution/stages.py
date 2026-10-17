@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from geoharness.data.artifacts import assert_usable_artifact, sha256_file
@@ -15,6 +16,8 @@ def classify_failure(message: str) -> dict:
         ("api_contract", ("unexpected keyword argument", "unsupported options=")),
         ("array_shape", ("RasterShapeError", "Source shape", "tuple index out of range",
                           "inconsistent with given indexes")),
+        ("raster_contract", ("RasterNodataError", "RasterTransformError", "RasterDtypeError",
+                             "RasterValueError", "RasterBandError")),
         ("permission", ("PermissionError", "outside allowed data/runtime directories")),
         ("dependency", ("ModuleNotFoundError", "Required dependency")),
         ("entity_integrity", ("Entity/geometry mismatch", "Entity key")),
@@ -23,10 +26,15 @@ def classify_failure(message: str) -> dict:
                              "does not exist", "No such file", "not a published output")),
         ("output_contract", ("OutputContractError", "may write only", "partial outputs")),
         ("schema", ("KeyError", "not in index", "validation error", "NameError")),
-        ("transient", ("503", "502", "timeout", "timed_out", "ConnectionError")),
     )
     category = next((name for name, words in rules if any(w in message for w in words)),
                     "execution")
+    if category == "execution" and re.search(
+        r"\b(?:HTTP(?:Error|StatusError)?[ :]+|status(?:_code)?[=: ]+)(?:502|503)\b"
+        r"|\b(?:TimeoutError|ConnectionError|ConnectTimeout|ReadTimeout)\b", message,
+        flags=re.IGNORECASE,
+    ):
+        category = "transient"
     return {"category": category, "retry_without_change": category == "transient",
             "required_action": "Retry service once after recovery" if category == "transient"
             else "Change the reported input/implementation, then rerun only this stage"}

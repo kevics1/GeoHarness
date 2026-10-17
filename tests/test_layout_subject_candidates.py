@@ -10,7 +10,11 @@ from shapely.geometry import Point, box
 
 from geoharness.config.settings import GeoConfig
 from geoharness.qgis.discovery import discover_qgis
-from geoharness.qgis.layout_candidates import apply_candidate, subject_fit_patches
+from geoharness.qgis.layout_candidates import (
+    apply_candidate,
+    effective_layout_patches,
+    subject_fit_patches,
+)
 from geoharness.qgis.specification import load_spec
 from geoharness.tools.geo_qgis_project import GeoQgisProjectInput, GeoQgisProjectTool
 
@@ -38,6 +42,17 @@ def test_fit_patches_keep_all_selected_bounds_and_do_not_mutate_requirements():
     assert "focus_layers" in layout["detail_frame"]
     assert (result["layout"]["detail_frame"]["requirements"]
             == layout["detail_frame"]["requirements"])
+
+
+def test_candidate_replay_keeps_native_adaptations_before_failure():
+    original = {"height_mm": 210, "footer_height_mm": 18,
+                "label_table": {"height_mm": 15, "placement": "auto"}}
+    effective = {**original, "height_mm": 245, "footer_height_mm": 30,
+                 "label_table": {"height_mm": 35, "placement": "pages"}}
+    patches = effective_layout_patches(original, effective)
+    replay = apply_candidate({"layout": original}, patches)
+    assert replay["layout"] == effective
+    assert original["height_mm"] == 210
 
 
 async def test_native_subject_candidates_are_measured_and_bound_to_the_failed_spec(tmp_path):

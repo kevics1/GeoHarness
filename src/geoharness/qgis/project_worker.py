@@ -1553,12 +1553,19 @@ def _measure_layout_candidates(project, layers, extent, payload, context, *,
     """Probe at most three alternatives without exporting or applying one to the draft."""
     from qgis.core import QgsLayoutItemMap, QgsRectangle
 
-    from geoharness.qgis.layout_candidates import apply_candidate, subject_fit_patches
+    from geoharness.qgis.layout_candidates import (
+        apply_candidate,
+        effective_layout_patches,
+        subject_fit_patches,
+    )
 
     if payload.get("_candidate_probe") or payload.get("_consume_plan"):
         return []
     spec = payload.get("layout") or {}
-    base_digest = _layout_input_digest(payload)
+    origin = payload.get("_layout_origin") or spec
+    base = {**payload, "layout": origin}
+    base_digest = _layout_input_digest(base)
+    adaptations = effective_layout_patches(origin, spec)
     fitted = []
     if subjects:
         policy = payload.get("_extent_policy") or {}
@@ -1588,7 +1595,8 @@ def _measure_layout_candidates(project, layers, extent, payload, context, *,
             {"path": ["layout", "label_table", "placement"], "value": "pages"}]))
     results, seen = [], set()
     for strategy, patches in choices[:3]:
-        candidate = apply_candidate(payload, patches)
+        patches = [*adaptations, *patches]
+        candidate = apply_candidate(base, patches)
         digest = _layout_input_digest(candidate)
         if digest in seen or digest == base_digest:
             continue

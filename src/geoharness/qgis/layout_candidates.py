@@ -6,6 +6,17 @@ import copy
 import math
 
 
+def effective_layout_patches(original: dict, effective: dict) -> list[dict]:
+    """Keep any earlier native size adaptations in the edit that will be replayed.
+
+    A failure can happen after automatic legend/footer/table fitting. Omitting these
+    adaptations would measure one layout but return patches for a different draft.
+    """
+    return [{"path": ["layout", key], "value": copy.deepcopy(value)}
+            for key, value in effective.items()
+            if key != "layout_plan" and original.get(key) != value]
+
+
 def subject_fit_patches(subjects: dict, layout: dict, *, minimum_span: float,
                          padding: float, focus_bounds=None) -> list[dict]:
     """Use all declared selections, never replace a requirement with a smaller count.
