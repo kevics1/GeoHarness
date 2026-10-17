@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from geoharness.cartography.workflow import map_identity, refund_map_render, reserve_python_render
 from geoharness.config.settings import CartographyConfig, ExecutionConfig, GeoConfig
 from geoharness.execution import execute_python
+from geoharness.invocation import invocation_guide
 from geoharness.qgis.artifacts import returned_preview_paths
 
 
@@ -100,6 +101,16 @@ def registered_review_files(
 
 def python_recovery_hints(code: str, stderr: str) -> list[str]:
     hints = []
+    if "unexpected keyword argument" in stderr:
+        hints.append('Inspect the installed callable signature with inspect.signature before '
+                     'changing arguments. rasterio.mask.mask uses nodata, not fill_value; '
+                     'do not translate keywords from numpy/pandas APIs by analogy.')
+    if any(text in stderr for text in ('tuple index out of range', 'Source shape',
+                                      'RasterShapeError', 'inconsistent with given indexes')):
+        hints.append('Inspect ndim/shape at read, stack and write boundaries. rasterio read(1) '
+                     'is 2D; another [0] removes a spatial axis. mask_raster returns '
+                     '(array, transform), with array=(bands, rows, columns). RGB writers '
+                     'require 3D band-first arrays and matching count/height/width.')
     if any(text in stderr for text in ('FileNotFoundError', 'does not exist in the file system',
                                       'No such file or directory')):
         hints.append('Use exact DATA_REFS/returned paths, preserving Unicode punctuation. '
@@ -268,65 +279,33 @@ class GeoPythonInput(BaseModel):
 class GeoPythonTool(BaseTool):
     name: str = "geo_python"
     description: str = (
-        "Write and run Python for combined spatial analysis or custom maps. "
-        "GeoPandas, Shapely, pandas, matplotlib (Agg) and rasterio are available. "
-        "SOURCE_CWD and DATA_DIRS identify read-only source folders; RUN_DIR is the only "
-        "allowed output folder and is also the working directory. "
-        "Injected: SOURCE_CWD: Path, RUN_DIR: Path, DATA_DIRS: list[Path] (iterate directly). "
-        "DATA_DIRS[0] is SOURCE_CWD, a workspace read root; do not assume a dataset subfolder. "
+        "Run a complete Python script for custom GIS analysis or maps. "
+        + invocation_guide("geo_python") + " "
+        "Available: GeoPandas, Shapely, pandas, numpy, rasterio and matplotlib (Agg). "
+        "Prefer geo_analysis for native buffer/clip/intersection/distance/count/impact/area. "
+        "Injected Paths: RUN_DIR (only write root/current cwd), SOURCE_CWD, "
+        "DATA_DIRS:list[Path] (iterate directly; [0] is workspace, not dataset folder). "
         "Only os.environ['DATA_DIRS'] is an os.pathsep-separated string. "
-        "DATA_REFS is dict[stable_id, record], where each record has name, path and ref; "
-        "names are values, not substrings of the opaque ID keys. "
-        "Use read_vector('a unique registered name') directly, without a custom name lookup. "
-        "read_vector applies each layer's registered encoding; do not force one encoding "
-        "across shapefiles. Each call starts a fresh Python process: import/define everything "
-        "used. Injected helpers include resolve_data, read_vector, native_layer, "
-        "mask_raster, entity_join, score_risk and sample_raster_points. "
-        "print_stats does not exist. Use geo_raster_data action=stats as a "
-        "separate tool or implement statistics with imported rasterio/numpy. "
-        "Stable IDs bind measured sources and actual producer outputs; "
-        "resolve_data(ref) returns their original Path and read_vector(ref, target_crs=None) "
-        "reads vectors with optional CRS transformation. Unique registered names/paths work; "
-        "read_vector adds a Python-only stable __geoh_id column for key-based joins; "
-        "it does not change original files or native_layer's source schema. "
-        "unknown, ambiguous, changed or deleted refs are rejected. native_layer(ref, "
-        "derivation=None, name=None, style=None, label_field=None, label_style=None, "
-        "layer_name=None) creates a native layer specification retaining its original source "
-        "path; use derivation for subsets so analysis provenance can still bind. "
-        "GEO_DATA: dict[path, verified metadata]; PREVIOUS_OUTPUTS: list[Path] contains "
-        "existing artifacts, newest jobs first. Each call creates a NEW RUN_DIR; earlier "
-        "files must use their returned actual paths, never a guessed dated directory. "
-        "mask_raster(path, GeoSeries/GeoDataFrame, crop=True) checks and transforms geometry "
-        "to the actual raster CRS before masking; bare Shapely lists are rejected. "
-        "It returns (array, transform), like rasterio.mask: unpack both values; array has "
-        "shape (bands, rows, columns), not a raster dataset with .crs/.profile. "
-        "Reproject a GeoDataFrame/GeoSeries before iterrows(); a pandas Series row has no "
-        "to_crs(). Use geo_vector_data/geo_raster_data list and inspect to establish refs. "
-        "Configured analysis, map and previous Python run outputs "
-        "are read-only. Returned QGIS diagnostics, previews and project.json are readable; "
-        "QGIS directory listing/profile access is not allowed. Shapely geometries have no CRS; "
-        "transform them via gpd.GeoSeries([geometry], crs=verified_source_crs).to_crs(target_crs). "
-        "Prefer geo_analysis for buffer/clip/intersection/distance/count/impact/area; "
-        "for other installed GIS operations use geo_qgis search then help then run. "
-        "Use relative output filenames or RUN_DIR / filename. Network and subprocesses "
-        "are unavailable. Returns script, manifest, stdout/stderr and generated file paths. "
-        "Use input_refs={alias: exact_ref_or_path}, then INPUTS[alias] for cross-run CSV/files. "
-        "Use input_requirements={alias:{fields,key,crs,metric,valid_geometry}} to check the "
-        "actual intermediate before code. extent_geometry(west=...,south=...,east=...,north=...,"
-        "crs=...) returns CRS-bearing bounds for mask_raster. "
-        "Declare expected_outputs, stage_id and depends_on for analysis steps. "
-        "artifact_facts(path,key=...,numeric_fields=[...],predicates=[{name,field,op,value}],"
-        "metric_crs=...) recomputes file-bound counts/statistics/area. check_claims(facts,"
-        "[{path:[...],expected:...}]) compares explicit claims. Save both as JSON for delivery; "
-        "these helpers do not validate unstructured prose or scientific assumptions. "
-        "entity_join(source, table, key='id') joins attributes safely. "
-        "score_risk(frame,key='id',components=[{field,weight,minimum,maximum,direction}], "
-        "missing_policy='error'|'unknown') computes an explicit assumed weighted score; "
-        "weights sum to 1, direction is higher/lower; no scientific validity is implied. "
-        "sample_raster_points(path, points, band=1) transforms CRS and returns values/NaN; "
-        "use it instead of Point.buffer(0). "
-        "Inspect results and send generated PNG maps to geo_map_review before delivery. "
-        "Application guards are not an OS sandbox; run only trusted analysis code."
+        "DATA_REFS:dict[stable_id,record{name,path,ref}]; names are values, not ID keys. "
+        "resolve_data(ref)->Path; read_vector(ref,target_crs=None)->GeoDataFrame using "
+        "per-layer registered encoding and Python-only __geoh_id for stable joins. "
+        "Unknown/ambiguous/stale refs are rejected; never force one shapefile encoding. "
+        "INPUTS:dict[alias,Path] comes from input_refs; GEO_DATA is metadata by path and "
+        "PREVIOUS_OUTPUTS:list[Path] contains prior artifacts, newest first. "
+        "Helpers: mask_raster(path,CRS-bearing GeoSeries/GeoDataFrame,**options)->"
+        "(array,transform); native_layer(ref,derivation=None,name=None,style=None,"
+        "label_field=None,label_style=None,layer_name=None) retains source/provenance; "
+        "entity_join(source,table,key=...) joins by identity; score_risk uses explicit "
+        "assumed weights; sample_raster_points(path,points,band=1) handles point CRS. "
+        "extent_geometry(west=...,south=...,east=...,north=...,crs=...) makes a CRS-bearing "
+        "clip geometry. artifact_facts(path,key=...,numeric_fields=[],predicates=[],"
+        "metric_crs=...) and check_claims(facts,claims) measure persisted explicit facts, "
+        "not scientific validity or all prose. print_stats is NOT injected. "
+        "Use expected_outputs/stage_id/depends_on for verified stages. Returned exact QGIS "
+        "diagnostics, all page previews and project.json are readable; QGIS directory/profile "
+        "listing is not. Network/subprocesses unavailable; application guards are not an OS "
+        "sandbox. Returns script/manifest/stdout/stderr/generated paths; inspect results and "
+        "review actual PNG pages before delivery."
     )
     input_model: type[BaseModel] = GeoPythonInput
 
@@ -481,6 +460,7 @@ class GeoPythonTool(BaseTool):
                                            fingerprint=stage_fingerprint, result=result,
                                            dependencies=arguments.depends_on)
         result["execution_contract"] = {
+            "call_time_cautions": invocation_guide("geo_python"),
             "SOURCE_CWD": "Path", "RUN_DIR": "Path", "DATA_DIRS": "list[Path]",
             "DATA_DIRS_environment": "str separated by os.pathsep",
             "DATA_DIRS_first": "SOURCE_CWD workspace read root; not necessarily a dataset folder",

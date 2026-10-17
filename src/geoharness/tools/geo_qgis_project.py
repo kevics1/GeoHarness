@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from geoharness.cartography.derivation import MapDerivation, derive_frame
 from geoharness.cartography.mutation_control import guard_map_mutations
@@ -279,11 +280,17 @@ class QgisMapFrameSpec(BaseModel):
         if self.focus_layers and self.render_layers is not None and not (
             set(self.focus_layers) <= set(self.render_layers)
         ):
-            raise ValueError("focus_layers must be included in render_layers")
+            raise PydanticCustomError("frame_selection",
+                "focus_layers must be included in render_layers; missing={missing}",
+                {"field": "focus_layers", "related_fields": ["focus_layers", "render_layers"],
+                 "missing": sorted(set(self.focus_layers) - set(self.render_layers), key=str)})
         if self.label_layers and self.render_layers is not None and not (
             set(self.label_layers) <= set(self.render_layers)
         ):
-            raise ValueError("label_layers must be included in render_layers")
+            raise PydanticCustomError("frame_selection",
+                "label_layers must be included in render_layers; missing={missing}",
+                {"field": "label_layers", "related_fields": ["label_layers", "render_layers"],
+                 "missing": sorted(set(self.label_layers) - set(self.render_layers), key=str)})
         return self
 
 
@@ -427,9 +434,15 @@ class QgisProjectLayout(BaseModel):
             raise ValueError("page must leave at least 40mm for the main map above the footer")
         if self.detail_frame is not None:
             if self.detail_frame.focus_layers and self.detail_extent is not None:
-                raise ValueError("detail_extent conflicts with detail_frame.focus_layers")
+                raise PydanticCustomError("frame_extent_conflict",
+                    "detail_extent conflicts with detail_frame.focus_layers",
+                    {"field": "detail_extent", "related_fields": [
+                        "detail_extent", "detail_frame.focus_layers"]})
             if self.detail_extent is None and not self.detail_frame.focus_layers:
-                raise ValueError("detail_frame requires focus_layers or detail_extent")
+                raise PydanticCustomError("frame_extent_missing",
+                    "detail_frame requires focus_layers or detail_extent",
+                    {"field": "detail_frame", "related_fields": [
+                        "detail_frame.focus_layers", "detail_extent"]})
         return self
 
 
@@ -599,7 +612,11 @@ class GeoQgisProjectInput(BaseModel):
         # Only selectors that actually request a view are illegal on mutations.
         if (self.detail_path or self.offset != 0 or self.limit != 8) and self.action not in {
                 "help", "inspect"}:
-            raise ValueError("Diagnostic selectors are read-only; use help or inspect")
+            raise PydanticCustomError("readonly_selectors",
+                "Diagnostic selectors are read-only; use help or inspect",
+                {"field": "detail_path" if self.detail_path else
+                 "offset" if self.offset != 0 else "limit",
+                 "related_fields": ["action", "detail_path", "offset", "limit"]})
         if self.action == "help":
             if self.model_fields_set - {"action", "section", *selectors}:
                 raise ValueError("help accepts only action and section")
@@ -622,9 +639,12 @@ class GeoQgisProjectInput(BaseModel):
                 return self
             if self.action != "create" or self.model_fields_set - {"action", "plan_ref"}:
                 extra = sorted(self.model_fields_set - {"action", "plan_ref"})
-                raise ValueError("plan_ref create accepts only action and plan_ref; "
-                                 f"remove extra fields {extra}; map_id/title/output_format are "
-                                 "already in the checked plan. Preflight changes first")
+                raise PydanticCustomError("frozen_plan_arguments",
+                    "plan_ref create accepts only action and plan_ref; remove extra fields "
+                    "{extra}; map_id/title/output_format are already in the checked plan. "
+                    "Preflight changes first",
+                    {"field": "plan_ref", "extra": extra,
+                     "related_fields": ["action", "plan_ref", *extra]})
             return self
         if self.action == 'spec':
             # A draft can be assembled a layer at a time. Completeness and
@@ -703,7 +723,11 @@ class GeoQgisProjectTool(BaseTool):
         "PNG/PDF exported from that same layout. Build with spec, inspect the returned "
         "spec_ref, then use typed edits by layer_key (layer/style/labels/frame/roster). "
         "Use help(section=style/labels/frame/layout/edits) for actual runtime schemas, "
-        "not Processing help or geo_cartography bridge fields. Preflight every changed "
+        "not Processing help or geo_cartography bridge fields. Read the always-visible "
+        "help cautions before composing arguments. render_layers includes focus/label layers; "
+        "detail needs focus_layers or detail_extent. Diagnostic selectors are help/inspect "
+        "only. Roster keys are unique/non-null; top_n needs sort_by and excludes keys. "
+        "Preflight every changed "
         "spec_ref; create accepts ONLY action+returned plan_ref. Advanced full inputs and "
         "path patches remain supported. Layers draw bottom to top; native styles use "
         "style.renderer/field/categories. Each frame declares purpose and required subject "

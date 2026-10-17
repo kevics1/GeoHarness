@@ -266,9 +266,9 @@
 
 1. TUI错误按实际非空行数折叠为小×和NL，保留真实模型结果/会话/失败状态 — complete（React/Ink两种样式及历史孤立结果已实渲染；补查启动失败清理）。
 2. QGIS逐页预览精确授权与跨工具读取回归 — complete（5项子进程/边界定向检查通过）。
-3. 按动作精简帮助保留关键规则，系统提示与工具注意事项，字段错误定位 — pending。
+3. 按动作精简帮助保留关键规则，系统提示与工具注意事项，字段错误定位 — complete（55项相关+停止并行后21项帮助回归通过；默认2400/最小1200预算规则保持可见）。
 4. 栅格常用封装、维度与写出检查、错误分类 — pending。
 5. 主体集合FIT/覆盖与布局实测候选，保留严格约束 — pending。
 6. 集成回归、代码审查、文档、构建安装一致性及CLI — pending。
 
-并行写入边界：主Agent负责launcher/TUI扩展、geo_python和集成；raster_contracts仅execution栅格/分类；qgis_layout仅worker/frame_contracts/layout；tool_guidance仅prompt/specification/inspection/geo_qgis_project。各执行者不提交，共享计划仅主Agent维护。
+原并行写入边界未被遵循，已停用并行改为主Agent串行完成。执行者的确认语不计为实现或审查结果。

@@ -342,3 +342,5 @@
 第四轮启动：用户授权六阶段和调用前易错提醒。已有修改仅.env.example及既存未跟踪诊断，均保留。采用独立文件职责并行开发；主Agent负责UI、预览授权与最终验证。默认错误显示×→NL，模型实际结果/失败状态/会话原文保持。
 
 阶段1：真实React/Ink默认/codex两种样式、paired工具和恢复的孤立错误均实渲染通过，错误正文不进入可见文本但原对象保持。临时frontend源码overlay+junction复用既有依赖；上游component SHA不变、cleanup不删除依赖target。GitHub调研Ink/MIT现有render(stdout)满足验证，不引入ink-testing-library依赖。阶段2：共享返回产物提取，Python精确授权逐页与名录；5项子进程读取、失败job、越界、symlink、只读边界检查通过。
+
+并行分工未被执行者正确遵循，收到的final多为确认/下一步且有越界写入，不能计为有效实现或独立审查。停止执行者并改为主Agent串行；geo_python由已验证基线恢复后精确重应用预览补丁。一次帮助导入在并发写入时失败，依赖无关的共享提醒移到geoharness/invocation.py并校验唯一类定义。阶段3相关55项通过，后续以停止并行后的完整回归为最终证据。

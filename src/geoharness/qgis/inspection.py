@@ -52,7 +52,7 @@ def view(value, *, call: dict, path=(), offset=0, limit=8, max_chars=2400) -> di
 
 
 def help_output(payload: dict, *, call: dict, max_chars: int) -> dict:
-    """Keep familiar schema properties, with full definitions accessible by JSON path."""
+    """Never page away critical cross-field rules to make room for a schema."""
     import copy
 
     result = copy.deepcopy(payload)
@@ -68,5 +68,17 @@ def help_output(payload: dict, *, call: dict, max_chars: int) -> dict:
                              if "schema" in payload else ["schemas"]}
     if len(json.dumps(result, ensure_ascii=False)) <= max_chars:
         return result
-    return {"section": payload["section"], "workflow": payload["workflow"],
-            **view(payload, call=call, max_chars=max_chars - 250)}
+    compact = {key: payload[key] for key in (
+        "section", "contract", "workflow", "cautions", "action_forms") if key in payload}
+    compact["detail_call"] = {**call, "detail_path": [
+        "schema" if "schema" in payload else
+        "schemas" if "schemas" in payload else "action_forms"]}
+    if payload.get("examples"):
+        candidate = {**compact, "examples": payload["examples"]}
+        if len(json.dumps(candidate, ensure_ascii=False)) <= max_chars:
+            compact = candidate
+    if len(json.dumps(compact, ensure_ascii=False)) > max_chars:
+        compact.pop("action_forms", None)
+    if len(json.dumps(compact, ensure_ascii=False)) > max_chars:
+        raise ValueError("Help budget cannot fit critical cautions; increase inspection_max_chars")
+    return compact

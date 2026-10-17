@@ -14,9 +14,19 @@ def input_feedback(name: str, arguments: dict) -> dict | None:
         GeoQgisProjectInput.model_validate(arguments)
         return None
     except ValidationError as exc:
-        errors = [{"field": ".".join(str(key) for key in error["loc"]) or "request",
-                   "reason": error["msg"][:900]}
-                  for error in exc.errors(include_input=False, include_url=False)[:8]]
+        errors = []
+        for error in exc.errors(include_input=False, include_url=False)[:8]:
+            prefix = ".".join(str(key) for key in error["loc"])
+            detail = error.get("ctx") or {}
+            field = detail.get("field", "")
+            path = ".".join(value for value in (prefix, field) if value) or "request"
+            item = {"field": path, "reason": error["msg"][:900], "code": error["type"]}
+            if detail.get("related_fields"):
+                item["related_fields"] = [".".join(part for part in (prefix, value) if part)
+                                          for value in detail["related_fields"]]
+            if "missing" in detail:
+                item["missing"] = detail["missing"]
+            errors.append(item)
     paths = " ".join(error["field"] for error in errors)
     section = ("labels" if "label_style" in paths
                else "style" if any(key in paths for key in ("style", "color", "categories"))
@@ -25,11 +35,12 @@ def input_feedback(name: str, arguments: dict) -> dict | None:
                else "layout" if "layout" in paths
                else "layer" if "layers" in paths else "workflow")
     result = {"status": "invalid_input", "executed": False, "errors": errors,
+        "failure": {"category": "argument_contract", "retry_without_change": False},
         "help_call": {"action": "help", "section": section},
         "recovery": "Use the actual geo_qgis_project contract, not geo_cartography bridge "
                     "fields or Processing help. Inspect saved spec; change only failed inputs."}
     if arguments.get("spec_ref"):
         result["inspect_call"] = {"action": "inspect", "spec_ref": arguments["spec_ref"]}
-    if arguments.get("plan_ref"):
+    if arguments.get("plan_ref") and arguments.get("action") == "create":
         result["minimal_call"] = {"action": "create", "plan_ref": arguments["plan_ref"]}
     return result

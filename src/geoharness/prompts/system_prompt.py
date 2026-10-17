@@ -19,6 +19,7 @@ from pathlib import Path
 
 from geoharness.config.settings import GeoConfig
 from geoharness.hooks.cascade import L1_TOOLS, L2_TOOLS, L3_TOOLS, CascadeManager
+from geoharness.invocation import invocation_guide
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +301,8 @@ def _build_environment_section(cwd: Path) -> str:
 def _build_execution_section(config: GeoConfig) -> str:
     return (
         "# Execution and Map Verification\n"
+        f"geo_python — {invocation_guide('geo_python')}\n"
+        f"geo_qgis_project — {invocation_guide('geo_qgis_project')}\n"
         "Begin with the task and data, not a mandatory statistical cascade. "
         "For impact analysis use native geo_analysis, or geo_python for custom work. "
         "When available, prefer geo_qgis discovery/help/run for existing QGIS algorithms "

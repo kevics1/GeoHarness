@@ -170,7 +170,10 @@ def contract_help(section: str) -> dict:
     schemas = {"layer": QgisProjectLayer, "roster": QgisLabelTable,
                "style": QgisVectorStyle, "labels": QgisLabelStyle,
                "frame": QgisMapFrameSpec, "layout": QgisProjectLayout}
+    from geoharness.invocation import action_forms, section_cautions
+
     result = {"section": section, "contract": "geo_qgis_project",
+        "cautions": section_cautions(section),
         "workflow": ["spec -> inspect/typed edits -> preflight(spec_ref) -> create(plan_ref)"],
         "rules": ["Only action+plan_ref for frozen create.",
                   "Frame references accept exact layer_key or 0-based index, never guessed names.",
@@ -178,6 +181,7 @@ def contract_help(section: str) -> dict:
                   "dpi/map_extent/title are project fields; style.field/renderer are nested.",
                   "Visual zoom suggestions use advisory; preserve declared frame requirements."]}
     if section == 'workflow':
+        result['action_forms'] = action_forms()
         result['ledger'] = {'inspect': {'action': 'inspect', 'map_id': 'returned-map-id'},
                             'recover': {'action': 'recover', 'map_id': 'returned-map-id'},
                             'note': 'Recovery migrates with backup and verification; '
