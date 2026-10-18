@@ -100,6 +100,26 @@ async def test_unchanged_map_is_not_sent_to_model_repeatedly(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_same_pixels_with_different_container_bytes_use_review_cache(tmp_path):
+    image = tmp_path / "map.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    reviewer = Reviewer()
+    context = ToolExecutionContext(cwd=tmp_path, metadata={
+        "geoharness_config": GeoConfig(), "map_review_client": reviewer,
+        "map_workflow_state": {},
+    })
+    first = await GeoMapReviewTool().execute(
+        GeoMapReviewInput(file_path=str(image), task="Check map"), context)
+    Image.new("RGBA", (32, 32), (255, 255, 255, 255)).save(image)
+    second = await GeoMapReviewTool().execute(
+        GeoMapReviewInput(file_path=str(image), task="Check map"), context)
+    assert not first.is_error and not second.is_error
+    assert reviewer.calls == 1
+    assert second.metadata["review_cached"] is True
+    assert second.metadata["image_sha256"] != second.metadata["pixel_sha256"]
+
+
+@pytest.mark.asyncio
 async def test_legacy_review_count_does_not_stop_distinct_images(tmp_path):
     reviewer = Reviewer()
     context = ToolExecutionContext(

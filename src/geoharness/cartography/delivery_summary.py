@@ -121,6 +121,7 @@ def _attached_analysis(delivery: dict) -> list[dict]:
             reports.append({'report': str(path), 'source': str(sources[0]),
                 'source_sha256': measured['sha256'], 'facts': measured,
                 'status': 'persisted_values_checked', 'method': report.get('method'),
+                'execution_evidence': report.get('execution_evidence', {}),
                 'method_status': 'declared_not_independently_verified',
                 'analysis_correctness': 'unverified'})
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -241,7 +242,8 @@ def build_delivery_summary(
             "row_count": r['facts']['row_count'], "numeric": r['facts']['numeric'],
             "groups": r['facts']['groups'], "counts": r['facts']['counts'],
             "strata": r['facts'].get('strata', []), "method": r.get('method'),
-            "analysis_correctness": 'unverified'}
+            "analysis_correctness": 'unverified',
+            "execution_evidence": r.get('execution_evidence', {})}
             for r in analysis_reports if r['status'] == 'persisted_values_checked'],
         "page_reviews": page_reviews,
         "remaining_issues": remaining,

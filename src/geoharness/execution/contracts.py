@@ -172,10 +172,14 @@ class EntityTracker:
     def __init__(self) -> None:
         self.sources: list[tuple[str, Any]] = []
         self.writes: dict[str, dict] = {}
+        self.provenance: list[dict[str, Any]] = []
 
     def record(self, path: Any, frame: Any) -> Any:
         if len(frame) and frame.crs is not None:
             self.sources.append((str(path), frame.copy(deep=True)))
+            self.provenance.append({"role": "source_read", "path": str(path),
+                                    "crs": frame.crs.to_string(),
+                                    "feature_count": len(frame)})
         return frame
 
     def check(self, frame: Any) -> dict:
@@ -255,7 +259,7 @@ def entity_join(source: Any, table: Any, *, key: str, how: str = "left") -> Any:
 
 
 def score_risk(frame: Any, *, key: str, components: list[dict],
-               missing_policy: str = "error") -> Any:
+               missing_policy: str = "error", classification: list[dict] | None = None) -> Any:
     """Explicit weighted score; returns assumptions, never a validated risk model.
 
     Each component names field/weight/minimum/maximum/direction (higher or lower).
@@ -307,8 +311,24 @@ def score_risk(frame: Any, *, key: str, components: list[dict],
         result['risk_score'] = total / available.where(available > 0)
     else:
         result['risk_score'] = sum(value * weight for value, weight in zip(normalized, weights))
-    result['risk_status'] = np.where(result.risk_score.isna(), 'unknown', 'computed')
+    if classification:
+        ordered = sorted(classification, key=lambda item: float(item['minimum']))
+        if (ordered[0]['minimum'] != 0 or ordered[-1]['maximum'] != 1
+                or any(left['maximum'] != right['minimum']
+                       for left, right in zip(ordered, ordered[1:]))):
+            raise ValueError('classification bands must be contiguous and cover 0..1')
+        status = np.full(len(result), 'unknown', dtype=object)
+        for index, band in enumerate(ordered):
+            low, high = float(band['minimum']), float(band['maximum'])
+            mask = result['risk_score'].notna() & (result['risk_score'] >= low)
+            mask &= (result['risk_score'] <= high if index == len(ordered) - 1
+                     else result['risk_score'] < high)
+            status[mask.to_numpy()] = str(band['label'])
+        result['risk_status'] = status
+    else:
+        result['risk_status'] = np.where(result.risk_score.isna(), 'unknown', 'computed')
     result.attrs['risk_method'] = {'components': components, 'missing_policy': missing_policy,
+                                 'classification': classification,
                                  'scientific_correctness': 'unverified'}
     return result
 
@@ -645,8 +665,21 @@ def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=()
                              'ask the user rather than silently normalizing')
     # Reject nonfinite/unserializable declarations before writing either output.
     json.dumps(method, allow_nan=False)
+    source_crs = facts.get('crs')
+    metric_crs = method.get('metric_crs') if isinstance(method, dict) else None
     report = {'schema_version': 1, 'kind': 'persisted_analysis_report', 'facts': facts,
               'method': method, 'method_status': 'declared_not_independently_verified',
+              'execution_evidence': {
+                  'source_crs': source_crs,
+                  'storage_crs': source_crs,
+                  'metric_crs': metric_crs,
+                  'crs_roles': {
+                      'source_and_storage': 'CRS read from persisted source file',
+                      'metric': 'declared method parameter; independently verified only when traced'
+                  },
+                  'scope': ('source/file facts and declared CRS roles; '
+                            'scientific method remains unverified')
+              },
               'claims': checked, 'analysis_correctness': 'unverified'}
     path = Path(path)
     if path.suffix.lower() != '.json':
@@ -702,5 +735,6 @@ def check_claims(facts: dict, claims: list[dict]) -> dict:
 def write_contract_report(path: Path, tracker: EntityTracker, *, input_checks=None) -> None:
     path.write_text(json.dumps({"vector_writes": tracker.writes,
                                "input_checks": input_checks or {},
+                               "provenance": tracker.provenance,
                                "scientific_correctness": "unverified"},
                               ensure_ascii=False, indent=2), encoding="utf-8")

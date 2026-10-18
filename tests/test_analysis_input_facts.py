@@ -43,6 +43,8 @@ async def test_declared_crs_mismatch_is_not_relabelled(tmp_path):
     integrity = json.loads((__import__('pathlib').Path(good.metadata['run_dir']) /
                             'integrity.json').read_text(encoding='utf-8'))
     assert integrity['input_checks']['vector']['rows'] == 1
+    assert any(item['role'] == 'source_read' and item['crs'] == 'EPSG:32648'
+               for item in integrity['provenance'])
 
 
 async def test_missing_manifest_alias_is_diagnosed_before_child_launch(tmp_path):

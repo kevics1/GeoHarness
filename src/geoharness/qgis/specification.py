@@ -77,7 +77,9 @@ def compile_references(value):
             return keys[reference]
         return reference
 
-    for layer in layers:
+    for index, layer in enumerate(layers):
+        if not isinstance(layer, dict):
+            raise ValueError(f"layers[{index}] must be an object with file_path")
         binding = layer.get("leader_binding")
         if isinstance(binding, dict):
             for field in ("source_layer", "labels_layer"):

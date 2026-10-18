@@ -114,6 +114,21 @@ def image_map_identity(path: Path) -> str:
     return map_identity(path.stem)
 
 
+def _pixel_digest(path: Path) -> str:
+    """Hash rendered pixels separately from container metadata."""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            rgba = image.convert("RGBA")
+            payload = json.dumps({"size": rgba.size, "mode": "RGBA"},
+                                 sort_keys=True).encode() + rgba.tobytes()
+        return hashlib.sha256(payload).hexdigest()
+    except Exception:
+        # Unsupported image formats retain the safe file identity.
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _budget_entry(
     name: str, metadata: dict[str, Any], config: GeoConfig
 ) -> tuple[str, dict[str, Any]]:
@@ -277,6 +292,7 @@ async def review_with_budget(
         identity, _ = _budget_entry(map_id or image_map_identity(path), metadata, config)
         state = _state(metadata)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    pixel_digest = _pixel_digest(path)
     from geoharness.cartography.review_context import build_review_iteration_context
 
     # History belongs to the actual artifact, not to the shared accounting UUID.
@@ -286,7 +302,9 @@ async def review_with_budget(
     )
     evidence = {**evidence, **iteration}
     service_key = _review_service_key(config)
-    lock_key = (id(state), service_key if service_key in state["service_recovery"] else digest)
+    lock_key = (
+        id(state), service_key if service_key in state["service_recovery"] else pixel_digest
+    )
     lock = _REVIEW_LOCKS.get(lock_key)
     if lock is None:
         lock = asyncio.Lock()
@@ -296,6 +314,7 @@ async def review_with_budget(
             path,
             state=state,
             digest=digest,
+            pixel_digest=pixel_digest,
             config=config,
             task=task,
             evidence=evidence,
@@ -312,6 +331,7 @@ async def _review_once(
     *,
     state: dict[str, Any],
     digest: str,
+    pixel_digest: str,
     config: GeoConfig,
     task: str,
     evidence: dict[str, Any],
@@ -378,13 +398,15 @@ async def _review_once(
     ).hexdigest()
     flags = {
         "image_sha256": digest,
+        "pixel_sha256": pixel_digest,
         "review_cached": False,
         "review_budget_exhausted": False,
         "request_sent": False,
         "invalid_response_retry": False,
         "invalid_response_retry_exhausted": False,
     }
-    retry_key = f"{digest}:{fingerprint}"
+    cache_key = f"{pixel_digest}:{fingerprint}"
+    retry_key = cache_key
     service_key = _review_service_key(config)
     now = time.time()
     activity = state["review_activity"].setdefault(digest, {"provider_calls": 0, "cache_hits": 0})
@@ -443,8 +465,8 @@ async def _review_once(
 
     recovery = False
     cached = None
-    if digest in state["cache"] and state["cache_settings"].get(digest) == fingerprint:
-        cached = MapReview.model_validate(state["cache"][digest])
+    if cache_key in state["cache"] and state["cache_settings"].get(cache_key) == fingerprint:
+        cached = MapReview.model_validate(state["cache"][cache_key])
         failed_contract = cached.diagnostics.get("failure_stage") in {"json", "schema"}
         already_retried = bool(state["validation_retries"].get(retry_key))
         recovery = retry_invalid_response and failed_contract and not already_retried
@@ -534,6 +556,6 @@ async def _review_once(
     flags["request_sent"] = result.diagnostics.get("request_sent", True)
     flags["review_failure_stage"] = result.diagnostics.get("failure_stage", "")
     flags.update(facts(result, cached=False))
-    state["cache"][digest] = result.model_dump()
-    state["cache_settings"][digest] = fingerprint
+    state["cache"][cache_key] = result.model_dump()
+    state["cache_settings"][cache_key] = fingerprint
     return result, flags

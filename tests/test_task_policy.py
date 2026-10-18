@@ -12,6 +12,18 @@ def proposal():
                         'maximum': 10, 'direction': 'higher'}], 'missing_policy': 'unknown'})
 
 
+def test_score_policy_classification_is_explicit_and_contiguous():
+    from geoharness.analysis.policy import ScorePolicy
+
+    values = proposal().policy.model_dump(mode='python')
+    values['classification'] = [
+        {'minimum': 0, 'maximum': .5, 'label': '低'},
+        {'minimum': .5, 'maximum': 1, 'label': '高'},
+    ]
+    policy = ScorePolicy(**values)
+    assert [band.label for band in policy.classification] == ['低', '高']
+
+
 async def test_policy_cannot_be_self_confirmed_and_standard_score_uses_exact_parameters(tmp_path):
     from geoharness.analysis.policy import resolve_policy_answer
 

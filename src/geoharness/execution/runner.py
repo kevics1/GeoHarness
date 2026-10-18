@@ -909,17 +909,21 @@ def _child_main() -> None:
         input_checks[alias] = contracts.validate_input(spec['input_artifacts'][alias], requirement)
     data_refs = spec.get("data_refs", {})
 
-    def confirmed_score(frame, *, key, components=None, missing_policy=None):
+    def confirmed_score(frame, *, key, components=None, missing_policy=None, classification=None):
         policy = spec.get('approved_score_policy')
         if spec.get('managed_inputs'):
             if not policy:
                 raise ValueError('评分需要用户已确认的policy_ref；先使用geo_task.propose_score。')
             if ((components is not None and components != policy['components']) or
-                    (missing_policy is not None and missing_policy != policy['missing_policy'])):
+                    (missing_policy is not None and missing_policy != policy['missing_policy']) or
+                    (classification is not None
+                     and classification != policy.get('classification'))):
                 raise ValueError('执行评分参数与用户确认的政策不一致')
             components, missing_policy = policy['components'], policy['missing_policy']
+            classification = policy.get('classification')
         return contracts.score_risk(frame, key=key, components=components,
-                                    missing_policy=missing_policy or 'error')
+                                    missing_policy=missing_policy or 'error',
+                                    classification=classification)
 
     namespace = {
         "__name__": "__main__",
@@ -958,6 +962,10 @@ def _child_main() -> None:
         if output.suffix.lower() in {".geojson", ".gpkg", ".shp"} and output.is_file():
             frame = gpd.read_file(output)
             tracker.writes.setdefault(str(output), tracker.check(frame))
+            if getattr(frame, 'crs', None) is not None:
+                tracker.provenance.append({"role": "output_write", "path": str(output),
+                                           "crs": frame.crs.to_string(),
+                                           "feature_count": len(frame)})
     contracts.write_contract_report(run_dir / "integrity.json", tracker, input_checks=input_checks)
 
 

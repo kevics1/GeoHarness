@@ -23,11 +23,25 @@ class ScoreComponent(BaseModel):
         return self
 
 
+class ScoreBand(BaseModel):
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+    minimum: float = Field(ge=0, le=1)
+    maximum: float = Field(ge=0, le=1)
+    label: str = Field(min_length=1, max_length=80)
+
+    @model_validator(mode='after')
+    def valid_range(self):
+        if self.minimum >= self.maximum:
+            raise ValueError('classification minimum must be below maximum')
+        return self
+
+
 class ScorePolicy(BaseModel):
     model_config = ConfigDict(extra='forbid')
     purpose: str = Field(min_length=1, max_length=1000)
     components: list[ScoreComponent] = Field(min_length=1, max_length=32)
     missing_policy: Literal['error', 'unknown', 'renormalize'] = 'unknown'
+    classification: list[ScoreBand] | None = Field(default=None, max_length=8)
 
     @model_validator(mode='after')
     def valid_components(self):
@@ -35,6 +49,12 @@ class ScorePolicy(BaseModel):
             raise ValueError('Component fields must be distinct')
         if not math.isclose(sum(c.weight for c in self.components), 1, abs_tol=1e-9):
             raise ValueError('Weights must sum to one; do not silently normalize')
+        if self.classification:
+            ordered = sorted(self.classification, key=lambda item: item.minimum)
+            if ordered[0].minimum != 0 or ordered[-1].maximum != 1:
+                raise ValueError('classification must cover normalized scores from 0 to 1')
+            if any(left.maximum != right.minimum for left, right in zip(ordered, ordered[1:])):
+                raise ValueError('classification bands must be contiguous and non-overlapping')
         return self
 
 
