@@ -32,7 +32,7 @@ class GeoTaskInput(BaseModel):
 class GeoTaskTool(BaseTool):
     name = 'geo_task'
     description = ('任务状态和标准加权评分。inspect读取当前任务；propose_score提交目的、字段、'
-        '权重、归一化范围和缺失政策并等待真实用户确认；score用已确认policy_ref、'
+        '权重、归一化范围、缺失政策和可选0..1分级并等待真实用户确认；score用已确认policy_ref、'
         'source_ref和entity_key计算并生成同源结果/报告。不能自行设置confirmed或代替用户回答。')
     input_model = GeoTaskInput
 

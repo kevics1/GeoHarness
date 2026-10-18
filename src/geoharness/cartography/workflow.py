@@ -465,8 +465,9 @@ async def _review_once(
 
     recovery = False
     cached = None
-    if cache_key in state["cache"] and state["cache_settings"].get(cache_key) == fingerprint:
-        cached = MapReview.model_validate(state["cache"][cache_key])
+    lookup_key = cache_key if cache_key in state["cache"] else digest
+    if lookup_key in state["cache"] and state["cache_settings"].get(lookup_key) == fingerprint:
+        cached = MapReview.model_validate(state["cache"][lookup_key])
         failed_contract = cached.diagnostics.get("failure_stage") in {"json", "schema"}
         already_retried = bool(state["validation_retries"].get(retry_key))
         recovery = retry_invalid_response and failed_contract and not already_retried
@@ -558,4 +559,7 @@ async def _review_once(
     flags.update(facts(result, cached=False))
     state["cache"][cache_key] = result.model_dump()
     state["cache_settings"][cache_key] = fingerprint
+    # Keep the file-key alias for checkpoint compatibility with older sessions.
+    state["cache"][digest] = result.model_dump()
+    state["cache_settings"][digest] = fingerprint
     return result, flags
