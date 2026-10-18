@@ -11,11 +11,21 @@ from geoharness.data.artifacts import (
 
 
 def complete_analysis_bundle(files, resolve):
+    """Expand already-resolved selections; their publication checks belong to resolve.
+
+    Registered QGIS review records can be valid selections without being listed
+    in the ancestor render manifest. They are not Python report-bundle inputs.
+    """
     result = list(dict.fromkeys(files))
     selected = set(result)
     manifests = {}
     for path in selected:
-        record = assert_usable_artifact(path)
+        try:
+            record = assert_usable_artifact(path)
+        except ValueError:
+            # The caller has already verified the exact registered selection.
+            # An optional relation lookup must not reject a valid review record.
+            continue
         if record and record.get('producer') == 'geo_python':
             manifest = resolve(record['manifest'])
             manifests[manifest] = json.loads(manifest.read_text(encoding='utf-8'))

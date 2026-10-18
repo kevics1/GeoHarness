@@ -1,5 +1,6 @@
 import hashlib
 import json
+from pathlib import Path
 
 from openharness.tools.base import ToolExecutionContext
 
@@ -9,6 +10,39 @@ from geoharness.config.settings import GeoConfig
 from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
 from geoharness.tools.geo_map_review import GeoMapReviewInput, review_goal, review_pixels
 from geoharness.tools.geo_python import GeoPythonInput, GeoPythonTool
+
+
+def test_bundle_follows_published_relations_without_exporting_external_companions(tmp_path):
+    from geoharness.cartography.analysis_bundle import complete_analysis_bundle
+
+    run = tmp_path / 'run'
+    run.mkdir()
+    source = run / 'result.csv'
+    source.write_text('id,value\n1,2\n', encoding='utf-8')
+    external = tmp_path / 'external.md'
+    external.write_text('unrelated user file', encoding='utf-8')
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    report = run / 'facts.json'
+    report.write_text(json.dumps({'kind': 'persisted_analysis_report',
+        'facts': {'source': str(source), 'sha256': digest(source)},
+        'companions': {'markdown': {'path': str(external), 'sha256': digest(external)}}}),
+        encoding='utf-8')
+    manifest = run / 'manifest.json'
+    manifest.write_text(json.dumps({'producer': 'geo_python', 'status': 'succeeded',
+        'run_dir': str(run), 'files': [{'path': str(p), 'sha256': digest(p)}
+                                      for p in (source, report, external)]}), encoding='utf-8')
+    files, _ = complete_analysis_bundle([source], lambda p: Path(p))
+    assert files == [source, report] and external not in files
+    # A malformed optional relation never becomes an arbitrary filesystem read.
+    raw = json.loads(report.read_text(encoding='utf-8'))
+    raw['companions'] = ['not a declared relation']
+    report.write_text(json.dumps(raw), encoding='utf-8')
+    saved = json.loads(manifest.read_text(encoding='utf-8'))
+    saved['files'][1]['sha256'] = digest(report)
+    manifest.write_text(json.dumps(saved), encoding='utf-8')
+    assert complete_analysis_bundle([source], lambda p: Path(p)) == ([source], [])
 
 
 def test_review_uses_same_goal_when_omitted_but_honors_changed_requirements():
