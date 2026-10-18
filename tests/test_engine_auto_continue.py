@@ -154,6 +154,24 @@ async def test_changed_result_at_same_input_is_progress(tmp_path):
     assert runtime.messages[-1].text == "done"
 
 
+async def test_elapsed_performance_target_does_not_stop_useful_continuation(tmp_path, monkeypatch):
+    from geoharness import task_budget
+    from geoharness.config.settings import AgentConfig
+
+    def already_elapsed(metadata, config):
+        metadata["geo_task_timing"] = {"started_at": 1}
+
+    monkeypatch.setattr(task_budget, "start_task", already_elapsed)
+    client, tool = ProbeClient(tool_turns=2), ProbeTool()
+    runtime = engine(tmp_path, client, tool)
+    runtime.tool_metadata["geoharness_config"] = GeoConfig(
+        agent=AgentConfig(task_budget_seconds=1200))
+    events = [event async for event in runtime.submit_message("finish all checks")]
+    assert tool.calls == 2 and client.calls == 3
+    assert runtime.messages[-1].text == "done"
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+
+
 async def test_failed_last_tool_batch_does_not_retry_automatically(tmp_path):
     client, tool = ProbeClient(tool_turns=100), ProbeTool(error=True)
     runtime = engine(tmp_path, client, tool)

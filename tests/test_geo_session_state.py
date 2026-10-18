@@ -56,6 +56,21 @@ def _save(backend, tmp_path, metadata, *, session_id="checkpoint"):
     )
 
 
+def test_actual_snapshot_persists_safe_request_and_tool_timings(backend, tmp_path):
+    metadata = _metadata()
+    metadata.update(geo_request_metrics=[{"request_id": "real", "elapsed_seconds": 25.1,
+        "input_tokens": 1234, "output_tokens": 321, "raw_response": "never saved"}],
+        geo_tool_metrics=[{"execution_id": "tool-real", "tool": "geo_python",
+            "elapsed_seconds": 0.125, "is_error": True, "code": "never saved"}],
+        geo_task_timing={"started_at": 12345})
+    saved = json.loads(_save(backend, tmp_path, metadata).read_text(encoding="utf-8"))[
+        "tool_metadata"]
+    assert saved["geo_request_metrics"][0]["input_tokens"] == 1234
+    assert saved["geo_tool_metrics"][0]["elapsed_seconds"] == .125
+    assert saved["geo_task_timing"] == {"started_at": 12345}
+    assert "never saved" not in json.dumps(saved)
+
+
 def _restore(backend, tmp_path, metadata, *, config=None):
     _save(backend, tmp_path, metadata)
     restored = _metadata(config or metadata["geoharness_config"])

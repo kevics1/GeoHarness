@@ -57,6 +57,7 @@ class _RequestState:
     include_stream_usage: bool = True
     record_usage: Callable[[UsageSnapshot], None] | None = None
     record_metrics: Callable[[dict[str, Any]], None] | None = None
+    context_projection: dict[str, int] = field(default_factory=dict)
     active_streams: list[Any] = field(default_factory=list)
     owned_streams: list[Any] = field(default_factory=list)
     raw_tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
@@ -164,6 +165,7 @@ class _CompletionProxy:
             recorded = True
             state.record_metrics({
                 "request_id": state.request_id, "attempt": state.provider_attempts,
+                "started_at": time() - (monotonic() - started),
                 "model": params.get("model"), "response_model": response_model,
                 "reasoning_effort": (params.get("extra_body") or {}).get("reasoning_effort"),
                 "elapsed_seconds": round(monotonic() - started, 3),
@@ -173,6 +175,10 @@ class _CompletionProxy:
                 "reasoning_tokens": reasoning_tokens,
                 "finish_reason": state.finish_reason,
                 "error_type": type(error).__name__ if error else None,
+                "message_count": len(params.get("messages", [])),
+                "message_chars": len(json.dumps(params.get("messages", []), ensure_ascii=False)),
+                "tool_schema_chars": len(json.dumps(params.get("tools", []), ensure_ascii=False)),
+                **state.context_projection,
             })
 
         try:
@@ -294,8 +300,10 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
     ) -> None:
         super().__init__(api_key, base_url=base_url, timeout=timeout)
         self.settings = settings or AgentConfig()
-        self.request_metrics: deque[dict[str, Any]] = deque(maxlen=64)
+        self.request_metrics: deque[dict[str, Any]] = deque(
+            maxlen=self.settings.request_metrics_limit)
         self.data_context_provider: Callable[[], str] | None = None
+        self.history_projector: Callable | None = None
         self._request_state: ContextVar[_RequestState | None] = ContextVar(
             "geoharness_api_request", default=None,
         )
@@ -604,6 +612,9 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         # in another task, while separate queries bind separate state objects.
         query_state = self._query_recovery_state.get()
         fingerprint = self._recovery_fingerprint() if query_state is not None else None
+        projection = {}
+        if request.tools and self.history_projector is not None:
+            request, projection = self.history_projector(request)
         if request.tools and self.data_context_provider is not None:
             transient_context = self.data_context_provider()
             if transient_context:
@@ -636,6 +647,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                 extra_body=extras, include_stream_usage=self.settings.include_stream_usage,
                 record_usage=self._record_usage,
                 record_metrics=self.request_metrics.append,
+                context_projection=projection,
                 active_streams=query_state.active_streams if query_state is not None else [],
             )
             final: ApiMessageCompleteEvent | None = None
@@ -706,6 +718,7 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
                     include_stream_usage=self.settings.include_stream_usage,
                     record_usage=self._record_usage, allow_transport_retries=False,
                     record_metrics=self.request_metrics.append,
+                    context_projection=projection,
                     active_streams=query_state.active_streams if query_state is not None else [])
                 repaired = None
                 try:

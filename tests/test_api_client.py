@@ -90,6 +90,24 @@ async def test_failed_request_also_records_duration_without_exception_body(monke
     assert "secret provider body" not in json.dumps(metrics)
 
 
+async def test_history_projection_reaches_transport_and_metrics_without_mutating_original(
+    tmp_path, monkeypatch,
+):
+    from geoharness.model_context import project_history
+    from tests.test_efficiency_context import history
+
+    client, calls = mock_client(monkeypatch, [streamed(chunk(text="done", finish="stop"))])
+    client.history_projector = lambda req: project_history(
+        req, settings=client.settings, cwd=tmp_path)
+    original = replace(history(), tools=request().tools)
+    before = [m.model_dump() for m in original.messages]
+    _ = [event async for event in client.stream_message(original)]
+    assert list(client.request_metrics)[0]["saved_chars"] > 10000
+    assert list(client.request_metrics)[0]["tool_schema_chars"] > 0
+    assert "full_result_path" in json.dumps(calls[0]["messages"])
+    assert [m.model_dump() for m in original.messages] == before
+
+
 @pytest.mark.asyncio
 async def test_max_argument_recovery_keeps_effort_model_and_output_budget(monkeypatch):
     client, calls = mock_client(monkeypatch, [

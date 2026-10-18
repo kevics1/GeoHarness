@@ -129,13 +129,6 @@ class GeoQueryEngine(QueryEngine):
             self._settle_usage()
 
     async def continue_pending(self, *, max_turns: int | None = None) -> AsyncIterator[StreamEvent]:
-        from geoharness.task_budget import budget_status, start_task
-
-        config = self.tool_metadata.get("geoharness_config")
-        if config is not None and budget_status(self.tool_metadata, config).get(
-                "phase") == "deadline":
-            # Explicit user continuation opens a new time window; automatic batches do not.
-            start_task(self.tool_metadata, config)
         context = QueryContext(
             api_client=self._api_client, tool_registry=self._tool_registry,
             permission_checker=self._permission_checker, cwd=self._cwd,
@@ -176,6 +169,10 @@ class GeoQueryEngine(QueryEngine):
         self.tool_metadata.setdefault('geo_clarification', {})
         context = replace(context, api_client=_QuestionGateClient(
             context.api_client, self.tool_metadata))
+        from geoharness.performance import MeasuredRegistry
+
+        context = replace(context, tool_registry=MeasuredRegistry(
+            context.tool_registry, self.tool_metadata))
         seen: set[str] = set()
         seen_failures: set[str] = set()
         while True:
@@ -216,15 +213,6 @@ class GeoQueryEngine(QueryEngine):
                 if self.tool_metadata.get('geo_clarification', {}).get('pending'):
                     question = self.tool_metadata['geo_clarification']['pending']['question']
                     yield StatusEvent(message=f"等待用户回答：{question}"), None
-                    return
-                from geoharness.task_budget import budget_status
-
-                if config is not None and budget_status(self.tool_metadata, config).get(
-                        "phase") == "deadline":
-                    yield ErrorEvent(message=(
-                        "已到任务时间目标，停止自动追加回合。已有工具结果和产物已保留；"
-                        "未完成检查仍为未验证，可明确继续处理。"
-                    )), None
                     return
                 if not automatic or not self.has_pending_continuation():
                     raise

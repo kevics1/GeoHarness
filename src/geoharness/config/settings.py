@@ -65,6 +65,10 @@ class AgentConfig(BaseModel):
     max_tokens: int = Field(default=16384, ge=1024, le=65536)
     task_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
     delivery_reserve_seconds: float = Field(default=180, ge=0, le=3600)
+    request_metrics_limit: int = Field(default=2048, ge=64, le=10000)
+    context_keep_recent_results: int = Field(default=6, ge=1, le=100)
+    context_result_max_chars: int = Field(default=4000, ge=1000, le=1000000)
+    context_archive_dir: str = ".geoharness/runs/context"
     auto_continue: bool = Field(default=True, description=(
         "Continue pending tool results after a turn batch when new successful progress exists."
     ))

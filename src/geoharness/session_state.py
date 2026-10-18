@@ -666,6 +666,14 @@ class GeoSessionBackend(OpenHarnessSessionBackend):
         config = source.get("geoharness_config")
         if isinstance(config, GeoConfig):
             persisted[GEO_SESSION_CHECKPOINT_KEY] = _checkpoint(source, root, config)
+            from geoharness.telemetry import safe_metrics
+
+            for key in ("geo_request_metrics", "geo_tool_metrics"):
+                persisted[key] = safe_metrics(source.get(key),
+                    limit=config.agent.request_metrics_limit, secrets=_review_secrets(config))
+            timing = source.get("geo_task_timing", {})
+            if isinstance(timing, dict) and _seconds(timing.get("started_at")) is not None:
+                persisted["geo_task_timing"] = {"started_at": timing["started_at"]}
         messages = sanitize_conversation_messages(messages)
         sid = session_id or uuid4().hex[:12]
         if not isinstance(sid, str) or not sid or len(sid) > 128 or re.fullmatch(
