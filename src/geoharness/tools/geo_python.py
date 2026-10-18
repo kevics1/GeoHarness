@@ -207,6 +207,10 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
     if 'Too few points in geometry' in stderr:
         hints.append('引线端点可能相同；先按唯一ID核对真实点与标签锚点。'
                      '使用make_leader_lines跳过零长度引线，保留原始点，不猜坐标偏移。')
+    if any(text in stderr for text in ('KeyError', 'shape', 'unpack', '__round__',
+                                      'truth value of a Series')):
+        hints.append('先对实际中间表/数组执行describe_input(value)，核对字段、dtype、CRS或shape；'
+                     '不要根据原始表或上一阶段假定字段仍存在，不要重做已成功的分析。')
     if 'Read path is outside allowed' in stderr and '.pdf' in code:
         hints.append('工程PDF通过geo_qgis_project export和geo_deliver处理；'
                      '使用实际返回的产物路径，不自行拼接工程内部文件名。')
@@ -497,6 +501,7 @@ class GeoPythonTool(BaseTool):
             "extent_geometry": "keyword west,south,east,north,crs -> CRS-bearing GeoSeries",
             "artifact_facts": "path,key,numeric_fields,predicates,metric_crs -> measured facts",
             "check_claims": "facts,claims -> compare explicit values; no NLP audit",
+            "describe_input": "actual DataFrame/ndarray/open raster -> schema, dtype, CRS, shape",
             "first_coverage": "points,stages,key,stage_key,stage_order,boundary -> 最早覆盖/未覆盖",
             "make_leader_lines": "points,labels,key,metric_crs -> 按ID连接，略去零长度引线",
             "write_analysis_report": "path,source,key,method等 -> 同源JSON/中文Markdown事实报告",

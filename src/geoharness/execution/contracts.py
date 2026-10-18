@@ -93,6 +93,33 @@ def require_metric(value: Any) -> Any:
     return crs
 
 
+def describe_input(value: Any) -> dict:
+    """Actual in-memory schema/shape, not inferred fields or a second analysis run."""
+    import numpy as np
+    import pandas as pd
+
+    if isinstance(value, pd.DataFrame):
+        result = {'kind': 'table', 'rows': len(value),
+                  'schema': {str(k): str(v) for k, v in value.dtypes.items()},
+                  'null_counts': {str(k): int(v) for k, v in value.isna().sum().items()}}
+        if hasattr(value, 'geometry') and hasattr(value, 'crs'):
+            result.update(crs=str(value.crs) if value.crs else None,
+                          geometry_column=value.geometry.name,
+                          geometry_types=value.geometry.geom_type.value_counts().to_dict())
+        return result
+    if isinstance(value, np.ndarray):
+        result = {'kind': 'array', 'shape': list(value.shape), 'ndim': value.ndim,
+                  'dtype': str(value.dtype), 'size': int(value.size)}
+        if np.issubdtype(value.dtype, np.number):
+            result['nonfinite_count'] = int((~np.isfinite(value)).sum())
+        return result
+    if hasattr(value, 'count') and hasattr(value, 'transform') and hasattr(value, 'crs'):
+        return {'kind': 'raster', 'shape': [value.count, value.height, value.width],
+                'crs': str(value.crs) if value.crs else None, 'dtypes': list(value.dtypes),
+                'nodata': str(value.nodata), 'bounds': list(value.bounds)}
+    raise TypeError('describe_input accepts an actual DataFrame, ndarray or opened raster dataset')
+
+
 def extent_geometry(*, west: float, south: float, east: float, north: float, crs: Any) -> Any:
     """Named bounds, explicit CRS; ready for mask_raster or to_crs, never a bare box."""
     import geopandas as gpd

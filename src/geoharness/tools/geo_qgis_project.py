@@ -513,6 +513,17 @@ MapEdit = Annotated[QgisStyleEdit | QgisLabelEdit | QgisFrameEdit | QgisLayerEdi
 
 class GeoQgisProjectInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    _edit_normalizations: list[str] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def normalize_edit_structure(cls, value, handler):
+        from geoharness.qgis.specification import normalize_edit_structure
+
+        normalized, notes = normalize_edit_structure(value)
+        result = handler(normalized)
+        result._edit_normalizations = notes
+        return result
 
     action: Literal["build", "create", "inspect", "export", "preflight", "spec", "help", "recover"]
     section: Literal["workflow", "layer", "roster", "style", "labels", "frame", "layout",
@@ -755,6 +766,7 @@ class GeoQgisProjectTool(BaseTool):
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        input_normalizations = arguments._edit_normalizations
         if arguments.action == "recover" or (arguments.action == "inspect" and arguments.map_id
                 and not (arguments.project_path or arguments.spec_ref or arguments.plan_ref)):
             from geoharness.cartography.jobs import inspect_map_ledger
@@ -945,6 +957,8 @@ class GeoQgisProjectTool(BaseTool):
             raw = result.output.lstrip()
             visible, end = json.JSONDecoder().raw_decode(raw)
             visible["spec_ref"] = spec_reference
+            if input_normalizations:
+                visible["input_normalizations"] = input_normalizations
             result = ToolResult(output=json.dumps(visible, ensure_ascii=False) + raw[end:],
                                 is_error=result.is_error,
                                 metadata={**result.metadata, 'spec_ref': spec_reference})
@@ -1012,6 +1026,7 @@ class GeoQgisProjectTool(BaseTool):
                                   metadata={"preflight_status": "failed", "render_executed": False,
                                             "deterministic_error": isinstance(exc, ValueError),
                                             **failed})
+        from geoharness.qgis.reuse import recall_render, remember_render, render_key
         from geoharness.qgis.runner import execute_qgis
 
         if preflight is not None:
@@ -1066,6 +1081,10 @@ class GeoQgisProjectTool(BaseTool):
                 return ToolResult(output="Error: layout_plan is stale: sources/styles/parameters "
                     "changed; run preflight again", is_error=True,
                     metadata={"deterministic_error": True, "render_executed": False})
+        reuse_key = render_key(payload, config) if arguments.action == "create" else None
+        reused = recall_render(context.metadata, reuse_key)
+        if reused is not None:
+            return reused
         if arguments.action == "preflight":
             if arguments.layout is not None and config.qgis.enabled:
                 try:
@@ -1197,7 +1216,10 @@ class GeoQgisProjectTool(BaseTool):
                 track_render_result, response, context, identity,
                 preflight=preflight, analysis=analysis))
             try:
-                return await asyncio.shield(registration)
+                tracked = await asyncio.shield(registration)
+                remember_render(context.metadata, reuse_key, tracked,
+                                limit=config.qgis.reuse_cache_entries)
+                return tracked
             except asyncio.CancelledError:
                 await _drain_task(registration)
                 raise

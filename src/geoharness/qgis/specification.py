@@ -14,6 +14,35 @@ from pathlib import Path
 from geoharness.qgis.prepared import _directory
 
 
+def normalize_edit_structure(value):
+    """Explicit structural aliases only: no guessed layer identities or business choices."""
+    if not isinstance(value, dict) or not isinstance(value.get("edits"), list):
+        return value, []
+    result = copy.deepcopy(value)
+    notes = []
+    for index, edit in enumerate(result["edits"]):
+        if not isinstance(edit, dict):
+            continue
+        operation = edit.get("operation")
+        if operation == "roster" and "roster" in edit:
+            if "table" in edit:
+                raise ValueError(f"edits[{index}] has both roster and table; use table only")
+            edit["table"] = edit.pop("roster")
+            notes.append(f"edits[{index}].roster -> table")
+        if operation == "style" and isinstance(edit.get("layer"), str):
+            if "layer_key" in edit:
+                raise ValueError(f"edits[{index}] has both layer and layer_key; use layer_key only")
+            edit["layer_key"] = edit.pop("layer")
+            notes.append(f"edits[{index}].layer -> layer_key (identity still strictly checked)")
+        settings = edit.get("settings")
+        if operation == "frame" and isinstance(settings, dict) and "extent" in settings:
+            if "extent" in edit:
+                raise ValueError(f"edits[{index}] has two extents; use edit.extent only")
+            edit["extent"] = settings.pop("extent")
+            notes.append(f"edits[{index}].settings.extent -> extent")
+    return result, notes
+
+
 def compile_references(value):
     """Compile unique stable business keys to worker indices, without name guessing."""
     if not isinstance(value, dict) or not isinstance(value.get("layers"), list):
@@ -192,7 +221,16 @@ def contract_help(section: str) -> dict:
     elif section == "edits":
         result["schemas"] = [model.model_json_schema() for model in (
             QgisStyleEdit, QgisLabelEdit, QgisFrameEdit, QgisLayerEdit, QgisRosterEdit)]
-    result["examples"] = {
+        result["examples"] = {
+            "style": {"operation": "style", "layer_key": "returned-key", "style": {
+                "color": "#d73027"}},
+            "roster": {"operation": "roster", "table": None},
+            "extent": {"operation": "frame", "frame": "main", "extent": {
+                "xmin": 0, "ymin": 0, "xmax": 10, "ymax": 10},
+                "settings": {"purpose": "主体总览", "requirements": [
+                    {"layer_index": "returned-key", "coverage": "complete"}]}},
+        }
+    result.setdefault("examples", {
         "style": {"operation": "style", "layer_key": "returned-key", "style": {
             "renderer": "categorized", "field": "actual_field", "categories": [
                 {"value": "actual_value", "label": "显示名称", "color": "#d73027"}]}},
@@ -200,7 +238,7 @@ def contract_help(section: str) -> dict:
             "purpose": "火场详图", "focus_layers": ["returned-key"], "requirements": [
                 {"layer_index": "returned-key", "coverage": "complete"}]},
             "minimum_zoom": 2, "zoom_policy": "advisory"},
-    } if section == "workflow" else {}
+    } if section == "workflow" else {})
     return result
 
 def recent_specs(*, cwd, settings, limit=4) -> list[dict]:

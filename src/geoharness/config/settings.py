@@ -56,6 +56,7 @@ class QgisConfig(BaseModel):
     timeout_seconds: float = Field(default=180, gt=0, le=3600)
     max_output_chars: int = Field(default=12000, ge=100, le=1000000)
     max_search_results: int = Field(default=20, ge=1, le=100)
+    reuse_cache_entries: int = Field(default=8, ge=0, le=64)
 
 
 class AgentConfig(BaseModel):

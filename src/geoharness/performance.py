@@ -13,6 +13,7 @@ class MeasuredRegistry:
         self.metadata = metadata
         metadata.setdefault("geo_tool_metrics", [])
         metadata.setdefault("geo_current_state", {})
+        metadata.setdefault("geo_render_reuse", {})
 
     def __getattr__(self, name):
         return getattr(self.registry, name)

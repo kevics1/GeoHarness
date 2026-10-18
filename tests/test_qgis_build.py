@@ -46,6 +46,11 @@ async def test_build_edits_uses_one_real_native_job_and_preserves_draft(tmp_path
     assert load_spec(updated, cwd=tmp_path, settings=cfg.qgis)["title"] == "Edited"
     assert built.metadata["preflight"]["status"] == "passed"
     assert built.metadata["map_receipt"]["quality_status"] != "passed"
+    reused = await tool.execute(GeoQgisProjectInput(action="build", spec_ref=updated), context)
+    assert not reused.is_error, reused.output
+    assert reused.metadata.get("reused") is True
+    assert reused.metadata["render_executed"] is False
+    assert actions == ["project_create"]
     rejected = await tool.execute(GeoQgisProjectInput(action="build", spec_ref=ref), context)
     assert rejected.is_error and rejected.metadata["mutation_conflict"]
     assert actions == ["project_create"]
