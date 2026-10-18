@@ -1,12 +1,12 @@
 """GeoHarness tool registry — whitelist + native + MCP.
 
 Builds a ToolRegistry with only domain-relevant tools:
-- 9 native tools plus 2 optional QGIS tools: Processing and editable projects
+- 10 native tools plus 2 optional QGIS tools: Processing and editable projects
 - 5 whitelisted OpenHarness tools (ask_user_question, skill, todo_write,
   tool_search, brief) — user interaction helpers
 - MCP tools (registered dynamically when MCP manager is connected)
 
-16 tools are available with QGIS enabled; configured MCP tools register dynamically.
+17 tools are available with QGIS enabled; configured MCP tools register dynamically.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from geoharness.tools.geo_deliver import GeoDeliverTool
 from geoharness.tools.geo_map_review import GeoMapReviewTool
 from geoharness.tools.geo_python import GeoPythonTool
 from geoharness.tools.geo_raster_data import GeoRasterDataTool
+from geoharness.tools.geo_task import GeoTaskTool
 from geoharness.tools.geo_vector_data import GeoVectorDataTool
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,8 @@ def build_geo_tool_registry(
     ))
     registry.register(GeoMapReviewTool())
     registry.register(GeoDeliverTool())
-    logger.info("Registered 9 native tools")
+    registry.register(GeoTaskTool())
+    logger.info("Registered 10 native tools")
 
     if getattr(getattr(config, "qgis", None), "enabled", True):
         from geoharness.tools.geo_qgis import GeoQgisTool

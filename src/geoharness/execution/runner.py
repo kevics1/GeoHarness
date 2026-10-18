@@ -130,6 +130,8 @@ async def execute_python(
     input_artifacts: dict[str, str] | None = None,
     input_requirements: dict[str, dict] | None = None,
     expected_outputs: tuple[str, ...] = (),
+    managed_inputs: bool = False,
+    approved_score_policy: dict | None = None,
 ) -> dict[str, Any]:
     """Save and execute a script, returning and persisting its reproducibility record."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
@@ -170,7 +172,8 @@ async def execute_python(
              "read_files": exact_files, "data_profiles": data_profiles or {},
              "data_refs": data_refs or {},
              "input_artifacts": input_artifacts or {},
-             "input_requirements": input_requirements or {},
+             "input_requirements": input_requirements or {}, "managed_inputs": managed_inputs,
+             "approved_score_policy": approved_score_policy,
              "expected_outputs": list(expected_outputs),
              "previous_outputs": [str(path) for path in previous_outputs]},
             ensure_ascii=False,
@@ -278,6 +281,8 @@ async def execute_python(
                             "scientific correctness remains unverified",
         "inputs": input_artifacts or {},
         "input_versions": input_versions,
+        "managed_inputs": managed_inputs,
+        "execution_policy": approved_score_policy,
         "expected_outputs": list(expected_outputs),
         "run_dir": str(run_dir),
         "script_path": str(script),
@@ -371,6 +376,16 @@ def _install_guards(spec: dict[str, Any], tracker: Any = None) -> None:
                       and path.is_file())
         if sensitive_name or (lower_parts & denied_parts or not allowed_roots) and not exact_file:
             raise PermissionError(f"Read path is outside allowed data/runtime directories: {path}")
+        if (spec.get('managed_inputs') and not exact_file and
+                any(path.is_relative_to(root) for root in data_roots) and
+                path.suffix.lower() in {'.csv', '.json', '.geojson', '.gpkg', '.shp', '.dbf',
+                                       '.shx', '.prj', '.cpg', '.tif', '.tiff', '.vrt'}):
+            declared = {Path(v).resolve() for v in spec.get('input_artifacts', {}).values()}
+            sidecar = any(p.suffix.lower() == '.shp' and p.parent == path.parent
+                          and p.stem == path.stem and path.suffix.lower() in {
+                              '.dbf', '.shx', '.prj', '.cpg'} for p in declared)
+            if path not in declared and not sidecar:
+                raise PermissionError(f'未绑定的业务输入：{path}；请在input_refs声明依赖。')
         return path
 
     def audit(event: str, args: tuple[Any, ...]) -> None:
@@ -893,6 +908,19 @@ def _child_main() -> None:
             raise ValueError(f'Unbound input requirement: {alias}')
         input_checks[alias] = contracts.validate_input(spec['input_artifacts'][alias], requirement)
     data_refs = spec.get("data_refs", {})
+
+    def confirmed_score(frame, *, key, components=None, missing_policy=None):
+        policy = spec.get('approved_score_policy')
+        if spec.get('managed_inputs'):
+            if not policy:
+                raise ValueError('评分需要用户已确认的policy_ref；先使用geo_task.propose_score。')
+            if ((components is not None and components != policy['components']) or
+                    (missing_policy is not None and missing_policy != policy['missing_policy'])):
+                raise ValueError('执行评分参数与用户确认的政策不一致')
+            components, missing_policy = policy['components'], policy['missing_policy']
+        return contracts.score_risk(frame, key=key, components=components,
+                                    missing_policy=missing_policy or 'error')
+
     namespace = {
         "__name__": "__main__",
         "__file__": str(script),
@@ -908,7 +936,7 @@ def _child_main() -> None:
         "write_raster": raster_helpers.write_raster,
         "raster_backdrop": raster_helpers.raster_backdrop,
         "entity_join": contracts.entity_join,
-        "score_risk": contracts.score_risk,
+        "score_risk": confirmed_score,
         "sample_raster_points": contracts.sample_raster_points,
         "extent_geometry": contracts.extent_geometry,
         "artifact_facts": contracts.artifact_facts,

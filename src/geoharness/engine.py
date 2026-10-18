@@ -61,6 +61,9 @@ class GeoQueryEngine(QueryEngine):
                         '取消', 'cancel', 'cancelled', '(no response)'}):
                 yield StatusEvent(message=f"需要先回答：{pending['question']}")
                 return
+            from geoharness.analysis.policy import resolve_policy_answer
+
+            resolve_policy_answer(self.tool_metadata, user_message.text)
             self.tool_metadata['geo_clarification'].pop('pending', None)
             self._tool_metadata['_suppress_next_user_goal'] = True
         if continuation and self.has_pending_continuation() and all(

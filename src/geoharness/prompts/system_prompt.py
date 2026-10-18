@@ -164,7 +164,11 @@ L2 统计工具（moran/getis_ord）接受 `geometries` 参数；直接传坐标
 _TOOL_CATALOG = """\
 # 工具目录（Tool Catalog）
 
-## 原生工具（9 个，另有 2 个可选 QGIS 工具）
+## 原生工具（10 个，另有 2 个可选 QGIS 工具）
+- **geo_task**：读取当前任务和执行标准加权评分。需要主观权重时，先用
+propose_score提交明确政策并等待真实用户确认，再用score(policy_ref,source_ref,entity_key)。
+标准入口负责输入绑定、计算和同源报告，不在Python里重写同一评分过程。
+用户修改政策后须修订方案，不得把修改意见、取消或“继续”当作对旧方案的同意。
 - **geo_accessibility**：带明确方向映射、米制 CRS、速度、最大接驳距离和指定危险几何的\
 路网可达性分析。优先使用它，不要在 geo_python 中重写路径规划。检查每个居民点的状态和\
 安全图连通分量。使用 action=compare 比较基准与危险情景：共同接驳候选、明确 objective=\
@@ -387,6 +391,8 @@ def _build_execution_section(config: GeoConfig) -> str:
         "不需要引线的同位置锚点，不移动真实居民点。移动编号必须同步重算引线；引线图层"
         "声明leader_binding(source_layer,labels_layer,key_field,metric_crs)。"
         "需要核对中间表或数组时用describe_input，范围用fit_frame_extent并传实际图框毫米尺寸。"
+        "新任务的Python读取会自动绑定能唯一解析的已登记输入；动态读取必须声明input_refs，"
+        "不能通过额外读取其他业务文件绕过依赖。标准评分用geo_task，不手工拼接评分脚本。"
         "artifact_facts支持group_by。"
         "write_analysis_report(当前RUN_DIR中的.json路径, source=实际落盘文件, key=唯一ID, "
         "numeric_fields=[], group_by=[], predicates=[], method=明确方法字典, claims=[])"

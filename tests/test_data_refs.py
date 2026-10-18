@@ -169,7 +169,7 @@ async def test_runtime_tool_loop_shares_inspected_profiles_and_refs(tmp_path, mo
                     "action": "inspect", "file_path": str(source)})
             elif step == 1:
                 block = ToolUseBlock(id="read", name="geo_python", input={"code": (
-                    "import json\nref = next(iter(DATA_REFS))\n"
+                    "import json\nref = 'points'\n"
                     "assert len(read_vector(ref)) == 2\n"
                     "print(json.dumps({'profiles': len(GEO_DATA), 'refs': len(DATA_REFS)}))")})
             else:

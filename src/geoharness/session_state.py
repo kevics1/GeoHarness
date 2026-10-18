@@ -576,6 +576,13 @@ def restore_geo_session_state(
     metadata['analysis_workflow_state'] = analysis_stages
     if task is not None:
         metadata.setdefault('geo_task_record', {}).update(task)
+        from geoharness.analysis.policy import PolicyDecision, policy_question
+
+        for identity, raw in task.get('score_policies', {}).items():
+            decision = PolicyDecision.model_validate(raw)
+            if decision.status == 'pending':
+                metadata.setdefault('geo_clarification', {})['pending'] = {
+                    'question': policy_question(decision.policy), 'policy_ref': identity}
     from geoharness.telemetry import safe_call_counts, safe_metrics
 
     for key in ('geo_request_metrics', 'geo_tool_metrics'):

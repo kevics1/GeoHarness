@@ -15,7 +15,9 @@ class GeoAskUserQuestionTool(AskUserQuestionTool):
     async def execute(self, arguments, context):
         question = arguments.question.strip()
         state = context.metadata.setdefault('geo_clarification', {})
-        state['pending'] = {'question': question}
+        previous = state.get('pending') or {}
+        state['pending'] = {**(previous if previous.get('question') == question else {}),
+                            'question': question}
         prompt = context.metadata.get('ask_user_prompt')
         if not callable(prompt):
             return ToolResult(output=f"等待用户回答：{question}",
@@ -27,5 +29,8 @@ class GeoAskUserQuestionTool(AskUserQuestionTool):
                 'cancel', 'cancelled', '(no response)'}:
             return ToolResult(output=f"尚未收到明确答案，等待用户回答：{question}",
                               metadata={'clarification_required': True})
+        from geoharness.analysis.policy import resolve_policy_answer
+
+        resolve_policy_answer(context.metadata, answer)
         state.pop('pending', None)
         return ToolResult(output=answer, metadata={'clarification_required': False})

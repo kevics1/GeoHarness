@@ -256,6 +256,7 @@ class GeoPythonInput(BaseModel):
         description="Stable analysis step ID, reused after fixes; stores trusted completion.")
     depends_on: list[str] = Field(default_factory=list, max_length=32,
         description="Prior successful stage IDs whose unchanged artifacts this step requires.")
+    policy_ref: str = Field(default='', description='用户已确认的评分政策引用；模型不能自签确认。')
 
     @field_validator('expected_outputs')
     @classmethod
@@ -365,7 +366,17 @@ class GeoPythonTool(BaseTool):
         from geoharness.execution.stages import prepare_stage
 
         inputs, stage_fingerprint = {}, ''
+        input_evidence_files = []
+        approved_policy = None
         try:
+            if arguments.policy_ref:
+                from geoharness.analysis.policy import approved_score_policy
+
+                approved_policy = approved_score_policy(context.metadata, arguments.policy_ref)
+            if context.metadata.get('geo_task_record'):
+                from geoharness.execution.managed_inputs import bind_managed_inputs
+
+                arguments = bind_managed_inputs(arguments, context)
             if set(arguments.input_requirements) - set(arguments.input_refs):
                 raise ValueError('input_requirements must name existing input_refs aliases')
             if arguments.depends_on and not arguments.stage_id:
@@ -375,7 +386,9 @@ class GeoPythonTool(BaseTool):
                                                 cwd=Path(context.cwd), config=config)
                 path = Path(value)
                 path = (path if path.is_absolute() else context.cwd / path).resolve()
-                assert_usable_artifact(path)
+                producer = assert_usable_artifact(path)
+                if producer and producer.get('manifest'):
+                    input_evidence_files.append(Path(producer['manifest']))
                 inputs[alias] = str(path)
             if arguments.stage_id:
                 stage_fingerprint = prepare_stage(context.metadata,
@@ -383,7 +396,7 @@ class GeoPythonTool(BaseTool):
                     code=arguments.code + json.dumps({k: v.model_dump() for k, v in
                         arguments.input_requirements.items()}, sort_keys=True),
                     inputs=inputs, expected_outputs=arguments.expected_outputs)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, SyntaxError) as exc:
             return ToolResult(output=f'Precondition failed; no script executed: {exc}',
                               is_error=True, metadata={'script_executed': False})
         timeout = arguments.timeout_seconds or execution.timeout_seconds
@@ -454,11 +467,13 @@ class GeoPythonTool(BaseTool):
                 timeout_seconds=timeout,
                 max_output_chars=execution.max_output_chars,
                 read_dirs=read_dirs,
-                read_files=diagnostic_files,
+                read_files=(*diagnostic_files, *input_evidence_files),
                 data_profiles=profiles,
                 data_refs=references,
                 previous_outputs=tuple(Path(item["path"]) for item in outputs),
                 input_artifacts=inputs,
+                managed_inputs=bool(context.metadata.get('geo_task_record')),
+                approved_score_policy=approved_policy,
                 input_requirements={k: v.model_dump() for k, v in
                                     arguments.input_requirements.items()},
                 expected_outputs=tuple(arguments.expected_outputs),

@@ -179,6 +179,13 @@ def lookup_reference(value: str, references: dict[str, dict]) -> dict[str, Any]:
         item.get("path"), item.get("name"), item.get("output_label"),
         Path(item.get("path", "")).stem,
     }]
+    if not matches and Path(value).is_absolute():
+        # Canonical path equality is exact identity, not fuzzy filename guessing.
+        import os
+
+        target = os.path.normcase(str(Path(value).resolve()))
+        matches = [item for item in references.values() if os.path.normcase(str(
+            Path(item.get('path', '')).resolve())) == target]
     if len(matches) == 1:
         return matches[0]
     candidates = matches if matches else list(references.values())

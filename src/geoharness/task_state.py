@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from geoharness.analysis.policy import PolicyDecision
+
 
 class TaskReference(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -33,6 +35,7 @@ class TaskRecord(BaseModel):
     goal: str = Field(max_length=8192)
     revision: int = Field(default=0, ge=0)
     operations: dict[str, OperationOutcome] = Field(default_factory=dict, max_length=64)
+    score_policies: dict[str, PolicyDecision] = Field(default_factory=dict, max_length=16)
 
 
 def begin_task(metadata, *, cwd, goal):
@@ -64,7 +67,8 @@ def observe_operation(metadata, *, tool, action, result):
     registration = details.get('registration_status', 'not_applicable')
     assessment = details.get('review_status', 'not_applicable') if tool == 'geo_map_review' else (
         'unverified' if tool == 'geo_deliver' else 'not_applicable')
-    owner = {'geo_python': 'python', 'geo_map_review': 'review', 'geo_deliver': 'delivery',
+    owner = {'geo_python': 'python', 'geo_task': 'python', 'geo_map_review': 'review',
+             'geo_deliver': 'delivery',
              'geo_qgis_project': 'map_ledger'}.get(tool)
     locator = next((details[k] for k in ('review_path', 'manifest_path', 'project_manifest')
                     if isinstance(details.get(k), str)), None)
