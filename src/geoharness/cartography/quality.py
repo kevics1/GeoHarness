@@ -278,8 +278,12 @@ def _bind_qgis_issues(result: MapReview, evidence: dict, diagnostics: dict) -> N
 
 
 def _unreviewed_pages(metadata: dict) -> list[int]:
-    pages = {entry.get("page_index", 0) for entry in metadata.get("page_previews", [])
-             if isinstance(entry, dict) and entry.get("frames", ["legacy_map_page"])}
+    from geoharness.qgis.artifacts import returned_page_previews
+
+    pages = {entry.get('page_index', 0) for entry in returned_page_previews(metadata)}
+    native = metadata.get('native_facts') or {}
+    pages.update(p.get('page_index') for p in (native.get('page_completeness') or {}).get(
+        'pages', []) if isinstance(p, dict))
     pages.update(frame.get("page_index", 0) for frame in
                  (metadata.get("layout_plan") or {}).get("frames", {}).values())
     layout = metadata.get("layout") or {}
@@ -1008,7 +1012,7 @@ async def review_map(
                 diagnostics["page_visual_status"] = "passed"
             elif result.status == "issues":
                 diagnostics["page_visual_status"] = "issues"
-            if unreviewed and result.status == "passed" and page_index == 0:
+            if not pixel_only and unreviewed and result.status == "passed" and page_index == 0:
                 result.status = "unverified"
                 result.summary = "The primary PNG was reviewed; additional layout pages remain " \
                                  "unreviewed. Review their actual PNG previews before acceptance."

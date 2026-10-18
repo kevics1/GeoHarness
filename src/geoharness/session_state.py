@@ -479,11 +479,14 @@ def _query_mode(raw: Any, config: GeoConfig) -> dict[str, Any]:
 
 
 def _checkpoint(metadata: dict[str, Any], cwd: Path, config: GeoConfig) -> dict[str, Any]:
+    from geoharness.task_state import task_snapshot
+
     secrets = _review_secrets(config)
     data = metadata.get("geo_data_context")
     data = data if isinstance(data, dict) else {}
     result = {
         "version": GEO_SESSION_CHECKPOINT_VERSION, "cwd": str(cwd),
+        'geo_task_record': _safe_json(task_snapshot(metadata, cwd=cwd), secrets),
         "map_workflow_state": _workflow(metadata.get("map_workflow_state", {}), secrets,
                                         restoring=False),
         "map_job_state": _job_state(metadata.get("map_job_state", {}), cwd, config),
@@ -557,6 +560,9 @@ def restore_geo_session_state(
         failures = _request_failures(checkpoint.get("geo_request_failures"), secrets)
         recovery = _query_mode(checkpoint.get("geo_query_recovery"), config)
         analysis_stages = _analysis_stages(checkpoint.get('analysis_workflow_state'), secrets)
+        from geoharness.task_state import task_snapshot
+
+        task = task_snapshot(checkpoint, cwd=root)
     except (ValueError, TypeError, OverflowError, RecursionError):
         return False
     # Commit only after validation; alias references inside workflow still point
@@ -568,6 +574,8 @@ def restore_geo_session_state(
     metadata["geo_request_failures"] = failures
     metadata["geo_query_recovery"] = recovery
     metadata['analysis_workflow_state'] = analysis_stages
+    if task is not None:
+        metadata.setdefault('geo_task_record', {}).update(task)
     from geoharness.telemetry import safe_call_counts, safe_metrics
 
     for key in ('geo_request_metrics', 'geo_tool_metrics'):

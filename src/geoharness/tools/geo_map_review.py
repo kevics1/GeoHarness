@@ -305,6 +305,7 @@ class GeoMapReviewTool(BaseTool):
                     else 'model_unable_to_assess' if status == 'unverified' else 'completed'),
                 "repair_progress": diagnostics.get('repair_progress', {}),
                 "request_sent": result.metadata.get("request_sent", False)})
+            summary[-1]['registration_status'] = result.metadata.get('registration_status')
         summary.sort(key=lambda page: page["page_index"])
         expected = set(_unreviewed_pages(verified.get("render_metadata", {})))
         expected.add(verified.get("review_page_index", 0))
@@ -462,12 +463,7 @@ class GeoMapReviewTool(BaseTool):
                 and not result.layout_patch.model_dump(exclude_none=True)):
             result.status = "passed"
             budget["visual_review_status"] = "passed"
-        if unreviewed:
-            if result.status == "passed" and page_index == 0:
-                result.status = "unverified"
-                result.summary = "Additional layout pages have no completed pixel review."
-                budget["visual_review_status"] = "unverified"
-                budget["visual_review_completed"] = False
+        # This result describes one page. The ledger aggregates whole-book acceptance.
         budget.setdefault("visual_review_status", result.status)
         report = save_review(
             path,
@@ -499,8 +495,25 @@ class GeoMapReviewTool(BaseTool):
             return ToolResult(
                 output=f"Review retained at {report}; receipt update failed: {exc}",
                 is_error=True,
-                metadata={"review_path": str(report)},
+                metadata={"review_path": str(report), 'execution_status': 'completed',
+                          'registration_status': 'failed', 'review_status': result.status,
+                          'render_executed': False},
             )
+        expected_version = verified.get('review_binding', {}).get(
+            'version', receipt.get('selected_version'))
+        selected = next((v for v in receipt.get('versions', [])
+                         if v.get('version') == expected_version), {})
+        stored = selected.get('page_reviews', {}).get(str(page_index), {})
+        if not stored and page_index == 0:
+            stored = selected.get('stages', {}).get('visual_checked', {})
+        reference = stored.get('report_reference') or {}
+        if (stored.get('image_sha256') != digest or reference.get('path') != str(report)
+                or reference.get('sha256') != hashlib.sha256(report.read_bytes()).hexdigest()):
+            return ToolResult(output=f'Review retained at {report}; page evidence was not '
+                'committed to its map version. Inspect the ledger before delivery.', is_error=True,
+                metadata={'review_path': str(report), 'execution_status': 'completed',
+                          'registration_status': 'failed', 'review_status': result.status,
+                          'render_executed': False})
         return ToolResult(
             output=(
                 json.dumps(review_execution_payload(public_payload(result.model_dump())),
@@ -521,6 +534,7 @@ class GeoMapReviewTool(BaseTool):
                 )
             ),
             metadata=review_execution_payload({
+                'execution_status': 'completed', 'registration_status': 'committed',
                 "review_status": result.status,
                 "render_executed": False,
                 "review_page_index": page_index,

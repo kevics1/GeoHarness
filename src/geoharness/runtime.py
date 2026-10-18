@@ -161,8 +161,9 @@ async def build_geo_runtime(
     from geoharness.data.task_context import model_data_context
     from geoharness.model_context import current_state_context, project_history
     from geoharness.task_budget import budget_context
+    from geoharness.task_state import task_context
 
-    api_client.data_context_provider = lambda: budget_context(
+    api_client.data_context_provider = lambda: task_context(engine.tool_metadata) + budget_context(
         engine.tool_metadata, config) + current_state_context(
         engine.tool_metadata) + model_data_context(
         engine.tool_metadata, cwd=cwd, config=config,

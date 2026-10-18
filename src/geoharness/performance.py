@@ -66,6 +66,10 @@ class MeasuredTool:
             if result is None or result.is_error:
                 summary["tool_errors"] = summary.get("tool_errors", 0) + 1
             if result is not None and self.tool.name.startswith("geo_"):
+                from geoharness.task_state import observe_operation
+
+                observe_operation(self.metadata, tool=self.tool.name,
+                                  action=getattr(arguments, 'action', None), result=result)
                 self._remember_result(result, arguments)
 
     def _remember_result(self, result, arguments):

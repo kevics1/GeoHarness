@@ -82,6 +82,9 @@ class GeoQueryEngine(QueryEngine):
 
             if not pending:
                 start_task(self.tool_metadata, config)
+                from geoharness.task_state import begin_task
+
+                begin_task(self.tool_metadata, cwd=self._cwd, goal=user_message.text)
             begin_map_request(self.tool_metadata, cwd=self._cwd, config=config,
                               continuation=continuation or bool(pending))
         if user_message.text.strip() and not self._tool_metadata.pop(

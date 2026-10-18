@@ -123,6 +123,80 @@ def setup_pages(root):
     return config, metadata, job, image, detail, binding
 
 
+async def test_roster_review_is_committed_and_survives_fresh_receipt_and_delivery(tmp_path):
+    from openharness.api.client import ApiMessageCompleteEvent
+    from openharness.api.usage import UsageSnapshot
+    from openharness.engine.messages import ConversationMessage
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+    config, metadata, job, image, _, _ = setup_pages(tmp_path)
+    roster = tmp_path / 'roster_page_3.png'
+    Image.new('RGB', (100, 100), 'lightgreen').save(roster)
+    manifest = tmp_path / 'project.json'
+    packet = json.loads(manifest.read_text(encoding='utf-8'))
+    packet['files'].append(roster.name)
+    packet['native_facts']['page_previews'].append(
+        {'page_index': 2, 'path': str(roster), 'frames': [], 'role': 'roster'})
+    manifest.write_text(json.dumps(packet), encoding='utf-8')
+    record_map_version(job, metadata, cwd=tmp_path, config=config, image_path=image,
+                       project_dir=tmp_path, layout=packet['layout'], preflight=None)
+
+    class Reviewer:
+        async def stream_message(self, request):
+            yield ApiMessageCompleteEvent(message=ConversationMessage.from_user_text(
+                '{"status":"passed","summary":"synthetic page readable","issues":[]}'),
+                usage=UsageSnapshot())
+
+    metadata.update(geoharness_config=config, map_review_client=Reviewer())
+    context = ToolExecutionContext(cwd=tmp_path, metadata=metadata)
+    reviewed = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=str(image), map_id=job, all_pages=True), context)
+    assert not reviewed.is_error, reviewed.output
+    body = json.loads(reviewed.output)
+    assert all(p['registration_status'] == 'committed' for p in body['pages'])
+    fresh = map_job_receipt({}, cwd=tmp_path, config=config, map_id=job)
+    version = next(v for v in fresh['versions'] if v['version'] == fresh['current_version'])
+    assert set(version['page_reviews']) == {'0', '1', '2'}
+    assert version['page_reviews']['2']['status'] == 'passed'
+    delivered = await GeoDeliverTool().execute(GeoDeliverInput(
+        primary_map=str(image), project_dir=str(tmp_path), map_id=job,
+        name='three-pages', version_policy='selected'), context)
+    assert not delivered.is_error, delivered.output
+    summary = json.loads(open(json.loads(delivered.output)['summary_json'],
+                              encoding='utf-8').read())
+    assert summary['page_reviews']['2']['status'] == 'passed'
+
+
+async def test_silent_registration_loss_is_an_error_without_losing_pixel_report(
+        tmp_path, monkeypatch):
+    from openharness.api.client import ApiMessageCompleteEvent
+    from openharness.api.usage import UsageSnapshot
+    from openharness.engine.messages import ConversationMessage
+    from openharness.tools.base import ToolExecutionContext
+
+    from geoharness.tools.geo_map_review import GeoMapReviewInput, GeoMapReviewTool
+
+    config, metadata, job, image, _, _ = setup_pages(tmp_path)
+
+    class Reviewer:
+        async def stream_message(self, request):
+            yield ApiMessageCompleteEvent(message=ConversationMessage.from_user_text(
+                '{"status":"passed","summary":"readable","issues":[]}'), usage=UsageSnapshot())
+
+    monkeypatch.setattr('geoharness.cartography.jobs.record_map_review',
+        lambda *a, **kw: map_job_receipt(metadata, cwd=tmp_path, config=config, map_id=job))
+    metadata.update(geoharness_config=config, map_review_client=Reviewer())
+    result = await GeoMapReviewTool().execute(GeoMapReviewInput(file_path=str(image)),
+        ToolExecutionContext(cwd=tmp_path, metadata=metadata))
+    assert result.is_error and result.metadata['execution_status'] == 'completed'
+    assert result.metadata['registration_status'] == 'failed'
+    assert json.loads(open(result.metadata['review_path'], encoding='utf-8').read())[
+        'status'] == 'passed'
+
+
 def test_all_map_pages_required_without_new_render_and_tampering_stales(tmp_path):
     config, metadata, job, image, detail, binding = setup_pages(tmp_path)
     receipt = record_map_review(job, metadata, cwd=tmp_path, config=config, image_path=image,

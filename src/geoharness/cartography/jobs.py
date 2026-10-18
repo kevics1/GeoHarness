@@ -655,21 +655,25 @@ def _map_page_files(version: dict) -> dict[int, dict]:
     manifest = _read(Path(manifest_path), {})
     if manifest.get("backend") != "qgis":
         return {}
-    entries = (manifest.get("native_facts") or {}).get("page_previews", [])
+    from geoharness.qgis.artifacts import returned_page_previews
+
+    entries = returned_page_previews(manifest)
     root = Path(manifest_path).parent.resolve()
     pages = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         index, locator = entry.get("page_index"), entry.get("path")
-        if type(index) is not int or index < 0 or not entry.get("frames") or not locator:
-            continue  # Roster pages have native layout checks, no map-pixel acceptance.
+        frames = entry.get('frames', [])
+        if type(index) is not int or index < 0 or not isinstance(frames, list) or not locator:
+            continue
         path = Path(locator)
         path = (path if path.is_absolute() else root / path).resolve()
         if not path.is_relative_to(root) or str(path) not in files or index in pages:
             raise ValueError("Native page preview is not a unique recorded package member")
         pages[index] = {"path": str(path), "sha256": files[str(path)],
-                        "manifest_sha256": manifest_hash, "frames": entry["frames"]}
+                        "manifest_sha256": manifest_hash, "frames": frames,
+                        "role": entry.get('role', 'map' if frames else 'unknown')}
     return pages
 
 
