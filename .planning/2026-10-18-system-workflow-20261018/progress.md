@@ -8,3 +8,4 @@
 - 第三阶段：完整性报告记录 source_read/output_write 的实际 CRS 与要素数；分析事实报告和交付摘要传播 execution_evidence；评分政策支持需确认的连续 0..1 中文分级；视觉审查缓存分离文件哈希与规范化 RGBA 像素哈希。修复 QGIS layers 非对象导致内部 AttributeError 的公开校验问题。相关回归29项通过，ruff通过。
 - 第四阶段：确认原生 geo_map_review 继续只读；同类问题以 issue_code/frame/ROI/特征索引追踪，改变措辞不算改善；像素缓存现在兼容旧文件哈希检查点，同时用规范化像素哈希去除容器元数据造成的重复请求。整链回归首次174项中3项为旧缓存键兼容回归，修复后3项恢复测试通过。
 - 第五阶段验收：源码回归177项通过；ruff全src/tests通过；源CLI dry-run识别17工具；wheel成功构建并无依赖安装到隔离目录，wheel导入回归35项通过。主模型配置high保持不改；没有宣称真实业务地图或20分钟目标已验收。
+- 实际运行时已 force-reinstall 本次 wheel；无 PYTHONPATH 的 geoh.exe dry-run 现在识别17工具，site-packages 导入含 geo_task；安装后35项 smoke 回归通过。
