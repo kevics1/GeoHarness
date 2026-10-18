@@ -204,6 +204,12 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
         hints.append("RUN_DIR is a NEW output directory on every call. Use a returned actual "
                      "path or PREVIOUS_OUTPUTS for earlier artifacts; do not invent timestamps "
                      "or read earlier files from the current RUN_DIR.")
+    if 'Too few points in geometry' in stderr:
+        hints.append('引线端点可能相同；先按唯一ID核对真实点与标签锚点。'
+                     '使用make_leader_lines跳过零长度引线，保留原始点，不猜坐标偏移。')
+    if 'Read path is outside allowed' in stderr and '.pdf' in code:
+        hints.append('工程PDF通过geo_qgis_project export和geo_deliver处理；'
+                     '使用实际返回的产物路径，不自行拼接工程内部文件名。')
     return hints
 
 
@@ -280,38 +286,46 @@ class GeoPythonInput(BaseModel):
 class GeoPythonTool(BaseTool):
     name: str = "geo_python"
     description: str = (
-        "Run a complete Python script for custom GIS analysis or maps. "
+        "运行完整 Python 脚本，用于自定义 GIS 分析或制图。"
         + invocation_guide("geo_python") + " "
-        "Available: GeoPandas, Shapely, pandas, numpy, rasterio and matplotlib (Agg). "
-        "Prefer geo_analysis for native buffer/clip/intersection/distance/count/impact/area. "
-        "Injected Paths: RUN_DIR (only write root/current cwd), SOURCE_CWD, "
-        "DATA_DIRS:list[Path] (iterate directly; [0] is workspace, not dataset folder). "
-        "Only os.environ['DATA_DIRS'] is an os.pathsep-separated string. "
-        "DATA_REFS:dict[stable_id,record{name,path,ref}]; names are values, not ID keys. "
-        "resolve_data(ref)->Path; read_vector(ref,target_crs=None)->GeoDataFrame using "
-        "per-layer registered encoding and Python-only __geoh_id for stable joins. "
-        "Unknown/ambiguous/stale refs are rejected; never force one shapefile encoding. "
-        "INPUTS:dict[alias,Path] comes from input_refs; GEO_DATA is metadata by path and "
-        "PREVIOUS_OUTPUTS:list[Path] contains prior artifacts, newest first. "
-        "Helpers: read_raster(path,bands=None,out_shape=(rows,columns),resampling='nearest',"
-        "geometries=None)->RasterData(array masked band-first,crs,transform,nodata); "
-        "write_raster(path,RasterData or array,crs=...,transform=...,nodata=...) writes GeoTIFF; "
+        "可用库：GeoPandas、Shapely、pandas、numpy、rasterio、matplotlib（Agg）。"
+        "原生 buffer/clip/intersection/distance/count/impact/area 优先使用 geo_analysis。"
+        "注入路径：RUN_DIR（唯一写入根/当前 cwd）、SOURCE_CWD、"
+        "DATA_DIRS:list[Path]（直接迭代；[0] 是工作区，不是数据集目录）。"
+        "只有 os.environ['DATA_DIRS'] 是用 os.pathsep 分隔的字符串。"
+        "DATA_REFS:dict[stable_id,record{name,path,ref}]；名称是值，不是 ID 键。"
+        "resolve_data(ref)->Path；read_vector(ref,target_crs=None)->GeoDataFrame，"
+        "使用每图层登记编码和仅 Python 可见的 __geoh_id 做稳定连接。"
+        "未知、歧义或过期引用会被拒绝；绝不强制统一某个 shapefile 编码。"
+        "INPUTS:dict[alias,Path] 来自 input_refs；GEO_DATA 是按路径的元数据；"
+        "PREVIOUS_OUTPUTS:list[Path] 是之前产物，最新在前。"
+        "助手：read_raster(path,bands=None,out_shape=(rows,columns),resampling='nearest',"
+        "geometries=None)->RasterData(array masked band-first,crs,transform,nodata)；"
+        "write_raster(path,RasterData or array,crs=...,transform=...,nodata=...) 写 GeoTIFF；"
         "raster_backdrop(source,output,band=1,out_shape=None,geometries=None,rgb=False) "
-        "makes a display-only uint8 stretch (zero nodata). Prefer these for standard "
-        "clip/resample/backdrop work. mask_raster(path,CRS-bearing GeoSeries/GeoDataFrame,"
-        "**options)->(array,transform); native_layer(ref,derivation=None,name=None,style=None,"
-        "label_field=None,label_style=None,layer_name=None) retains source/provenance; "
-        "entity_join(source,table,key=...) joins by identity; score_risk uses explicit "
-        "assumed weights; sample_raster_points(path,points,band=1) handles point CRS. "
-        "extent_geometry(west=...,south=...,east=...,north=...,crs=...) makes a CRS-bearing "
-        "clip geometry. artifact_facts(path,key=...,numeric_fields=[],predicates=[],"
-        "metric_crs=...) and check_claims(facts,claims) measure persisted explicit facts, "
-        "not scientific validity or all prose. print_stats is NOT injected. "
-        "Use expected_outputs/stage_id/depends_on for verified stages. Returned exact QGIS "
-        "diagnostics, all page previews and project.json are readable; QGIS directory/profile "
-        "listing is not. Network/subprocesses unavailable; application guards are not an OS "
-        "sandbox. Returns script/manifest/stdout/stderr/generated paths; inspect results and "
-        "review actual PNG pages before delivery."
+        "生成仅用于显示的 uint8 拉伸（零 nodata）。标准裁剪/重采样/底图工作优先使用这些助手。"
+        "mask_raster(path,CRS-bearing GeoSeries/GeoDataFrame,**options)->(array,transform)；"
+        "native_layer(ref,derivation=None,name=None,style=None,label_field=None,"
+        "label_style=None,layer_name=None) 保留来源/派生关系；"
+        "entity_join(source,table,key=...) 按身份连接；score_risk 使用显式假定权重；"
+        "sample_raster_points(path,points,band=1) 处理点 CRS。"
+        "extent_geometry(west=...,south=...,east=...,north=...,crs=...) 生成带 CRS 的"
+        "裁剪几何。artifact_facts(path,key=...,numeric_fields=[],predicates=[],"
+        "metric_crs=...) 与 check_claims(facts,claims) 只度量已落盘的显式事实，"
+        "artifact_facts还支持group_by=[字段]；write_analysis_report(path.json,source=落盘文件,"
+        "key=唯一ID,numeric_fields=[],group_by=[],predicates=[],method=方法字典,claims=[])"
+        "生成同源JSON/中文Markdown，报告和源数据一起交付。"
+        "first_coverage(points,stages,key=...,stage_key=...,stage_order=[明确时序ID],"
+        "boundary='covers'或'contains')按覆盖返回first_stage_hit和coverage_status，"
+        "从未覆盖不填时间，禁止用距离idxmin代替。make_leader_lines(points,labels,"
+        "key=...,metric_crs=...)按身份生成非退化引线。同位置无需引线。"
+        "score_risk的missing_policy=error/unknown/renormalize必须明确选择，"
+        "重新归一化需要用户同意，不能推断缺人口一定低估。"
+        "不证明科学有效性或全部叙述。print_stats 未注入。"
+        "使用 expected_outputs/stage_id/depends_on 建立可验证阶段。返回的准确 QGIS 诊断、"
+        "全部页面预览和 project.json 可读；QGIS 目录/profile 列表不可读。"
+        "无网络/子进程；应用层 guard 不是 OS 沙箱。返回脚本/清单/stdout/stderr/生成路径；"
+        "交付前检查实际结果并审查真实 PNG 页面。"
     )
     input_model: type[BaseModel] = GeoPythonInput
 
@@ -483,6 +497,9 @@ class GeoPythonTool(BaseTool):
             "extent_geometry": "keyword west,south,east,north,crs -> CRS-bearing GeoSeries",
             "artifact_facts": "path,key,numeric_fields,predicates,metric_crs -> measured facts",
             "check_claims": "facts,claims -> compare explicit values; no NLP audit",
+            "first_coverage": "points,stages,key,stage_key,stage_order,boundary -> 最早覆盖/未覆盖",
+            "make_leader_lines": "points,labels,key,metric_crs -> 按ID连接，略去零长度引线",
+            "write_analysis_report": "path,source,key,method等 -> 同源JSON/中文Markdown事实报告",
             "entity_join": "source, table, key=... -> key-joined GeoDataFrame; never positional",
             "projection": "Reproject GeoDataFrame/GeoSeries, not iterrows() pandas Series rows",
             "native_layer": "ref, derivation=None -> layer retaining original source/provenance",

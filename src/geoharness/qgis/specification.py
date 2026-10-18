@@ -152,7 +152,7 @@ def apply_edits(parameters: dict, edits: list[dict]) -> dict:
 
 
 def contract_help(section: str) -> dict:
-    """Return the actual runtime schema for the requested operation, not processing help."""
+    """返回指定操作的实际运行时 schema，而不是 Processing 帮助。"""
     from geoharness.tools.geo_qgis_project import (
         QgisFrameEdit,
         QgisLabelEdit,
@@ -174,19 +174,19 @@ def contract_help(section: str) -> dict:
 
     result = {"section": section, "contract": "geo_qgis_project",
         "cautions": section_cautions(section),
-        "workflow": ["spec once -> build(spec_ref, edits); one native validation/export job",
-                     "Legacy: preflight(spec_ref) -> create(plan_ref)"],
-        "rules": ["Only action+plan_ref for frozen create.",
-                  "Frame references accept exact layer_key or 0-based index, never guessed names.",
-                  "Explicit extent and focus_layers are mutually exclusive per frame.",
-                  "dpi/map_extent/title are project fields; style.field/renderer are nested.",
-                  "Visual zoom suggestions use advisory; preserve declared frame requirements."]}
+        "workflow": ["先 spec 一次 -> build(spec_ref, edits)；验证与导出共用一个原生作业",
+                     "旧版：preflight(spec_ref) -> create(plan_ref)"],
+        "rules": ["冻结的 create 只接受 action+plan_ref。",
+                  "图框引用只接受准确的 layer_key 或 0 基索引，不要猜测名称。",
+                  "每个图框的显式 extent 与 focus_layers 互斥。",
+                  "dpi/map_extent/title 是工程字段；style.field/renderer 是嵌套字段。",
+                  "视觉缩放建议使用 advisory；保留声明的图框覆盖要求。"]}
     if section == 'workflow':
         result['action_forms'] = action_forms()
         result['ledger'] = {'inspect': {'action': 'inspect', 'map_id': 'returned-map-id'},
                             'recover': {'action': 'recover', 'map_id': 'returned-map-id'},
-                            'note': 'Recovery migrates with backup and verification; '
-                                    'health inspection is read-only. Use key_field for stable IDs.'}
+                            'note': '恢复会备份并验证迁移；健康检查是只读的。'
+                                    '使用 key_field 保持稳定身份。'}
     if section in schemas:
         result["schema"] = schemas[section].model_json_schema()
     elif section == "edits":
@@ -202,7 +202,6 @@ def contract_help(section: str) -> dict:
             "minimum_zoom": 2, "zoom_policy": "advisory"},
     } if section == "workflow" else {}
     return result
-
 
 def recent_specs(*, cwd, settings, limit=4) -> list[dict]:
     """Discover hash-verified drafts after continuation/restart; no parallel mutable state."""

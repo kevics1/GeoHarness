@@ -1,40 +1,40 @@
-"""Shared compact cautions, available before tool package initialization."""
+"""共享的紧凑注意事项，可在工具包初始化前使用。"""
 
 from __future__ import annotations
 
 PYTHON_CAUTIONS = (
-    "Fresh process and RUN_DIR each call: import/define all names; bind prior files via "
-    "input_refs/INPUTS or exact returned paths.",
-    "Inspect actual intermediate columns/CRS and library signatures before use; "
-    "input_requirements does not type-check arbitrary code.",
-    "Rasterio read(1) is 2D: do not blindly append [0]. mask_raster returns "
-    "(array, transform), normally band-first (indexes=int gives 2D); inspect shape before "
-    "stacking/writing. Prefer read_raster/write_raster for an always-3D array contract.",
-    "Keep verified CRS/transform/nodata with raster arrays; use nodata, not fill_value, "
-    "for rasterio.mask.mask. Write only RUN_DIR; preserve source data.",
-    "After failure inspect the measured cause, change that input/code, and rerun only "
-    "the failed stage; unchanged retry is reserved for confirmed transient failures.",
+    "每次调用都是新进程和新 RUN_DIR：必须重新 import/定义所有名称；前序文件通过 "
+    "input_refs/INPUTS 或返回的准确路径绑定。",
+    "使用中间结果前核对实际列名、CRS 和库函数签名；input_requirements 不会对任意代码"
+    "做类型检查。",
+    "`rasterio read(1) is 2D`（二维结果）：不要盲目追加 [0]。mask_raster 返回 (array, transform)，"
+    "通常为 band-first（indexes=int 时得到二维）；叠加或写出前先检查 shape。"
+    "需要始终为三维数组时优先使用 read_raster/write_raster。",
+    "让已验证的 CRS/transform/nodata 跟数组一起传递；rasterio.mask.mask 使用 "
+    "`nodata, not fill_value`（nodata 而非 fill_value）。只能写 RUN_DIR；保留源数据。",
+    "失败后先检查实测原因，修改对应输入/代码，只重跑失败阶段；未变化的重复调用仅用于"
+    "已确认的瞬态故障。",
 )
 
 QGIS_CAUTIONS = (
-    "Prefer spec once, then build(spec_ref, edits by layer_key): validation and export "
-    "share one native job. Do not also preflight/create the same unchanged build. "
-    "Legacy frozen create accepts only action+plan_ref; changes need new validation.",
-    "Each frame: FIT focus_layers OR explicit extent, never both. "
-    "render_layers must include focus_layers/label_layers; a detail needs a range source.",
-    "Keep stable layer_key and declared subject requirements. Extent tightening must "
-    "preserve coverage; actual zoom is main_scale/detail_scale after native fitting. "
-    "Use returned candidate_edit_calls on their exact base_spec_ref, then preflight again.",
-    "Diagnostic detail_path/offset/limit are read-only help/inspect selectors. "
-    "Do not copy them into create/preflight/spec.",
-    "Roster key_field (or first field) is unique/non-null; top_n requires sort_by and "
-    "excludes keys. Measure table/legend space; create does not imply visual acceptance.",
+    "优先只写一次 spec，再 build(spec_ref, edits by layer_key)：验证和导出共用一个原生"
+    "作业。不要对未变化的成功 build 再调用 preflight/create。旧版冻结 create 只接受 "
+    "action+plan_ref；任何变更都需要重新验证。",
+    "每个图框二选一：FIT focus_layers 或显式 extent，绝不能同时使用。"
+    "render_layers 必须包含 focus_layers/label_layers；详图必须有范围来源。",
+    "保留稳定的 layer_key 和声明的对象覆盖要求。收紧范围必须保持覆盖；实际缩放为原生"
+    "拟合后的 main_scale/detail_scale。使用返回的 candidate_edit_calls 及其准确的 "
+    "base_spec_ref，然后重新 preflight。",
+    "诊断用的 detail_path/offset/limit 只是 help/inspect 的只读选择器；不要把它们复制"
+    "到 create/preflight/spec。",
+    "名录 key_field（或第一个字段）必须唯一且非空；top_n 需要 sort_by 且会排除 keys。"
+    "测量表格/图例空间；create 不代表视觉验收。",
 )
 
 
 def invocation_guide(tool_name: str) -> str:
     rules = PYTHON_CAUTIONS if tool_name == "geo_python" else QGIS_CAUTIONS
-    return "CALL-TIME CAUTIONS: " + " ".join(rules)
+    return "调用前注意事项（CALL-TIME CAUTIONS）：" + " ".join(rules)
 
 
 def section_cautions(section: str) -> list[str]:
@@ -42,12 +42,12 @@ def section_cautions(section: str) -> list[str]:
         "frame": [QGIS_CAUTIONS[1], QGIS_CAUTIONS[2]],
         "layout": [QGIS_CAUTIONS[1], QGIS_CAUTIONS[2], QGIS_CAUTIONS[4]],
         "roster": [QGIS_CAUTIONS[4]],
-        "layer": ["layers draw bottom first/top last; table_only is never rendered. "
-                  "Put renderer/field/categories inside style, using actual source fields."],
-        "style": ["Use style.renderer/field/categories/ranges; preserve actual category values. "
-                  "QGIS mm/pt sizes differ from Matplotlib point areas."],
-        "labels": ["Check actual geometry/label field. label_layers must be rendered; "
-                   "purpose is metadata, detail_title is visible text."],
+        "layer": ["图层按从下到上绘制，先写底层、后写顶层；table_only 永不渲染。"
+                  "把 renderer/field/categories 放在 style 内，并使用实际源字段。"],
+        "style": ["使用 style.renderer/field/categories/ranges；保留实际分类值。"
+                  "QGIS 的 mm/pt 尺寸与 Matplotlib 的点面积不是同一单位。"],
+        "labels": ["检查实际几何/标注字段。label_layers 必须被渲染；purpose 是元数据，"
+                   "detail_title 才是可见文本。"],
         "edits": [QGIS_CAUTIONS[0], QGIS_CAUTIONS[2]],
         "workflow": list(QGIS_CAUTIONS),
     }
@@ -55,7 +55,7 @@ def section_cautions(section: str) -> list[str]:
 
 
 def action_forms() -> dict:
-    """Recommended short forms; legacy full-input forms remain supported."""
+    """推荐短调用字段；旧版完整输入仍兼容。"""
     return {
         "help": ["action", "section", "detail_path?", "offset?", "limit?"],
         "spec": ["action", "spec_ref", "edits or patches"],

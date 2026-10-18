@@ -561,6 +561,15 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 完整错误仍保留在模型上下文、会话与工具运行记录中，真实失败状态不变。
 打印模式的失败结果也使用相同摘要；会话级异常仍明确显示。正常结果显示沿用原行为。
 
+## 默认中文回答与未知澄清
+
+系统提示词默认要求模型使用简体中文回答，代码、命令、路径、字段名、配置键、API 名称、
+工具名和错误码保持原文。该规则写入运行时系统提示，不依赖模型自行选择语言。
+
+当关键业务含义、分析口径或方案选择无法从工具和数据查明，并且会影响正确性时，模型应调用
+`ask_user_question`，用中文说明已知事实、缺失信息和影响，并等待真实回答。空回复、取消或
+仅输入“继续”不会被视为对某个方案的授权；等待期间也不会执行依赖该答案的操作。
+
 ## 调用前易错提醒与精简帮助
 
 `geo_python` 与 `geo_qgis_project` 的关键注意事项同时进入系统提示和工具说明。
@@ -705,3 +714,24 @@ all_pages=true)` 一次审查同一工程的全部明确返回页面。
 `delivery_reserve_seconds: 180` 预留最后3分钟交付。每次模型请求会收到实际已用/剩余时间，
 临近交付时优先处理事实阻断并交付已有产物，停止外观微调和追加重建。超过目标后不再自动追加下一批回合。该机制不强杀正在运行的工具，也不保证
 任意网络延迟下都能在20分钟完成；已完成与未完成检查分别报告，不能据时间预算宣称质量通过。
+
+
+### 中文交互、未知澄清与分析事实核对
+
+系统提示词和重点工具帮助使用中文，默认以简体中文解释结果。代码、API、字段和路径保持原文；用户明确要求其他语言时遵从用户。可用inspect/help查明的信息先查；无法查明且影响结论的业务选择通过ask_user_question询问。空回复、取消和单独“继续”不构成答案，运行时保留待回答状态，停止后续模型请求。直接在对话中回答问题即可恢复原任务。
+
+geo_python新增可复用助手（每次调用均已注入）：
+
+- first_coverage(points, stages, key=实体ID字段, stage_key=阶段字段, stage_order=明确的阶段ID列表, boundary='covers'或'contains')：按覆盖关系取最早阶段，从未覆盖的first_stage_hit为空，coverage_status为not_covered。边界是否计入由调用方明确；不使用最近距离推断到达时间，也不证明实际火情到达。
+- make_leader_lines(points, labels, key=实体ID字段, metric_crs=米制CRS)：按ID连接锚点，同位置不生成退化引线，省略的ID记于结果attrs。原始居民点不移动。
+- score_risk保留error/unknown缺失政策，增加显式renormalize（仅经用户确认时使用）；所有因子缺失仍为unknown，不自动判定缺失导致低估或高估。
+- artifact_facts增加group_by=[字段]，统计落盘文件中的分组数量。
+- write_analysis_report(RUN_DIR/'facts.json', source=实际结果路径, key=唯一ID字段, numeric_fields=[], group_by=[], predicates=[], method=方法与假设字典, claims=[])：从同一份落盘结果生成JSON及中文Markdown。method为声明，非科学正确性认证；显式claims与实测不一致时拒绝生成。将报告和源结果一起传给geo_deliver，交付摘要会按SHA256在包内找到对应数据并复算，结果记录在attached_analysis_reports，不把任意手写报告视为已验证。
+
+QGIS首选spec后使用build(spec_ref, edits)，成功后无需叠加preflight/create。图层show_in_legend可显式控制图例，空值时RGB影像不进入专题图例；显式true可恢复波段图例。辅助编号和引线建议false。独立名单页label_table支持title、note和page_columns；多字段名单建议page_columns=1，headers明确真实计量单位，不自动推测。
+
+geo_map_review根据绑定的page_previews.role区分地图、定位图、名单和混合页；名单页不要求主图图例或比例尺。完成响应但无法判断记为model_unable_to_assess，与服务/契约失败区分，仍保留unverified。图片、任务、页面用途和裁剪条件相同时可复用图片审查；新版本路径不会单独触发重复请求。
+
+三张不同图片同一页连续报告完全相同、可定位的错误/警告时，repair_progress会要求用户决定下一步，运行时停止自动试错。该规则采用保守匹配，不能识别所有换措辞的重复问题，也不证明像素改善或缺陷已修复。主图或名单页仍存在问题时保留草稿。
+
+交付返回quality_notice，并在summary.json/summary.md列明剩余问题和可用的逐页状态。包校验、落盘事实复算、视觉审查和分析科学正确性分别记录，不能相互替代。

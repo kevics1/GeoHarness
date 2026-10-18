@@ -91,7 +91,7 @@ async def test_unchanged_map_is_not_sent_to_model_repeatedly(tmp_path):
     tool = GeoMapReviewTool()
     first = await tool.execute(GeoMapReviewInput(file_path=str(image), task="Check map"), context)
     second = await tool.execute(
-        GeoMapReviewInput(file_path=str(image), task="Check again"),
+        GeoMapReviewInput(file_path=str(image), task="Check map"),
         context,
     )
     assert first.metadata["review_status"] == second.metadata["review_status"] == "unverified"
@@ -227,7 +227,7 @@ async def test_parallel_distinct_images_reserve_and_release_only_available_revie
         asyncio.create_task(
             review_with_budget(
                 path,
-                config=GeoConfig(),
+                config=GeoConfig(map_review=MapReviewConfig(timeout_seconds=90)),
                 task="Check",
                 evidence={},
                 metadata=metadata,

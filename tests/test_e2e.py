@@ -96,6 +96,8 @@ class TestEndToEndRuntime:
 
             # Identity
             assert "GeoHarness" in prompt
+            assert "所有面向用户的自然语言必须使用简体中文" in prompt
+            assert "ask_user_question(question=" in prompt
 
             # 6 Geography Principles
             assert "Geography Principles" in prompt

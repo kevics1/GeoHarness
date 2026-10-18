@@ -35,8 +35,8 @@ class PixelReview(BaseModel):
         default_factory=list, max_length=5)
 
 
-def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "tool") -> str:
-    """Only page purpose is context; engineering tables never enter this request."""
+def page_scope(evidence: dict[str, Any]) -> dict:
+    """只使用已绑定当前页的用途元数据，不能凭页码猜测页面类型。"""
     metadata = evidence.get("render_metadata") or {}
     page_index = metadata.get("review_page_index", 0)
     native = (metadata.get("native_facts") or {}).get("frames") or {}
@@ -46,9 +46,36 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
         if isinstance(frame, dict) and frame.get("page_index", 0) == page_index:
             frames.append({"frame_id": name, "purpose": frame.get("purpose", ""),
                            "label_sources": frame.get("label_sources")})
-    scope = {"page_index": page_index, "frames": frames, "task": task}
+    role = 'unknown'
+    previews = metadata.get('page_previews') or (metadata.get('native_facts') or {}).get(
+        'page_previews', [])
+    for page in previews:
+        if isinstance(page, dict) and page.get('page_index') == page_index:
+            if page.get('role') in {'map', 'locator', 'roster', 'mixed'}:
+                role = page['role']
+            # Legacy metadata with an empty, explicitly declared frame list and a
+            # matching roster preview is enough evidence; page number alone is not.
+            elif page.get('frames') == [] and page.get('path') in (
+                    (metadata.get('native_facts') or {}).get('roster_previews') or []):
+                role = 'roster'
+    if role == 'unknown' and frames:
+        role = 'map'
+    return {"page_index": page_index, "frames": frames, 'page_role': role}
+
+
+def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "tool") -> str:
+    """Only page purpose is context; engineering tables never enter this request."""
+    scope = {**page_scope(evidence), 'task': task}
+    purpose = (
+        '本页是独立名单/表格页，只检查表题、表头、单位、行列可读性、裁切、'
+        '分页和内容布局；不得要求本页出现主图、定位图、地图图例或比例尺。'
+        '任务中的地图要求属于其他页，不得据此把本页判为unverified。'
+        if scope['page_role'] == 'roster' else
+        '按照本页实际用途检查；不能要求定位图承担主图细节，不能把未提供的其他页'
+        '当作本页缺陷。页面用途未知时说明限制，不猜测缺失要求。')
     return (
-        "请直接查看所附实际地图图片，检查可见问题：空白或内容裁切、文字不可读、"
+        "请使用简体中文直接查看所附实际图片。" + purpose
+        + "检查可见问题：内容裁切、文字不可读、"
         "标签/符号重叠、图层压盖、图例与图面不对应，以及明显影响阅读的布局问题。"
         "整页图看整体，局部图看细节；同一问题只报一次，最多5条。"
         "只报告能够从图片确认的问题，不编造图外内容、要素数量、真实坐标、距离或统计结论。"
@@ -57,7 +84,8 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
         "不规划修复，不生成参数或代码，不修改地图，不要求核对全部工程数据。"
         "返回status、简短summary、issues及limitations。明确问题写具体位置及issue_code；"
         "能可靠定位时填写frame_id、roi_ref及该ROI内归一化bbox，不能定位可留空。"
-        "风格偏好不单独判为错误。无法判断的部分写入limitations；"
+        "正常留白与风格偏好不单独判为错误。不能仅凭像素声称两点同址或数据重复。"
+        "无法判断的部分写入limitations，不把疑点当成确定缺陷；"
         "关键内容无法检查时为unverified，有error/warning时为issues，"
         "只有完成当前页检查且无error/warning时为passed。"
         + ("通过record_map_review提交结果；若返回文本，必须为同结构JSON对象，不含Markdown。\n"

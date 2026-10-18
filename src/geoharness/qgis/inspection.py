@@ -80,5 +80,5 @@ def help_output(payload: dict, *, call: dict, max_chars: int) -> dict:
     if len(json.dumps(compact, ensure_ascii=False)) > max_chars:
         compact.pop("action_forms", None)
     if len(json.dumps(compact, ensure_ascii=False)) > max_chars:
-        raise ValueError("Help budget cannot fit critical cautions; increase inspection_max_chars")
+        raise ValueError("帮助预算无法容纳关键注意事项；请提高 inspection_max_chars")
     return compact

@@ -84,6 +84,22 @@ def cascade_manager_with_history() -> CascadeManager:
 class TestBuildGeoSystemPrompt:
     """Test build_geo_system_prompt() function."""
 
+    def test_default_response_language_is_simplified_chinese(
+        self, default_config: GeoConfig, tmp_path: Path
+    ) -> None:
+        prompt = build_geo_system_prompt(tmp_path, default_config)
+        assert "所有面向用户的自然语言必须使用简体中文" in prompt
+        assert "ask_user_question" in prompt
+        assert "不要猜测" in prompt
+
+    def test_tool_cautions_are_localized_but_keep_executable_identifiers(
+        self, default_config: GeoConfig, tmp_path: Path
+    ) -> None:
+        prompt = build_geo_system_prompt(tmp_path, default_config)
+        assert "调用前注意事项" in prompt
+        assert "build(spec_ref" in prompt
+        assert "rasterio" in prompt and "mask_raster" in prompt
+
     def test_returns_non_empty_string(
         self, default_config: GeoConfig, tmp_path: Path
     ) -> None:

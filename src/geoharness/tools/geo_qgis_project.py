@@ -147,6 +147,9 @@ class QgisProjectLayer(BaseModel):
 
     file_path: str = Field(min_length=1, description="Existing local vector/raster source.")
     kind: Literal["vector", "raster"] = "vector"
+    show_in_legend: bool | None = Field(default=None, description=(
+        "是否在图例中显示。空值时矢量/单波段显示，RGB影像默认隐藏；"
+        "辅助编号和引线可显式设为false，不改变地图中的绘制。"))
     name: str = ""
     layer_key: str = Field(default="", max_length=128, description=(
         "Stable business layer identity across versions. Keep when replacing a derived file; "
@@ -324,6 +327,12 @@ class QgisLabelTable(BaseModel):
     ))
     headers: dict[str, str] = Field(default_factory=dict, max_length=8,
                                    description="Optional display headings for existing fields.")
+    title: str = Field(default='重点对象名单', max_length=100,
+                       description='独立名单页表题；空字符串显式关闭。')
+    note: str = Field(default='编号对应地图或完整名册；距离等计量单位请在列标题注明。',
+                      max_length=240, description='独立名单页说明，不自动推断业务单位。')
+    page_columns: int | None = Field(default=None, ge=1, le=4,
+        description='独立名单页并排表格数；空值沿用columns，多字段名单建议1。')
     columns: int = Field(default=3, ge=1, le=4, description=(
         "Number of parallel complete tables on a page, NOT the number of attribute fields. "
         "Each parallel table repeats all fields and headings."
@@ -721,24 +730,20 @@ class GeoQgisProjectInput(BaseModel):
 class GeoQgisProjectTool(BaseTool):
     name = "geo_qgis_project"
     description = (
-        "Authoritative QGIS map contract: local data/data: refs -> editable project and "
-        "PNG/PDF exported from that same layout. Save spec once, then build(spec_ref, "
-        "edits by layer_key) to validate and export in ONE native job and model roundtrip. "
-        "Batch related layer/style/labels/frame/roster edits into that build. "
-        "Use help(section=style/labels/frame/layout/edits) for actual runtime schemas, "
-        "not Processing help or geo_cartography bridge fields. Read the always-visible "
-        "help cautions before composing arguments. render_layers includes focus/label layers; "
-        "detail needs focus_layers or detail_extent. Diagnostic selectors are help/inspect "
-        "only. Roster keys are unique/non-null; top_n needs sort_by and excludes keys. "
-        "A successful build already validates; do not repeat preflight/create. Legacy "
-        "create accepts ONLY action+returned plan_ref. Advanced full inputs and "
-        "path patches remain supported. Layers draw bottom to top; native styles use "
-        "style.renderer/field/categories. Each frame declares purpose and required subject "
-        "coverage; explicit extent and focus_layers are mutually exclusive. Review zoom "
-        "preferences use advisory; preserve all declared subjects. Inspect/export with "
-        "project_path preserves user edits and writes a new portable snapshot. Use native "
-        "analysis outputs/derivation for verified provenance. Outputs remain drafts until "
-        "their actual pixels are reviewed; use geo_deliver for workspace delivery."
+        "权威 QGIS 地图契约：本地数据/data: 引用 -> 可编辑工程，并从同一布局导出 PNG/PDF。"
+        "一次保存 spec，再用 build(spec_ref, edits by layer_key) 在单个原生作业和单次模型"
+        "往返中完成验证与导出。把相关图层/样式/标注/图框/名册编辑合并进该 build。"
+        "用 help(section=style/labels/frame/layout/edits) 查看实际运行时 schema；不要使用 "
+        "Processing help 或 geo_cartography 桥接字段。组合参数前先阅读始终可见的 help "
+        "cautions。render_layers 必须包含 focus/label 图层；详图需要 focus_layers 或 "
+        "detail_extent。诊断选择器只能用于 help/inspect。名册 keys 必须唯一且非空；top_n "
+        "需要 sort_by 且会排除 keys。成功的 build 已经验证；不要重复 preflight/create。"
+        "旧版 create 只接受 action 和返回的 plan_ref。高级完整输入和 path patches 仍受支持。"
+        "图层从下到上绘制；原生样式使用 style.renderer/field/categories。每个图框声明 "
+        "purpose 和必需对象覆盖；显式 extent 与 focus_layers 互斥。审查中的缩放偏好使用 "
+        "advisory；保留所有声明的对象。使用 project_path 进行 inspect/export 会保留用户"
+        "编辑并写出新的可移植快照。使用原生分析输出/derivation 取得可验证来源。实际像素"
+        "审查前输出保持 draft；最终交付使用 geo_deliver。"
     )
     input_model = GeoQgisProjectInput
 

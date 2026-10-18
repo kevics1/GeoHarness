@@ -64,3 +64,17 @@ async def test_explicit_prompt_answer_clears_gate(tmp_path):
     runtime._ask_user_prompt = answer
     [event async for event in runtime.submit_message('评估居民点')]
     assert client.calls == 2 and 'pending' not in runtime.tool_metadata['geo_clarification']
+
+
+@pytest.mark.parametrize('reply', [None, '', '取消', '继续'])
+async def test_empty_or_cancelled_prompt_is_not_an_answer(tmp_path, reply):
+    client = QuestionClient()
+    runtime = engine(tmp_path, client, GeoAskUserQuestionTool(), turns=40)
+
+    async def answer(question):
+        return reply
+
+    runtime._ask_user_prompt = answer
+    [event async for event in runtime.submit_message('评估居民点')]
+    assert client.calls == 1
+    assert runtime.tool_metadata['geo_clarification']['pending']

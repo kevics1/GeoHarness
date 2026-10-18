@@ -950,6 +950,11 @@ async def review_map(
 
             pixels = PixelReview.model_validate(payload)
             result, ignored = MapReview.model_validate(pixels.model_dump()), []
+            from geoharness.cartography.pixel_review import page_scope
+
+            diagnostics['page_role'] = page_scope(evidence)['page_role']
+            diagnostics['review_outcome'] = (
+                'model_unable_to_assess' if result.status == 'unverified' else 'completed')
         else:
             result, ignored = _validate_review(payload)
         if ignored:

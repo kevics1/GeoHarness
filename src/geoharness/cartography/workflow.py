@@ -23,7 +23,7 @@ _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDic
 _REPAIR_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 # Bump only when the response contract/compatibility changes. Legacy failed
 # cache entries can then recover without repeatedly resending unchanged images.
-REVIEW_CONTRACT_VERSION = 9
+REVIEW_CONTRACT_VERSION = 10
 _BUDGET_LOCK = threading.RLock()
 
 
@@ -322,6 +322,31 @@ async def _review_once(
     pixel_only: bool,
 ) -> tuple[MapReview, dict[str, Any]]:
     settings = config.map_review
+    native_evidence = evidence.get('render_metadata', {})
+    expected_evidence = {key: value for key, value in evidence.items() if key not in {
+        'previous_visual_reviews', 'version_limit', 'remaining_render_versions',
+        'generation_unlimited'}}
+    if pixel_only:
+        from geoharness.cartography.pixel_review import page_scope
+
+        scope = page_scope(evidence)
+        page = scope['page_index']
+        layout = native_evidence.get('layout') or {}
+        frames = (native_evidence.get('native_facts') or {}).get('frames') or {}
+        native_evidence = {'scope': scope,
+            'page': layout.get('page'),
+            'detail_placement': (layout.get('page') or {}).get('detail_placement'),
+            'regions': (layout.get('page_regions') or {}).get(str(page),
+                layout.get('regions') if page == 0 else None),
+            'frames': {k: {f: v.get(f) for f in ('rect_page_mm', 'rect_mm')}
+                for k, v in frames.items() if isinstance(v, dict)
+                and v.get('page_index', 0) == page},
+            'legends': {k: {f: v.get(f) for f in ('rect_page_mm', 'rect_mm', 'page_index')}
+                for k, v in (layout.get('legends') or {}).items() if isinstance(v, dict)
+                and v.get('page_index', 0) == page}}
+        # Pixel conclusions depend on image/task/page/crops, not fresh package IDs
+        # or the data-only facts from another unchanged page.
+        expected_evidence = {}
     fingerprint = hashlib.sha256(
         json.dumps(
             {
@@ -340,12 +365,9 @@ async def _review_once(
                 "max_image_side": settings.max_image_side,
                 "max_rois": getattr(settings, "max_rois", 5),
                 "roi_max_side": getattr(settings, "roi_max_side", 2048),
-                "native_evidence": evidence.get("render_metadata", {}),
+                "native_evidence": native_evidence,
                 "task": task,
-                "expected_evidence": {key: value for key, value in evidence.items() if key not in {
-                    "previous_visual_reviews", "version_limit", "remaining_render_versions",
-                    "generation_unlimited",
-                }},
+                "expected_evidence": expected_evidence,
                 "request_extra_body": settings.request_extra_body,
                 "reasoning_effort": settings.reasoning_effort,
                 "response_format": settings.response_format,

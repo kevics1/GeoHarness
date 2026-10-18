@@ -1319,7 +1319,13 @@ def _create_layout(
             root = legend.model().rootGroup()
             root.removeAllChildren()
             for layer in target_map.layers():
-                root.addLayer(layer)
+                visible = layer.customProperty('geoharness/show_in_legend', None)
+                if visible is None:
+                    renderer = layer.renderer()
+                    visible = not (renderer is not None
+                                   and renderer.type() == 'multibandcolor')
+                if visible not in (False, 0, 'false', 'False'):
+                    root.addLayer(layer)
             legend.setWrapString("\n")
             legend_format = _text_format(font, spec.get("legend_font_size_pt")
                                         or spec.get("body_font_size_pt", 9))
@@ -1891,7 +1897,7 @@ def _layout_bounds(layout: Any) -> dict[str, Any]:
         rect = item.mapRectToScene(item.rect())
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
         secondary = item.page() > 0 and (name == "detail_map" or name.startswith("detail_"))
-        if (name.startswith("label_table_") or secondary) and item.page() > 0:
+        if (name.startswith(("label_table_", "roster_")) or secondary) and item.page() > 0:
             roster_page = layout.pageCollection().page(item.page())
             local = [x - roster_page.pos().x(), y - roster_page.pos().y(), w, h]
             roster_pages.setdefault(item.page(), {})[name] = local
@@ -2331,6 +2337,7 @@ def _export_layout(
     roster_previews, page_previews = [], [{"page_index": 0, "path": str(preview),
         "frames": [name for name in ("main_map", "detail_map")
                    if layout.itemById(name) is not None and layout.itemById(name).page() == 0]}]
+    page_previews[0]['role'] = ('mixed' if any(t['page'] == 0 for t in tables) else 'map')
     for index in range(1, layout.pageCollection().pageCount()):
         frame_ids = [name for name in ("main_map", "detail_map")
                      if layout.itemById(name) is not None and layout.itemById(name).page() == index]
@@ -2347,7 +2354,10 @@ def _export_layout(
             raise ValueError("QGIS did not write the roster-page preview")
         labels.update({key: value for key, value in _export_label_facts(layout, exporter).items()
                        if value})
-        page_previews.append({"page_index": index, "path": str(path), "frames": frame_ids})
+        has_table = any(table['page'] == index for table in tables)
+        page_previews.append({"page_index": index, "path": str(path), "frames": frame_ids,
+                              'role': 'mixed' if has_table and frame_ids else
+                                      'roster' if has_table else 'map' if frame_ids else 'unknown'})
         if any(table["page"] == index for table in tables):
             roster_previews.append(str(path))
     native_facts = _export_geometry_facts(layout, labels, image_settings.dpi)
@@ -2679,6 +2689,9 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             project.setTitle(payload.get("title", ""))
             for index, layer in enumerate(layers):
                 layer.setCustomProperty("geoharness/source_index", index)
+                show = payload['layers'][index].get('show_in_legend')
+                if show is not None:
+                    layer.setCustomProperty('geoharness/show_in_legend', show)
                 layer.setCustomProperty("geoharness/role",
                                         payload["layers"][index].get("role", "map"))
                 layer_key = payload["layers"][index].get("layer_key", "")

@@ -74,11 +74,11 @@ class GeoHookExecutor(HookExecutor):
                 return AggregatedHookResult(results=[HookResult(
                     hook_type="geoharness_argument_guard", success=False, blocked=True,
                     reason=(
-                        "Invalid provider tool arguments; no tool was executed. "
+                        "模型返回的工具参数无效；本次工具没有执行。"
                         + json.dumps(safe, ensure_ascii=False)
-                        + ". Send only the failed complete valid call; prior successful tools "
-                        "are retained. Do not guess-repair coordinates/fields. For QGIS, "
-                        "preflight changes then create with only action+returned plan_ref."
+                        + "。仅重发失败的完整有效调用，保留此前成功结果，不猜测坐标或字段。"
+                        "QGIS变更优先使用build(spec_ref, edits)；旧冻结创建流程仅传"
+                        "action=create与返回的plan_ref。"
                     ),
                     metadata={"argument_diagnostic": safe},
                 )])

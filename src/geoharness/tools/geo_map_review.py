@@ -265,6 +265,11 @@ class GeoMapReviewTool(BaseTool):
                 "review_binding": result.metadata.get("review_binding", {}),
                 "report_path": result.metadata.get("review_path"), "issue_count": len(issues),
                 "issues": issues[:5], "issues_truncated": len(issues) > 5,
+                "page_role": diagnostics.get('page_role', 'unknown'),
+                "review_outcome": diagnostics.get('review_outcome',
+                    'service_or_contract_failure' if diagnostics.get('failure_stage')
+                    else 'model_unable_to_assess' if status == 'unverified' else 'completed'),
+                "repair_progress": diagnostics.get('repair_progress', {}),
                 "request_sent": result.metadata.get("request_sent", False)})
         summary.sort(key=lambda page: page["page_index"])
         expected = set(_unreviewed_pages(verified.get("render_metadata", {})))
@@ -277,12 +282,15 @@ class GeoMapReviewTool(BaseTool):
                    "unreviewed_page_indices": missing,
                    "review_mode": "pixels_only", "render_executed": False,
                    "next_action": (
-                       "Review complete; deliver the package if other required checks pass. "
-                       "No new build is needed." if status == "passed" else
-                       "Review incomplete; inspect per-page reports and retry only failed pages. "
-                       "Do not redraw for a service failure." if status == "unverified" else
-                       "Read the reported image problems and limitations; "
-                       "the review did not change the map.")}
+                       "本次逐页审查完成；其他必要检查通过后交付，无需再次构建。"
+                       if status == "passed" else
+                       "逐页检查未完成，请查看review_outcome区分服务失败、缺页与模型无法判断。"
+                       "仅重试真正失败的请求；用途或要求不明确时询问用户，不因服务问题重绘。"
+                       if status == "unverified" else
+                       "先核实图片报告的问题与限制，再决定修改；审查没有改变地图。")}
+        pending = next((p['repair_progress'] for p in summary
+                        if p['repair_progress'].get('requires_user_decision')), {})
+        payload['diagnostics'] = {'repair_progress': pending}
         receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
                                   map_id=identity, artifact_path=image)
         payload["quality_status"] = receipt.get("quality_status", "draft")
@@ -390,6 +398,11 @@ class GeoMapReviewTool(BaseTool):
             metadata=context.metadata, map_id=identity,
             client=context.metadata.get("map_review_client"), pixel_only=True,
         )
+        from geoharness.cartography.review_progress import assess_repair_progress
+
+        result.diagnostics['repair_progress'] = assess_repair_progress(
+            evidence.get('previous_visual_reviews', []),
+            {**result.model_dump(), 'image_sha256': digest})
         # Cached conclusions predate newer layouts too; page-zero pixels cannot accept page one.
         page_index = verified.get("review_page_index", 0)
         unreviewed = [page for page in _unreviewed_pages(verified.get("render_metadata") or {})

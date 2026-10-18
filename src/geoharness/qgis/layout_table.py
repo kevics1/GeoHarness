@@ -42,6 +42,7 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
         QgsExpression,
         QgsLayoutFrame,
         QgsLayoutItemAttributeTable,
+        QgsLayoutItemLabel,
         QgsLayoutItemPage,
         QgsLayoutMultiFrame,
         QgsLayoutPoint,
@@ -86,6 +87,8 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
         "full_roster": "roster_full.csv" if context is not None else None}, default=str))
     count = spec.get("columns", 3)
     paginated = spec.get("placement") == "pages"
+    if paginated and spec.get('page_columns') is not None:
+        count = spec['page_columns']
     first_roster_page = layout.pageCollection().pageCount()
     chunk = max(1, math.ceil(len(values) / count))
     pending = list(values)
@@ -104,9 +107,29 @@ def add_label_tables(layout, layers, spec, regions, text_format, *, page_spec=No
                                               page_spec.get("height_mm", 210)))
                 layout.pageCollection().addPage(page)
             margin, gap = page_spec.get("margin_mm", 12), page_spec.get("gap_mm", 5)
+            heading_height = (8 if spec.get('title', '重点对象名单') else 0)
+            note_height = (8 if spec.get('note', '') else 0)
+            if column == 0:
+                for name, text, top, height in (
+                    ('title', spec.get('title', '重点对象名单'), margin, heading_height),
+                    ('note', spec.get('note', ''), margin + heading_height, note_height),
+                ):
+                    if not text:
+                        continue
+                    label = QgsLayoutItemLabel(layout)
+                    label.setId(f'roster_{name}_{page_number}')
+                    label.setText(text)
+                    label.setTextFormat(text_format)
+                    label.setMargin(0)
+                    layout.addLayoutItem(label)
+                    label.attemptMove(QgsLayoutPoint(margin, top), False, True, page_number)
+                    label.attemptResize(QgsLayoutSize(
+                        page_spec.get('width_mm', 297) - 2 * margin, height))
             width = (page_spec.get("width_mm", 297) - 2 * margin - gap * (count - 1)) / count
-            rect = [margin + column * (width + gap), margin, width,
-                    page_spec.get("height_mm", 210) - 2 * margin]
+            rect = [margin + column * (width + gap), margin + heading_height + note_height, width,
+                    page_spec.get("height_mm", 210) - 2 * margin - heading_height - note_height]
+            if rect[3] <= 0:
+                raise ValueError('Roster title/note leave no room for table rows')
         else:
             rect = regions[f"label_table_{index}"]
         table = QgsLayoutItemAttributeTable(layout)
@@ -209,7 +232,12 @@ def label_table_facts(layout):
             "geoharness/roster_key_field", '""'))
         raw_keys = ([feature[key_field] for feature in table.vectorLayer().getFeatures(request)]
                     if key_field else None)
+        page_number = int(table.customProperty('geoharness/page', 0))
+        page_title = layout.itemById(f'roster_title_{page_number}')
+        page_note = layout.itemById(f'roster_note_{page_number}')
         result.append({"id": table.customProperty("geoharness/table_id"),
+            'page_title': page_title.text() if page_title else None,
+            'page_note': page_note.text() if page_note else None,
             "page": int(table.customProperty("geoharness/page", 0)),
             "fields": [column.attribute() for column in table.columns()],
             "headers": [column.heading() for column in table.columns()],

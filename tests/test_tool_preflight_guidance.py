@@ -49,8 +49,9 @@ def test_tool_and_system_share_python_cautions_without_growing_the_description()
     assert invocation_guide("geo_python") in prompt
     assert invocation_guide("geo_qgis_project") in prompt
     assert "read(1) is 2D" in prompt and "nodata, not fill_value" in prompt
+    assert "调用前注意事项" in prompt
     assert len(GeoPythonTool.description) < 4463
-    assert set(action_forms()) == {"help", "spec", "preflight", "create", "inspect",
+    assert set(action_forms()) == {"help", "spec", "build", "preflight", "create", "inspect",
                                    "export", "recover"}
 
 

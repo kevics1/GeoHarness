@@ -37,8 +37,8 @@ def input_feedback(name: str, arguments: dict) -> dict | None:
     result = {"status": "invalid_input", "executed": False, "errors": errors,
         "failure": {"category": "argument_contract", "retry_without_change": False},
         "help_call": {"action": "help", "section": section},
-        "recovery": "Use the actual geo_qgis_project contract, not geo_cartography bridge "
-                    "fields or Processing help. Inspect saved spec; change only failed inputs."}
+        "recovery": "使用geo_qgis_project实际契约，不能照搬geo_cartography或Processing参数。"
+                    "查看已保存spec及错误字段，仅修改失败项；仍缺业务含义时询问用户，不猜测。"}
     if arguments.get("spec_ref"):
         result["inspect_call"] = {"action": "inspect", "spec_ref": arguments["spec_ref"]}
     if arguments.get("plan_ref") and arguments.get("action") == "create":
