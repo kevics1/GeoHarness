@@ -95,6 +95,11 @@ def build_review_iteration_context(
                 "location": str(issue.get("location", ""))[:120],
                 "frame_id": str(issue.get("frame_id", ""))[:80],
                 "roi_ref": str(issue.get("roi_ref", ""))[:100],
+                "bbox": issue.get("bbox"),
+                "feature_ids": (issue["feature_ids"][:64]
+                                if isinstance(issue.get("feature_ids"), list) else []),
+                "source_indices": (issue["source_indices"][:64]
+                                   if isinstance(issue.get("source_indices"), list) else []),
             })
         number = version.get("version")
         status = report.get("status", visual.get("status", "unverified"))

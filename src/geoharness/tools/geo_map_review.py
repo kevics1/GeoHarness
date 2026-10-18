@@ -289,7 +289,7 @@ class GeoMapReviewTool(BaseTool):
                        if status == "unverified" else
                        "先核实图片报告的问题与限制，再决定修改；审查没有改变地图。")}
         pending = next((p['repair_progress'] for p in summary
-                        if p['repair_progress'].get('requires_user_decision')), {})
+                        if p['repair_progress'].get('repeated_concern_count')), {})
         payload['diagnostics'] = {'repair_progress': pending}
         receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
                                   map_id=identity, artifact_path=image)
@@ -402,7 +402,8 @@ class GeoMapReviewTool(BaseTool):
 
         result.diagnostics['repair_progress'] = assess_repair_progress(
             evidence.get('previous_visual_reviews', []),
-            {**result.model_dump(), 'image_sha256': digest})
+            {**result.model_dump(), 'image_sha256': digest,
+             'page_index': verified.get('review_page_index', 0)})
         # Cached conclusions predate newer layouts too; page-zero pixels cannot accept page one.
         page_index = verified.get("review_page_index", 0)
         unreviewed = [page for page in _unreviewed_pages(verified.get("render_metadata") or {})

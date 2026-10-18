@@ -915,6 +915,8 @@ def _child_main() -> None:
         "check_claims": contracts.check_claims,
         "first_coverage": contracts.first_coverage,
         "make_leader_lines": contracts.make_leader_lines,
+        "check_leader_lines": contracts.check_leader_lines,
+        "fit_frame_extent": contracts.fit_frame_extent,
         "describe_input": contracts.describe_input,
         "write_analysis_report": contracts.write_analysis_report,
         **_data_helpers(data_refs, tracker),

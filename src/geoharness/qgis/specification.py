@@ -77,6 +77,13 @@ def compile_references(value):
             return keys[reference]
         return reference
 
+    for layer in layers:
+        binding = layer.get("leader_binding")
+        if isinstance(binding, dict):
+            for field in ("source_layer", "labels_layer"):
+                if field in binding:
+                    binding[field] = resolve(binding[field])
+
     layout = result.get("layout")
     if hasattr(layout, "model_dump"):
         layout = layout.model_dump(exclude_unset=True)
@@ -111,6 +118,12 @@ def canonical_spec(parameters: dict) -> dict:
         if type(index) is not int or index < 0 or index >= len(layers):
             raise ValueError("Unknown layer index in map specification")
         return layers[index]["layer_key"]
+
+    for layer in layers:
+        binding = layer.get("leader_binding")
+        if isinstance(binding, dict):
+            for field in ("source_layer", "labels_layer"):
+                binding[field] = key(binding[field])
 
     for frame in ((result.get("layout") or {}).get(name) or {}
                   for name in ("main_frame", "detail_frame")):

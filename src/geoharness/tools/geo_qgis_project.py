@@ -138,6 +138,17 @@ class QgisRasterStyle(BaseModel):
     altitude: float = Field(default=45, gt=0, le=90)
 
 
+class QgisLeaderBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    source_layer: Annotated[int, Field(strict=True, ge=0)] | str
+    labels_layer: Annotated[int, Field(strict=True, ge=0)] | str
+    key_field: str = Field(min_length=1)
+    metric_crs: str = Field(min_length=1)
+    tolerance_m: float = Field(default=.01, ge=0)
+    source_gap_m: float = Field(default=0, ge=0)
+    target_gap_m: float = Field(default=0, ge=0)
+
+
 class QgisProjectLayer(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: Literal["map", "table_only"] = Field(default="map",
@@ -161,6 +172,9 @@ class QgisProjectLayer(BaseModel):
     ))
     raster_style: QgisRasterStyle | None = None
     label_field: str = ""
+    leader_binding: QgisLeaderBinding | None = Field(default=None,
+        description="Straight callouts: exact source/anchor layer keys and business key. "
+                    "Preflight checks current anchor endpoints, never visual approval alone.")
     label_style: QgisLabelStyle | None = None
     required: bool = True
     expected_feature_count: int | None = Field(default=None, ge=0)
@@ -749,6 +763,7 @@ class GeoQgisProjectTool(BaseTool):
         "cautions。render_layers 必须包含 focus/label 图层；详图需要 focus_layers 或 "
         "detail_extent。诊断选择器只能用于 help/inspect。名册 keys 必须唯一且非空；top_n "
         "需要 sort_by 且会排除 keys。成功的 build 已经验证；不要重复 preflight/create。"
+        "独立编号图层与引线同步生成；引线图层声明leader_binding，预检核对当前锚点与唯一ID。"
         "旧版 create 只接受 action 和返回的 plan_ref。高级完整输入和 path patches 仍受支持。"
         "图层从下到上绘制；原生样式使用 style.renderer/field/categories。每个图框声明 "
         "purpose 和必需对象覆盖；显式 extent 与 focus_layers 互斥。审查中的缩放偏好使用 "
@@ -1344,6 +1359,29 @@ class GeoQgisProjectTool(BaseTool):
                                        "label": common["label"],
                                        "layer_index": index,
                                        "derivation": derivation})
+        leader_checks = []
+        for index, layer in enumerate(arguments.layers):
+            binding = layer.leader_binding
+            if binding is None:
+                continue
+            from geoharness.execution.contracts import check_leader_lines
+
+            indices = [binding.source_layer, binding.labels_layer, index]
+            if any(type(i) is not int or i >= len(frames) or "gdf" not in frames[i]
+                   for i in indices):
+                raise ValueError('leader_binding requires three exact vector layer references')
+            points, labels, lines = [frames[i]["gdf"] for i in indices]
+            key = binding.key_field
+            if key not in labels or key not in points:
+                raise ValueError(f'leader_binding key {key!r} missing from source/anchor layers')
+            selected = points[points[key].isin(labels[key])]
+            checked = check_leader_lines(selected, labels, lines, key=key,
+                metric_crs=binding.metric_crs, tolerance_m=binding.tolerance_m,
+                source_gap_m=binding.source_gap_m, target_gap_m=binding.target_gap_m)
+            if checked['status'] != 'passed':
+                raise ValueError('Leader geometry does not match current source/anchors: '
+                                 + json.dumps(checked, ensure_ascii=False))
+            leader_checks.append({"layer_index": index, **checked})
         settings = config.cartography
         table = arguments.layout.label_table if arguments.layout else None
         if table:
@@ -1403,6 +1441,7 @@ class GeoQgisProjectTool(BaseTool):
                               imshow_extent=to_imshow_extent(arguments.map_extent))
         from geoharness.cartography.composition import composition_risks
 
+        report["leader_checks"] = leader_checks
         report["composition"] = composition_risks(
             frames, report=report, layout=arguments.layout.model_dump() if arguments.layout else {},
         )

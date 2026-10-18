@@ -376,7 +376,88 @@ def make_leader_lines(points: Any, labels: Any, *, key: str, metric_crs: Any) ->
     result = gpd.GeoDataFrame(records, columns=[key, 'geometry'], crs=metric_crs)
     validate_vector(result)
     result.attrs['omitted_zero_length_keys'] = omitted
+    result.attrs['leader_check'] = check_leader_lines(
+        points, labels, result, key=key, metric_crs=metric_crs)
     return result
+
+
+def check_leader_lines(points: Any, labels: Any, lines: Any, *, key: str, metric_crs: Any,
+                       tolerance_m: float = .01, source_gap_m: float = 0,
+                       target_gap_m: float = 0) -> dict:
+    """Check straight callouts against CURRENT anchors, including explicit symbol-edge gaps."""
+    import numpy as np
+
+    require_metric(metric_crs)
+    if not np.isfinite([tolerance_m, source_gap_m, target_gap_m]).all() or min(
+            tolerance_m, source_gap_m, target_gap_m) < 0:
+        raise ValueError('Leader tolerance/gaps must be finite and nonnegative metres')
+    for frame, kind in ((points, 'Point'), (labels, 'Point'), (lines, 'LineString')):
+        validate_vector(frame)
+        if (key not in frame or key == frame.geometry.name or frame[key].isna().any()
+                or not frame[key].is_unique or not frame.geom_type.eq(kind).all()):
+            raise ValueError('Leader geometries need the declared type and unique non-null keys')
+    if set(points[key]) != set(labels[key]):
+        raise ValueError('Leader point/label entity keys must match exactly')
+    p, a, line_table = (f.to_crs(metric_crs).set_index(key) for f in (points, labels, lines))
+    for projected in (p, a, line_table):
+        validate_vector(projected)
+    if not set(line_table.index) <= set(p.index):
+        raise ValueError('Leader lines contain unknown entity keys')
+    issues, omitted, maximum = [], [], 0.
+    for entity in p.index:
+        entity_value = entity.item() if hasattr(entity, 'item') else entity
+        start = np.array(p.loc[entity].geometry.coords[0])[:2]
+        target = np.array(a.loc[entity].geometry.coords[0])[:2]
+        length = float(np.linalg.norm(target - start))
+        if length <= source_gap_m + target_gap_m:
+            omitted.append(entity_value)
+            if entity in line_table.index:
+                issues.append({'key': entity_value, 'reason': 'unnecessary_or_degenerate_line'})
+            continue
+        if entity not in line_table.index:
+            issues.append({'key': entity_value, 'reason': 'missing_line'})
+            continue
+        vector = (target - start) / length
+        expected = np.array([start + vector * source_gap_m, target - vector * target_gap_m])
+        coords = np.array(line_table.loc[entity].geometry.coords)[:, :2]
+        error = min(np.max(np.linalg.norm(coords[[0, -1]] - expected, axis=1)),
+                    np.max(np.linalg.norm(coords[[-1, 0]] - expected, axis=1)))
+        perpendicular = np.abs((coords[:, 0] - start[0]) * vector[1]
+                               - (coords[:, 1] - start[1]) * vector[0]).max()
+        error = float(max(error, perpendicular))
+        maximum = max(maximum, error)
+        if error > tolerance_m:
+            issues.append({'key': entity_value, 'reason': 'line_does_not_connect_current_anchor',
+                           'endpoint_or_direction_error_m': error})
+    return {'status': 'failed' if issues else 'passed', 'checked_count': len(p),
+            'line_count': len(line_table), 'max_endpoint_error_m': maximum, 'issues': issues,
+            'omitted_zero_length_keys': omitted, 'metric_crs': str(metric_crs)}
+
+
+def fit_frame_extent(frame: Any, *, metric_crs: Any, width_mm: float, height_mm: float,
+                     padding_ratio: float = .08) -> dict:
+    """Fit all declared subjects to an ACTUAL map-frame rectangle, not the paper size."""
+    import numpy as np
+
+    require_metric(metric_crs)
+    validate_vector(frame)
+    if (frame.empty or not np.isfinite([width_mm, height_mm, padding_ratio]).all()
+            or min(width_mm, height_mm) <= 0 or padding_ratio < 0):
+        raise ValueError('Fit requires nonempty subjects, finite positive frame size and padding')
+    projected = frame.to_crs(metric_crs)
+    validate_vector(projected)
+    xmin, ymin, xmax, ymax = projected.total_bounds
+    w, h = xmax - xmin, ymax - ymin
+    if max(w, h) == 0:
+        raise ValueError('Coincident subjects require an explicit spatial scale, '
+                         'not a guessed extent')
+    w, h = max(w, h * width_mm / height_mm), max(h, w * height_mm / width_mm)
+    w, h = w * (1 + 2 * padding_ratio), h * (1 + 2 * padding_ratio)
+    cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+    return {'map_extent': [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
+            'crs': str(metric_crs), 'subject_count': len(frame),
+            'scale_denominator': float(w / (width_mm / 1000)),
+            'frame_width_mm': width_mm, 'frame_height_mm': height_mm}
 
 
 def sample_raster_points(path: Any, points: Any, *, band: int = 1) -> Any:
