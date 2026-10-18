@@ -240,8 +240,8 @@ def score_risk(frame: Any, *, key: str, components: list[dict],
 
     if key not in frame or frame[key].isna().any() or not frame[key].is_unique:
         raise ValueError("Risk key must be an existing unique nonnull entity ID")
-    if missing_policy not in {'error', 'unknown'} or not components:
-        raise ValueError("Specify components and missing_policy=error or unknown")
+    if missing_policy not in {'error', 'unknown', 'renormalize'} or not components:
+        raise ValueError("Specify components and missing_policy=error, unknown or renormalize")
     if 'risk_score' in frame or 'risk_status' in frame:
         raise ValueError("risk_score/risk_status already exist; preserve prior scoring explicitly")
     weights, normalized, names = [], [], set()
@@ -272,10 +272,83 @@ def score_risk(frame: Any, *, key: str, components: list[dict],
     if not math.isclose(sum(weights), 1, rel_tol=0, abs_tol=1e-9):
         raise ValueError("Risk weights must sum to 1; no silent renormalization")
     result = frame.copy()
-    result['risk_score'] = sum(value * weight for value, weight in zip(normalized, weights))
+    if missing_policy == 'renormalize':
+        available = sum(value.notna().astype(float) * weight
+                        for value, weight in zip(normalized, weights))
+        total = sum(value.fillna(0) * weight for value, weight in zip(normalized, weights))
+        result['risk_score'] = total / available.where(available > 0)
+    else:
+        result['risk_score'] = sum(value * weight for value, weight in zip(normalized, weights))
     result['risk_status'] = np.where(result.risk_score.isna(), 'unknown', 'computed')
     result.attrs['risk_method'] = {'components': components, 'missing_policy': missing_policy,
                                  'scientific_correctness': 'unverified'}
+    return result
+
+
+def first_coverage(points: Any, stages: Any, *, key: str, stage_key: str,
+                   stage_order: list, boundary: str) -> Any:
+    """最早覆盖阶段。调用者明确时序与边界规则；从未覆盖为NA，不用最近距离代替。"""
+    import pandas as pd
+
+    validate_vector(points)
+    validate_vector(stages)
+    if (key not in points or points[key].isna().any() or not points[key].is_unique
+            or not points.geom_type.eq('Point').all()):
+        raise ValueError('first_coverage requires Point geometries and a unique nonnull key')
+    if (stage_key not in stages or stages[stage_key].isna().any()
+            or not stages.geom_type.isin(['Polygon', 'MultiPolygon']).all()):
+        raise ValueError('Stages require nonnull stage keys and polygon geometries')
+    if (not stage_order or len(set(stage_order)) != len(stage_order)
+            or set(stage_order) != set(stages[stage_key])):
+        raise ValueError('stage_order must explicitly list every actual stage once; '
+                         'ask the user when chronological order is unknown')
+    if boundary not in {'covers', 'contains'}:
+        raise ValueError('Specify boundary=covers (include boundary) or contains (exclude)')
+    if {'first_stage_hit', 'coverage_status'} & set(points.columns):
+        raise ValueError('Coverage fields already exist; preserve prior results explicitly')
+    projected = points.to_crs(stages.crs)
+    validate_vector(projected)
+    hits = [None] * len(points)
+    for stage in stage_order:
+        shapes = stages.loc[stages[stage_key] == stage].geometry
+        for i, point in enumerate(projected.geometry):
+            if hits[i] is None and any(getattr(shape, boundary)(point) for shape in shapes):
+                hits[i] = stage
+    result = points.copy()
+    result['first_stage_hit'] = pd.array(hits, dtype=object)
+    result['coverage_status'] = ['not_covered' if value is None else 'covered' for value in hits]
+    result.attrs['coverage_method'] = {'stage_key': stage_key, 'stage_order': stage_order,
+        'boundary': boundary, 'scope': 'coverage_of_supplied_forecasts; actual_arrival_unverified'}
+    return result
+
+
+def make_leader_lines(points: Any, labels: Any, *, key: str, metric_crs: Any) -> Any:
+    """按实体ID连接真实点和标签锚点；同位置不需要引线，不能输出退化线。"""
+    import geopandas as gpd
+    from shapely.geometry import LineString
+
+    require_metric(metric_crs)
+    for frame in (points, labels):
+        validate_vector(frame)
+        if (key not in frame or frame[key].isna().any() or not frame[key].is_unique
+                or not frame.geom_type.eq('Point').all()):
+            raise ValueError('Leader endpoints require Points and unique nonnull keys')
+    if set(points[key]) != set(labels[key]):
+        raise ValueError('Leader point/label entity keys must match exactly')
+    if key == 'geometry':
+        raise ValueError('Leader identity field cannot be geometry')
+    starts, ends = points.to_crs(metric_crs), labels.to_crs(metric_crs).set_index(key)
+    records, omitted = [], []
+    for _, row in starts.iterrows():
+        entity = row[key]
+        end = ends.loc[entity].geometry
+        if row.geometry.equals(end):
+            omitted.append(entity)
+        else:
+            records.append({key: entity, 'geometry': LineString([row.geometry, end])})
+    result = gpd.GeoDataFrame(records, columns=[key, 'geometry'], crs=metric_crs)
+    validate_vector(result)
+    result.attrs['omitted_zero_length_keys'] = omitted
     return result
 
 
@@ -355,7 +428,7 @@ def artifact_metadata(path: Path, *, succeeded: bool) -> dict:
 
 
 def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
-                   metric_crs=None) -> dict:
+                   metric_crs=None, group_by=()) -> dict:
     """Recompute bounded statistics from a persisted table/vector, with its fingerprint.
 
     Predicates are {name, field, op, value}; missing values never count as matches.
@@ -375,7 +448,14 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
     result = {'scope': 'recomputed_persisted_values; scientific_method_unverified',
               'source': str(path), 'sha256': digest, 'key': key, 'row_count': len(frame),
               'crs': str(frame.crs) if getattr(frame, 'crs', None) else None,
-              'numeric': {}, 'counts': {}}
+              'numeric': {}, 'counts': {}, 'groups': {}}
+    for field in group_by:
+        if field not in frame or field in result['groups']:
+            raise ValueError(f'Grouping field missing or duplicated: {field!r}')
+        result['groups'][field] = [
+            {'value': None if pd.isna(value) else value.item()
+                if hasattr(value, 'item') else value, 'count': int(count)}
+            for value, count in frame[field].value_counts(dropna=False, sort=False).items()]
     for field in numeric_fields:
         if field not in frame:
             raise ValueError(f'Fact field {field!r} missing; actual fields={list(frame.columns)}')
@@ -413,6 +493,49 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
     if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
         raise ValueError('Fact source changed while reading; discard these facts')
     return result
+
+
+def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=(),
+                          group_by=(), predicates=(), method: dict, claims=()) -> dict:
+    """从落盘结果生成同源JSON/中文Markdown；方法为声明，任意报告文本不受认证。"""
+    facts = artifact_facts(source, key=key, numeric_fields=numeric_fields,
+                           group_by=group_by, predicates=predicates)
+    checked = check_claims(facts, list(claims)) if claims else None
+    if checked and checked['status'] != 'passed':
+        raise ValueError('Declared analysis claims disagree with persisted facts: '
+                         + json.dumps(checked, ensure_ascii=False))
+    if not isinstance(method, dict) or not method:
+        raise ValueError('Record the explicit method/weights/missing-data policy; do not guess')
+    if 'weights' in method:
+        weights = method['weights']
+        if (not isinstance(weights, dict) or not weights
+                or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                       for v in weights.values())
+                or not math.isclose(sum(weights.values()), 1, rel_tol=0, abs_tol=1e-9)):
+            raise ValueError('Declared weights must be positive fractions summing to 1; '
+                             'ask the user rather than silently normalizing')
+    # Reject nonfinite/unserializable declarations before writing either output.
+    json.dumps(method, allow_nan=False)
+    report = {'schema_version': 1, 'kind': 'persisted_analysis_report', 'facts': facts,
+              'method': method, 'method_status': 'declared_not_independently_verified',
+              'claims': checked, 'analysis_correctness': 'unverified'}
+    path = Path(path)
+    if path.suffix.lower() != '.json':
+        raise ValueError('Analysis report path must end in .json')
+    source_path = Path(source).resolve()
+    if source_path in {path.resolve(), path.with_suffix('.md').resolve()}:
+        raise ValueError('Report must not overwrite its source')
+    body = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
+    lines = ['# 分析事实与方法记录', '', f"数据文件：{Path(source).name}",
+             f"数据 SHA256：{facts['sha256']}", f"实体数：{facts['row_count']}", '',
+             '以下统计从落盘结果重算；评分方法为声明，科学正确性尚未独立验证。', '',
+             '## 方法与假设', '', '```json',
+             json.dumps(method, ensure_ascii=False, indent=2), '```', '', '## 统计事实', '',
+             '```json', json.dumps({k: facts[k] for k in ('numeric', 'counts', 'groups')},
+                                  ensure_ascii=False, indent=2), '```', '']
+    path.write_text(body, encoding='utf-8')
+    path.with_suffix('.md').write_text('\n'.join(lines), encoding='utf-8')
+    return report
 
 
 def check_claims(facts: dict, claims: list[dict]) -> dict:

@@ -75,6 +75,58 @@ def _crs_details(value: Any) -> dict:
             "official_name": crs.name, "status": "verified_by_pyproj"}
 
 
+def _attached_analysis(delivery: dict) -> list[dict]:
+    """只核对已复制包内的报告和数据；绝不沿报告中的任意源路径读取。"""
+    from geoharness.execution.contracts import artifact_facts, check_claims
+
+    if not delivery.get('delivery_dir'):
+        return []
+    root = Path(delivery['delivery_dir']).resolve()
+    files = [Path(p).resolve() for p in delivery.get('files', [])
+             if isinstance(p, str) and Path(p).resolve().is_relative_to(root)]
+    reports = []
+    for path in files:
+        if path.suffix.lower() != '.json' or not path.is_file() or path.stat().st_size > 262144:
+            continue
+        try:
+            report = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(report, dict) or report.get('kind') != 'persisted_analysis_report':
+            continue
+        try:
+            if not isinstance(report.get('method'), dict) or not report['method']:
+                raise ValueError('Analysis method declaration missing')
+            facts = report['facts']
+            sources = [p for p in files if p != path and p.is_file()
+                       and _sha(p) == facts['sha256']]
+            if not sources:
+                raise ValueError('Matching source not delivered')
+            measured = artifact_facts(sources[0], key=facts['key'],
+                numeric_fields=list(facts.get('numeric', {})),
+                group_by=list(facts.get('groups', {})),
+                predicates=[item['predicate'] for item in facts.get('counts', {}).values()])
+            expected = {k: v for k, v in facts.items() if k != 'source'}
+            actual = {k: v for k, v in measured.items() if k != 'source'}
+            if actual != expected:
+                raise ValueError('Report statistics disagree with copied source')
+            claims = report.get('claims')
+            if claims:
+                raw = [{k: v for k, v in item.items() if k in {
+                    'path', 'expected', 'absolute_tolerance'}} for item in claims['checks']]
+                if check_claims(measured, raw)['status'] != 'passed':
+                    raise ValueError('Report claims disagree with copied source')
+            reports.append({'report': str(path), 'source': str(sources[0]),
+                'source_sha256': measured['sha256'], 'facts': measured,
+                'status': 'persisted_values_checked', 'method': report.get('method'),
+                'method_status': 'declared_not_independently_verified',
+                'analysis_correctness': 'unverified'})
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            reports.append({'report': str(path), 'status': 'unverified',
+                            'reason': '报告与包内数据未能完成一致性核对'})
+    return reports
+
+
 def build_delivery_summary(
     delivery: dict, receipt: dict, *, manifest_path: Path | None,
     package_hashes: dict[str, str],
@@ -135,6 +187,32 @@ def build_delivery_summary(
     stages = receipt.get("stages") or {}
     selected_version = (receipt.get("selected_version") if receipt.get("artifact_registered")
                         else delivery.get("selection", {}).get("selected_version"))
+    analysis_reports = _attached_analysis(delivery)
+    page_reviews = {}
+    for version in receipt.get('versions', []):
+        if isinstance(version, dict) and version.get('version') == selected_version:
+            page_reviews = {page: {'status': r.get('status', 'unverified'),
+                'review_path': (r.get('report_reference') or {}).get('path'),
+                'issues': (r.get('report') or {}).get('issues', []),
+                'limitations': (r.get('report') or {}).get('limitations', [])} for page, r in (
+                    version.get('page_reviews') or {}).items() if isinstance(r, dict)}
+            break
+    remaining = [dict(issue) for issue in delivery.get('remaining_issues') or []
+                 if isinstance(issue, dict)]
+    for page, review in page_reviews.items():
+        for issue in review['issues']:
+            if isinstance(issue, dict) and not any(
+                    all(existing.get(k) == issue.get(k) for k in (
+                        'severity', 'description', 'location', 'frame_id'))
+                    for existing in remaining):
+                remaining.append({**issue, 'page_index': page})
+    issue_count = sum(isinstance(issue, dict) and issue.get('severity') in {'warning', 'error'}
+                      for issue in remaining)
+    notice = (f"交付质量：{delivery.get('quality_status', 'draft')}；"
+              f"视觉审查：{delivery.get('review_status', 'unverified')}；"
+              f"当前已列出{issue_count}项错误或警告，其他逐页限制见审查记录。分析科学正确性："
+              f"{receipt.get('analysis_correctness', 'unverified')}。"
+              "工程打包或文件存在不代表分析与视觉质量均已通过。")
     return {
         "schema_version": 1,
         "primary_map": primary,
@@ -156,6 +234,11 @@ def build_delivery_summary(
         "analysis_correctness": receipt.get("analysis_correctness", "unverified"),
         "analysis_explanation": explanation,
         "analysis": analysis,
+        "attached_analysis_reports": analysis_reports,
+        "page_reviews": page_reviews,
+        "remaining_issues": remaining,
+        "quality_notice": notice,
+        "delivered_files": delivery.get('files', []),
     }
 
 
@@ -186,16 +269,27 @@ def _markdown(summary: dict) -> str:
                   summary["analysis_explanation"], "",
                   "实际图例节点、完整工程事实及状态见 summary.json；"
                   "分析统计、参数、输出指纹与完整来源备注保留在工程事实报告中。", ""])
+    lines.extend([summary['quality_notice'], ''])
+    for page, review in summary['page_reviews'].items():
+        lines.append(f"- 页面 {page}：{review['status']}")
+    for report in summary['attached_analysis_reports']:
+        lines.append(f"- 分析事实报告：{report['report']}；核对状态：{report['status']}")
+    for issue in summary['remaining_issues']:
+        if isinstance(issue, dict):
+            lines.append(f"- 待解决（{issue.get('severity', 'unknown')}）："
+                         f"{issue.get('description', '')}")
     return "\n".join(lines)
 
 
 def write_delivery_summary(
     directory: Path, delivery: dict, receipt: dict, *, manifest_path: Path | None,
     package_hashes: dict[str, str],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     summary = build_delivery_summary(delivery, receipt, manifest_path=manifest_path,
                                      package_hashes=package_hashes)
     json_path, markdown_path = directory / "summary.json", directory / "summary.md"
     json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     markdown_path.write_text(_markdown(summary), encoding="utf-8")
-    return {"summary_json": str(json_path), "summary_markdown": str(markdown_path)}
+    return {"summary_json": str(json_path), "summary_markdown": str(markdown_path),
+            "quality_notice": summary['quality_notice'],
+            "remaining_issues": summary['remaining_issues']}

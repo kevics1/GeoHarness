@@ -913,6 +913,9 @@ def _child_main() -> None:
         "extent_geometry": contracts.extent_geometry,
         "artifact_facts": contracts.artifact_facts,
         "check_claims": contracts.check_claims,
+        "first_coverage": contracts.first_coverage,
+        "make_leader_lines": contracts.make_leader_lines,
+        "write_analysis_report": contracts.write_analysis_report,
         **_data_helpers(data_refs, tracker),
     }
     exec(code, namespace)

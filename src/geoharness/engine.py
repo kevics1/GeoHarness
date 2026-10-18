@@ -7,6 +7,7 @@ import json
 import re
 from contextlib import aclosing, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from typing import AsyncIterator
 
 from openharness.engine.messages import ConversationMessage, ToolResultBlock
@@ -25,6 +26,25 @@ from geoharness.cartography.jobs import begin_map_request
 from geoharness.cartography.workflow import reset_map_workflow
 
 
+class _AwaitingUserAnswer(BaseException):
+    """Control flow, kept outside upstream API-error/retry handling."""
+
+
+class _QuestionGateClient:
+    def __init__(self, client, metadata):
+        self.client, self.metadata = client, metadata
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    async def stream_message(self, request):
+        if self.metadata.get('geo_clarification', {}).get('pending'):
+            raise _AwaitingUserAnswer()
+        async with aclosing(self.client.stream_message(request)) as stream:
+            async for event in stream:
+                yield event
+
+
 class GeoQueryEngine(QueryEngine):
     async def submit_message(self, prompt: str | ConversationMessage) -> AsyncIterator[StreamEvent]:
         user_message = (
@@ -34,6 +54,15 @@ class GeoQueryEngine(QueryEngine):
         continuation = user_message.text.strip().strip("。.!！").lower() in {
             "继续", "接着做", "continue", "resume",
         }
+        pending = self.tool_metadata.get('geo_clarification', {}).get('pending')
+        if pending:
+            if (continuation or not user_message.text.strip()
+                    or user_message.text.strip().strip('。.!！').lower() in {
+                        '取消', 'cancel', 'cancelled', '(no response)'}):
+                yield StatusEvent(message=f"需要先回答：{pending['question']}")
+                return
+            self.tool_metadata['geo_clarification'].pop('pending', None)
+            self._tool_metadata['_suppress_next_user_goal'] = True
         if continuation and self.has_pending_continuation() and all(
             block.type == "text" for block in user_message.content
         ):
@@ -45,14 +74,16 @@ class GeoQueryEngine(QueryEngine):
         # continuation does not append a user message or replace the task goal.
         self._query_recovery_state = None
         self.tool_metadata.pop("geo_query_recovery", None)
-        reset_map_workflow(self.tool_metadata)
+        if not pending:
+            reset_map_workflow(self.tool_metadata)
         config = self.tool_metadata.get("geoharness_config")
         if config is not None:
             from geoharness.task_budget import start_task
 
-            start_task(self.tool_metadata, config)
+            if not pending:
+                start_task(self.tool_metadata, config)
             begin_map_request(self.tool_metadata, cwd=self._cwd, config=config,
-                              continuation=continuation)
+                              continuation=continuation or bool(pending))
         if user_message.text.strip() and not self._tool_metadata.pop(
             "_suppress_next_user_goal", False,
         ):
@@ -142,6 +173,9 @@ class GeoQueryEngine(QueryEngine):
         """
         config = self.tool_metadata.get("geoharness_config")
         automatic = getattr(getattr(config, "agent", None), "auto_continue", False)
+        self.tool_metadata.setdefault('geo_clarification', {})
+        context = replace(context, api_client=_QuestionGateClient(
+            context.api_client, self.tool_metadata))
         seen: set[str] = set()
         seen_failures: set[str] = set()
         while True:
@@ -151,6 +185,18 @@ class GeoQueryEngine(QueryEngine):
                 async with aclosing(run_query(context, messages)) as stream:
                     async for event, usage in stream:
                         if isinstance(event, ToolExecutionCompleted):
+                            if event.tool_name == 'geo_map_review' and not event.is_error:
+                                try:
+                                    review, _ = json.JSONDecoder().raw_decode(event.output.lstrip())
+                                    progress = review.get('diagnostics', {}).get(
+                                        'repair_progress', {})
+                                    if progress.get('requires_user_decision') is True:
+                                        self.tool_metadata['geo_clarification']['pending'] = {
+                                            'question': '多轮审图仍报告同组问题，尚不能确认继续'
+                                            '改图的收益。请选择局部放大、保留当前草稿，'
+                                            '或说明希望优先解决的具体问题。'}
+                                except (ValueError, TypeError, AttributeError):
+                                    pass
                             fingerprint = self._progress_fingerprint(event)
                             if event.is_error:
                                 failures[fingerprint] = failures.get(fingerprint, 0) + 1
@@ -158,10 +204,19 @@ class GeoQueryEngine(QueryEngine):
                                 successful.add(fingerprint)
                         yield event, usage
                 return
+            except _AwaitingUserAnswer:
+                self._messages[:] = messages
+                question = self.tool_metadata['geo_clarification']['pending']['question']
+                yield StatusEvent(message=f"等待用户回答：{question}"), None
+                return
             except MaxTurnsExceeded:
                 # run_query appends its tool results after yielding the final
                 # ToolExecutionCompleted; preserve that final mutation as well.
                 self._messages[:] = messages
+                if self.tool_metadata.get('geo_clarification', {}).get('pending'):
+                    question = self.tool_metadata['geo_clarification']['pending']['question']
+                    yield StatusEvent(message=f"等待用户回答：{question}"), None
+                    return
                 from geoharness.task_budget import budget_status
 
                 if config is not None and budget_status(self.tool_metadata, config).get(

@@ -26,9 +26,8 @@ def budget_context(metadata, config):
     status = budget_status(metadata, config)
     if not status:
         return ""
-    return ("\nTask time target: " + json.dumps(status) + ". "
-            "Merge related map fixes into one build(spec_ref, edits). Review all verified pages "
-            "with all_pages=true; image review only reports findings and never rebuilds. "
-            "During delivery/deadline, prioritize factual blockers and delivery of existing "
-            "artifacts with precise unresolved status; stop cosmetic refinement. Never claim "
-            "unverified work passed. This is a time target, not permission to weaken checks.\n")
+    return ("\n任务时间目标：" + json.dumps(status) + "。"
+            "把相关修复合并到一次build(spec_ref, edits)，用all_pages=true逐页审查；"
+            "图片审查只报告问题、不重建。接近交付预留或时间目标时先处理事实错误，"
+            "停止装饰性优化；如需继续耗时修复，询问用户继续优化还是交付当前草稿。"
+            "准确说明未解决项，不能把未验证标为通过；时间目标不允许削弱检查。\n")

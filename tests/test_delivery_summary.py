@@ -66,6 +66,19 @@ def test_summary_uses_actual_renderer_and_legend_in_hash_checked_selected_manife
     assert "不表示分析未执行" in summary["analysis_explanation"]
 
 
+def test_secondary_page_problems_are_not_omitted_from_delivery_notice(tmp_path):
+    _, expected, delivery = _package(tmp_path / 'selected')
+    issue = {'severity': 'warning', 'description': '名单表头裁切', 'location': '名单页'}
+    receipt = {'selected_version': 2, 'artifact_registered': True, 'versions': [
+        {'version': 2, 'page_reviews': {'1': {'status': 'issues',
+            'report': {'issues': [issue], 'limitations': ['未核对原始数据']}}}}]}
+    summary = build_delivery_summary(delivery, receipt,
+        manifest_path=tmp_path / 'selected/project.json', package_hashes=expected)
+    assert summary['page_reviews']['1']['status'] == 'issues'
+    assert summary['remaining_issues'][0]['description'] == '名单表头裁切'
+    assert '1项' in summary['quality_notice']
+
+
 @pytest.mark.parametrize("change", ["manifest", "project", "missing_hash"])
 def test_unchecked_or_changed_package_does_not_supply_facts(tmp_path, change):
     _, expected, delivery = _package(tmp_path / "selected")

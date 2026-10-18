@@ -93,11 +93,14 @@ def build_review_iteration_context(
                 "severity": issue["severity"],
                 "description": str(issue.get("description", ""))[:240],
                 "location": str(issue.get("location", ""))[:120],
+                "frame_id": str(issue.get("frame_id", ""))[:80],
+                "roi_ref": str(issue.get("roi_ref", ""))[:100],
             })
         number = version.get("version")
         status = report.get("status", visual.get("status", "unverified"))
         result["previous_visual_reviews"].append({
             "page_index": page_index,
+            "image_sha256": version.get('image_sha256', ''),
             "version": number if isinstance(number, int) and not isinstance(number, bool) else None,
             "status": (status if status in ("passed", "issues", "unverified", "stale")
                        else "unverified"),
