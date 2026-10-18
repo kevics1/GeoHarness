@@ -5,7 +5,8 @@ from math import isfinite
 
 
 def _location(issue):
-    return re.sub(r"[\W_]+", "", issue.get("location", "")).lower()
+    value = issue.get("location")
+    return re.sub(r"[\W_]+", "", value).lower() if isinstance(value, str) else ""
 
 
 def _box(issue):
@@ -20,16 +21,17 @@ def _same_concern(left, right):
             or left.get("frame_id", "") != right.get("frame_id", "")):
         return False
     a, b = left.get("feature_ids"), right.get("feature_ids")
-    if a and b and left.get('source_indices') and left.get('source_indices') == right.get(
-            'source_indices'):
+    if (isinstance(a, list) and isinstance(b, list) and a and b
+            and all(type(v) is int for v in [*a, *b]) and left.get('source_indices')
+            and left.get('source_indices') == right.get('source_indices')):
         return bool(set(a) & set(b))
     a, b = _box(left), _box(right)
     if a and b and left.get("roi_ref", "") == right.get("roi_ref", ""):
         intersection = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
             0, min(a[3], b[3]) - max(a[1], b[1]))
-        smaller = min(max(0, a[2] - a[0]) * max(0, a[3] - a[1]),
-                      max(0, b[2] - b[0]) * max(0, b[3] - b[1]))
-        return bool(smaller and intersection / smaller >= .6)
+        union = ((a[2] - a[0]) * (a[3] - a[1])
+                 + (b[2] - b[0]) * (b[3] - b[1]) - intersection)
+        return bool(union and intersection / union >= .6)
     return bool(_location(left) and _location(left) == _location(right))
 
 
@@ -39,7 +41,9 @@ def _issues(review):
 
 
 def _page(review):
-    return review.get("page_index", review.get("diagnostics", {}).get("review_page_index"))
+    diagnostics = review.get('diagnostics')
+    return review.get("page_index", diagnostics.get("review_page_index")
+                      if isinstance(diagnostics, dict) else None)
 
 
 def assess_repair_progress(history: list, current: dict) -> dict:
@@ -48,9 +52,11 @@ def assess_repair_progress(history: list, current: dict) -> dict:
     seen = {current.get("image_sha256")}
     for review in reversed(history):
         if (not isinstance(review, dict) or not review.get("image_sha256")
-                or review["image_sha256"] in seen or review.get("status") != "issues"
+                or review["image_sha256"] in seen
                 or _page(review) != page):
             continue
+        if review.get('status') != 'issues':
+            break  # A passed/unverified intervening version cannot prove persistence.
         previous.append(review)
         seen.add(review["image_sha256"])
         if len(previous) == 2:

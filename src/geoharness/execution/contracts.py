@@ -95,6 +95,7 @@ def require_metric(value: Any) -> Any:
 
 def describe_input(value: Any) -> dict:
     """Actual in-memory schema/shape, not inferred fields or a second analysis run."""
+    import geopandas as gpd
     import numpy as np
     import pandas as pd
 
@@ -102,7 +103,7 @@ def describe_input(value: Any) -> dict:
         result = {'kind': 'table', 'rows': len(value),
                   'schema': {str(k): str(v) for k, v in value.dtypes.items()},
                   'null_counts': {str(k): int(v) for k, v in value.isna().sum().items()}}
-        if hasattr(value, 'geometry') and hasattr(value, 'crs'):
+        if isinstance(value, gpd.GeoDataFrame):
             result.update(crs=str(value.crs) if value.crs else None,
                           geometry_column=value.geometry.name,
                           geometry_types=value.geometry.geom_type.value_counts().to_dict())
@@ -368,11 +369,12 @@ def make_leader_lines(points: Any, labels: Any, *, key: str, metric_crs: Any) ->
     records, omitted = [], []
     for _, row in starts.iterrows():
         entity = row[key]
-        end = ends.loc[entity].geometry
-        if row.geometry.equals(end):
+        end = ends.geometry.loc[entity]
+        start = row[starts.geometry.name]
+        if start.equals(end):
             omitted.append(entity)
         else:
-            records.append({key: entity, 'geometry': LineString([row.geometry, end])})
+            records.append({key: entity, 'geometry': LineString([start, end])})
     result = gpd.GeoDataFrame(records, columns=[key, 'geometry'], crs=metric_crs)
     validate_vector(result)
     result.attrs['omitted_zero_length_keys'] = omitted
@@ -406,8 +408,8 @@ def check_leader_lines(points: Any, labels: Any, lines: Any, *, key: str, metric
     issues, omitted, maximum = [], [], 0.
     for entity in p.index:
         entity_value = entity.item() if hasattr(entity, 'item') else entity
-        start = np.array(p.loc[entity].geometry.coords[0])[:2]
-        target = np.array(a.loc[entity].geometry.coords[0])[:2]
+        start = np.array(p.geometry.loc[entity].coords[0])[:2]
+        target = np.array(a.geometry.loc[entity].coords[0])[:2]
         length = float(np.linalg.norm(target - start))
         if length <= source_gap_m + target_gap_m:
             omitted.append(entity_value)
@@ -419,7 +421,7 @@ def check_leader_lines(points: Any, labels: Any, lines: Any, *, key: str, metric
             continue
         vector = (target - start) / length
         expected = np.array([start + vector * source_gap_m, target - vector * target_gap_m])
-        coords = np.array(line_table.loc[entity].geometry.coords)[:, :2]
+        coords = np.array(line_table.geometry.loc[entity].coords)[:, :2]
         error = min(np.max(np.linalg.norm(coords[[0, -1]] - expected, axis=1)),
                     np.max(np.linalg.norm(coords[[-1, 0]] - expected, axis=1)))
         perpendicular = np.abs((coords[:, 0] - start[0]) * vector[1]
@@ -536,7 +538,8 @@ def artifact_metadata(path: Path, *, succeeded: bool) -> dict:
 
 
 def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
-                   metric_crs=None, group_by=()) -> dict:
+                   metric_crs=None, group_by=(), include_median: bool = False,
+                   stratify_by=()) -> dict:
     """Recompute bounded statistics from a persisted table/vector, with its fingerprint.
 
     Predicates are {name, field, op, value}; missing values never count as matches.
@@ -557,6 +560,10 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
               'source': str(path), 'sha256': digest, 'key': key, 'row_count': len(frame),
               'crs': str(frame.crs) if getattr(frame, 'crs', None) else None,
               'numeric': {}, 'counts': {}, 'groups': {}}
+    if stratify_by:
+        if len(set(stratify_by)) != len(stratify_by) or any(f not in frame for f in stratify_by):
+            raise ValueError('Stratification requires distinct existing fields')
+        result.update(stratify_by=list(stratify_by), strata=[])
     for field in group_by:
         if field not in frame or field in result['groups']:
             raise ValueError(f'Grouping field missing or duplicated: {field!r}')
@@ -574,7 +581,19 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
         result['numeric'][field] = {
             'missing': int(values.isna().sum()), 'count': len(valid),
             **{name: float(getattr(valid, name)()) if len(valid) else None
-               for name in ('min', 'max', 'sum', 'mean')}}
+               for name in ('min', 'max', 'sum', 'mean', *(['median'] if include_median else []))}}
+    if stratify_by:
+        for values, subset in frame.groupby(list(stratify_by), dropna=False, sort=False):
+            if not isinstance(values, tuple):
+                values = (values,)
+            result['strata'].append({'group': {
+                field: None if pd.isna(value) else value.item()
+                if hasattr(value, 'item') else value
+                for field, value in zip(stratify_by, values)}, 'row_count': len(subset),
+                'numeric': {field: {stat: float(getattr(pd.to_numeric(subset[field],
+                    errors='raise').dropna(), stat)()) if subset[field].notna().any() else None
+                    for stat in ('min', 'max', 'median')}
+                    for field in numeric_fields}})
     operators = {'<': operator.lt, '<=': operator.le, '>': operator.gt,
                  '>=': operator.ge, '==': operator.eq, '!=': operator.ne}
     for predicate in predicates:
@@ -604,10 +623,12 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
 
 
 def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=(),
-                          group_by=(), predicates=(), method: dict, claims=()) -> dict:
+                          group_by=(), predicates=(), method: dict, claims=(),
+                          stratify_by=()) -> dict:
     """从落盘结果生成同源JSON/中文Markdown；方法为声明，任意报告文本不受认证。"""
     facts = artifact_facts(source, key=key, numeric_fields=numeric_fields,
-                           group_by=group_by, predicates=predicates)
+                           group_by=group_by, predicates=predicates, include_median=True,
+                           stratify_by=stratify_by)
     checked = check_claims(facts, list(claims)) if claims else None
     if checked and checked['status'] != 'passed':
         raise ValueError('Declared analysis claims disagree with persisted facts: '
@@ -633,7 +654,6 @@ def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=()
     source_path = Path(source).resolve()
     if source_path in {path.resolve(), path.with_suffix('.md').resolve()}:
         raise ValueError('Report must not overwrite its source')
-    body = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
     lines = ['# 分析事实与方法记录', '', f"数据文件：{Path(source).name}",
              f"数据 SHA256：{facts['sha256']}", f"实体数：{facts['row_count']}", '',
              '以下统计从落盘结果重算；评分方法为声明，科学正确性尚未独立验证。', '',
@@ -641,8 +661,13 @@ def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=()
              json.dumps(method, ensure_ascii=False, indent=2), '```', '', '## 统计事实', '',
              '```json', json.dumps({k: facts[k] for k in ('numeric', 'counts', 'groups')},
                                   ensure_ascii=False, indent=2), '```', '']
-    path.write_text(body, encoding='utf-8')
-    path.with_suffix('.md').write_text('\n'.join(lines), encoding='utf-8')
+    markdown = '\n'.join(lines)
+    markdown_path = path.with_suffix('.md')
+    markdown_path.write_text(markdown, encoding='utf-8')
+    report['companions'] = {'markdown': {'path': str(markdown_path.resolve()),
+        'sha256': hashlib.sha256(markdown_path.read_bytes()).hexdigest()}}
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False),
+                    encoding='utf-8')
     return report
 
 

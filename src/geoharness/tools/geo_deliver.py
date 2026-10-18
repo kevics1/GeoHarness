@@ -181,6 +181,9 @@ class GeoDeliverTool(BaseTool):
                     return unregistered_receipt()
 
             files = [resolve(value) for value in arguments.files]
+            from geoharness.cartography.analysis_bundle import complete_analysis_bundle
+
+            files, _ = complete_analysis_bundle(files, resolve)
             primary = resolve(arguments.primary_map) if arguments.primary_map else None
             project_directory = arguments.project_dir
             candidate_report = None

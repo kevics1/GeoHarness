@@ -182,6 +182,10 @@ class GeoQueryEngine(QueryEngine):
                 async with aclosing(run_query(context, messages)) as stream:
                     async for event, usage in stream:
                         if isinstance(event, ToolExecutionCompleted):
+                            counts = self.tool_metadata.setdefault('geo_tool_call_counts', {})
+                            count = counts.setdefault(event.tool_name, {'calls': 0, 'errors': 0})
+                            count['calls'] += 1
+                            count['errors'] += int(event.is_error)
                             if event.tool_name == 'geo_map_review' and not event.is_error:
                                 try:
                                     review, _ = json.JSONDecoder().raw_decode(event.output.lstrip())
@@ -341,8 +345,17 @@ class GeoQueryEngine(QueryEngine):
 
     def _persist_query_mode(self) -> None:
         metrics = getattr(self._api_client, "request_metrics", None)
-        if metrics is not None:
-            self.tool_metadata["geo_request_metrics"] = list(metrics)
+        if metrics and metrics[-1] is not getattr(self, '_last_saved_metric', None):
+            # Streaming text can yield thousands of events. Merge only when a request
+            # finishes, preserving restored diagnostics without quadratic per-token work.
+            saved = self.tool_metadata.get('geo_request_metrics', [])
+            indexed = {(m.get('request_id'), m.get('attempt')): m for m in saved
+                       if isinstance(m, dict)}
+            indexed.update({(m.get('request_id'), m.get('attempt')): m for m in metrics})
+            config = self.tool_metadata.get('geoharness_config')
+            limit = getattr(getattr(config, 'agent', None), 'request_metrics_limit', 2048)
+            self.tool_metadata['geo_request_metrics'] = list(indexed.values())[-limit:]
+            self._last_saved_metric = metrics[-1]
         state = getattr(self, "_query_recovery_state", None)
         if state is not None and state.fallback_active:
             self.tool_metadata["geo_query_recovery"] = {

@@ -135,9 +135,11 @@ async def test_verified_data_context_refreshes_without_changing_saved_messages(m
     _ = [event async for event in client.stream_message(original)]
     events = [event async for event in client.stream_message(original)]
     assert events[-1].message.text == "two"
-    assert "32647" in calls[0]["messages"][0]["content"]
-    assert "prior/result" in calls[1]["messages"][0]["content"]
-    assert "32647" not in calls[1]["messages"][0]["content"]
+    assert "32647" in calls[0]["messages"][-1]["content"]
+    assert "prior/result" in calls[1]["messages"][-1]["content"]
+    assert "32647" not in calls[1]["messages"][-1]["content"]
+    assert calls[0]["messages"][0] == calls[1]["messages"][0]
+    assert calls[0]["messages"][0]["content"] == "Base contract"
     assert original.system_prompt == "Base contract"
     assert len(original.messages) == 1
 

@@ -60,7 +60,10 @@ def page_scope(evidence: dict[str, Any]) -> dict:
                 role = 'roster'
     if role == 'unknown' and frames:
         role = 'map'
-    return {"page_index": page_index, "frames": frames, 'page_role': role}
+    roster_pages = [p['page_index'] for p in previews if isinstance(p, dict)
+                    and p.get('role') == 'roster' and type(p.get('page_index')) is int]
+    return {"page_index": page_index, "frames": frames, 'page_role': role,
+            'roster_page_indices': sorted(roster_pages)}
 
 
 def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "tool") -> str:
@@ -69,6 +72,7 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
     purpose = (
         '本页是独立名单/表格页，只检查表题、表头、单位、行列可读性、裁切、'
         '分页和内容布局；不得要求本页出现主图、定位图、地图图例或比例尺。'
+        '表题总数可以由名单各页共同承载，不要求本页独自包含全部行；不从单页验证全册行数。'
         '任务中的地图要求属于其他页，不得据此把本页判为unverified。'
         if scope['page_role'] == 'roster' else
         '按照本页实际用途检查；不能要求定位图承担主图细节，不能把未提供的其他页'

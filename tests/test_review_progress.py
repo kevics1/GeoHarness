@@ -35,5 +35,8 @@ def test_wording_changes_and_other_new_issues_do_not_erase_persistent_region():
     previous['diagnostics']['review_page_index'] = 1
     assert assess_repair_progress([old, previous], current)['repeated_concern_count'] == 0
     previous['diagnostics']['review_page_index'] = 0
+    previous['status'] = 'passed'
+    assert assess_repair_progress([old, previous], current)['repeated_concern_count'] == 0
+    previous['diagnostics']['review_page_index'] = 0
     old['issues'][0]['severity'] = previous['issues'][0]['severity'] = 'error'
     assert assess_repair_progress([old, previous], current)['repeated_concern_count'] == 0

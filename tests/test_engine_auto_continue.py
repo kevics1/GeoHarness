@@ -182,6 +182,33 @@ async def test_failed_last_tool_batch_does_not_retry_automatically(tmp_path):
                for event in events)
 
 
+async def test_validation_rejections_are_counted_without_invented_execution_time(tmp_path):
+    class InvalidClient(ProbeClient):
+        async def stream_message(self, request):
+            async for event in super().stream_message(request):
+                if event.message.tool_uses:
+                    event.message.tool_uses[0].input['index'] = 'not-an-integer'
+                yield event
+
+    runtime = engine(tmp_path, InvalidClient(tool_turns=1), ProbeTool(), turns=2)
+    _ = [event async for event in runtime.submit_message('invalid parameter')]
+    assert runtime.tool_metadata['geo_tool_call_counts']['probe'] == {'calls': 1, 'errors': 1}
+    assert runtime.tool_metadata['geo_tool_metrics'] == []
+
+
+def test_restored_request_metrics_merge_only_when_new_completion_arrives(tmp_path):
+    client = ProbeClient()
+    client.request_metrics = [{'request_id': 'new', 'attempt': 1, 'elapsed_seconds': 2}]
+    runtime = engine(tmp_path, client, ProbeTool())
+    runtime.tool_metadata['geo_request_metrics'] = [
+        {'request_id': 'restored', 'attempt': 1, 'elapsed_seconds': 1}]
+    runtime._persist_query_mode()
+    saved = runtime.tool_metadata['geo_request_metrics']
+    assert [m['request_id'] for m in saved] == ['restored', 'new']
+    runtime._persist_query_mode()
+    assert runtime.tool_metadata['geo_request_metrics'] is saved
+
+
 async def test_fresh_error_at_boundary_gets_a_followup_chance(tmp_path):
     client, tool = ProbeClient(tool_turns=2), ProbeTool(failure_indices=(2,))
     runtime = engine(tmp_path, client, tool, turns=2)

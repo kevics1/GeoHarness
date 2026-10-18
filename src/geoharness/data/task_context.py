@@ -342,6 +342,19 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
     data = {"profiles": compact, "existing_outputs": records, "qgis_jobs": qgis_jobs,
             "data_refs": references, "map_drafts": drafts,
             "data_root": str(_root(cwd, config.data.file_dir or "."))}
+    # One complete DATA_REFS record is enough; avoid resending its schema/hash/lineage
+    # in both profiles and output history. Keep every differing observation intact.
+    by_path = {item.get("path"): (ref, item) for ref, item in references.items()}
+    for item in [*compact, *records]:
+        shared = by_path.get(item.get("path"))
+        if not shared:
+            continue
+        ref, record = shared
+        item["data_ref"] = ref
+        for key in list(item):
+            if (key not in {"path", "name", "data_ref"} and key in record
+                    and item[key] == record[key]):
+                item.pop(key)
     data['analysis_stages'] = {name: {key: record.get(key) for key in
         ('status', 'manifest_path', 'failure')} for name, record in
         list(metadata.get('analysis_workflow_state', {}).items())[-8:]

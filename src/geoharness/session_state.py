@@ -260,6 +260,11 @@ def _workflow(raw: Any, secrets: tuple[str, ...], *, restoring: bool) -> dict[st
         "provider_calls_total": _counter(raw.get("provider_calls_total")) or 0,
         "cache_hits_total": _counter(raw.get("cache_hits_total")) or 0,
         "repair_attempts": validated_attempts,
+        "review_tasks": {key: task for key, task in
+            list((raw.get("review_tasks") or {}).items())[-64:]
+            if _text(key, 256) and _text(task, 4096)
+            and not any(secret in task or secret in key for secret in secrets)}
+            if isinstance(raw.get("review_tasks"), dict) else {},
     }
 
 
@@ -563,6 +568,16 @@ def restore_geo_session_state(
     metadata["geo_request_failures"] = failures
     metadata["geo_query_recovery"] = recovery
     metadata['analysis_workflow_state'] = analysis_stages
+    from geoharness.telemetry import safe_call_counts, safe_metrics
+
+    for key in ('geo_request_metrics', 'geo_tool_metrics'):
+        metadata[key] = safe_metrics(restored_metadata.get(key),
+            limit=config.agent.request_metrics_limit, secrets=secrets)
+    metadata['geo_tool_call_counts'] = safe_call_counts(
+        restored_metadata.get('geo_tool_call_counts'))
+    saved_timing = restored_metadata.get('geo_task_timing', {})
+    if isinstance(saved_timing, dict) and _seconds(saved_timing.get('started_at')) is not None:
+        metadata['geo_task_timing'] = {'started_at': saved_timing['started_at']}
     return True
 
 
@@ -666,7 +681,7 @@ class GeoSessionBackend(OpenHarnessSessionBackend):
         config = source.get("geoharness_config")
         if isinstance(config, GeoConfig):
             persisted[GEO_SESSION_CHECKPOINT_KEY] = _checkpoint(source, root, config)
-            from geoharness.telemetry import safe_metrics
+            from geoharness.telemetry import safe_call_counts, safe_metrics, timing_summary
 
             for key in ("geo_request_metrics", "geo_tool_metrics"):
                 persisted[key] = safe_metrics(source.get(key),
@@ -674,6 +689,8 @@ class GeoSessionBackend(OpenHarnessSessionBackend):
             timing = source.get("geo_task_timing", {})
             if isinstance(timing, dict) and _seconds(timing.get("started_at")) is not None:
                 persisted["geo_task_timing"] = {"started_at": timing["started_at"]}
+            persisted['geo_tool_call_counts'] = safe_call_counts(source.get('geo_tool_call_counts'))
+            persisted['geo_timing_summary'] = timing_summary(persisted, now=time.time())
         messages = sanitize_conversation_messages(messages)
         sid = session_id or uuid4().hex[:12]
         if not isinstance(sid, str) or not sid or len(sid) > 128 or re.fullmatch(

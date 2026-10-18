@@ -64,12 +64,16 @@ class AgentConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     max_tokens: int = Field(default=16384, ge=1024, le=65536)
-    task_budget_seconds: float | None = Field(default=None, gt=0, le=86400)
-    delivery_reserve_seconds: float = Field(default=180, ge=0, le=3600)
+    task_budget_seconds: float | None = Field(default=None, gt=0, le=86400,
+        description="Compatibility performance target only; never stops work or limits calls.")
+    delivery_reserve_seconds: float = Field(default=180, ge=0, le=3600, deprecated=True,
+        description="Compatibility only; elapsed time does not force delivery.")
     request_metrics_limit: int = Field(default=2048, ge=64, le=10000)
     context_keep_recent_results: int = Field(default=6, ge=1, le=100)
     context_result_max_chars: int = Field(default=4000, ge=1000, le=1000000)
-    context_archive_dir: str = ".geoharness/runs/context"
+    context_archive_code: bool = True
+    dynamic_context_as_message: bool = True
+    context_archive_dir: str = "context"
     auto_continue: bool = Field(default=True, description=(
         "Continue pending tool results after a turn batch when new successful progress exists."
     ))
@@ -126,6 +130,8 @@ class MapReviewConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     enabled: bool = True
     model: str = ""
+    default_task: str = "按当前页用途检查图片中可见的裁切、文字、符号、图例和布局问题。"
+    recover_invalid_response: bool = True
     api_key: str = ""
     base_url: str = ""
     request_extra_body: dict[str, Any] = Field(

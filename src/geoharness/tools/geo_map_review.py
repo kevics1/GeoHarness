@@ -30,7 +30,9 @@ def _input_schema(schema):
 class GeoMapReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra=_input_schema)
     file_path: str = Field(description="PNG/JPEG map image to inspect; PDF/SVG need a PNG preview.")
-    task: str = Field(description="User's map requirements and the analysis goal.")
+    task: str = Field(default="", description=(
+        "仅首次或检查要求改变时填写。复审省略则复用同地图的检查目标；"
+        "不要把最终复核等进度措辞当作新目标。"))
     map_id: str = Field(default="", description="Stable logical map ID; keep it across versions.")
     evidence: dict[str, Any] = Field(
         default_factory=dict,
@@ -59,6 +61,38 @@ class GeoMapReviewInput(BaseModel):
         if self.auto_repair is True:
             raise ValueError("geo_map_review is read-only; automatic repair has been removed")
         return self
+
+
+def review_goal(task, metadata, identity, config):
+    state = metadata.setdefault('map_workflow_state', {})
+    tasks = state.setdefault('review_tasks', {})
+    goal = task.strip() or tasks.get(identity) or config.map_review.default_task
+    tasks[identity] = goal
+    for old in list(tasks)[:-64]:
+        tasks.pop(old)
+    return goal
+
+
+async def review_pixels(path, *, arguments, context, identity, evidence):
+    config = context.metadata['geoharness_config']
+    task = review_goal(arguments.task, context.metadata, identity, config)
+    kwargs = dict(config=config, task=task, evidence=evidence,
+        retry_service_failure=arguments.retry_service_failure, metadata=context.metadata,
+        map_id=identity, client=context.metadata.get('map_review_client'), pixel_only=True)
+    result, flags = await review_with_budget(path, **kwargs,
+        retry_invalid_response=arguments.retry_invalid_response)
+    stage = result.diagnostics.get('failure_stage')
+    # Recover the response contract here, without another main-model turn or any redraw.
+    if (stage in {'json', 'schema'} and config.map_review.recover_invalid_response
+            and 'retry_invalid_response' not in arguments.model_fields_set
+            and not flags.get('invalid_response_retry')):
+        first_sent = bool(flags.get('request_sent'))
+        result, flags = await review_with_budget(path, **kwargs, retry_invalid_response=True)
+        result.diagnostics.update(format_recovery_attempted=True,
+                                  format_recovery_initial_stage=stage)
+        flags['format_recovery_request_count'] = int(first_sent) + int(
+            bool(flags.get('request_sent')))
+    return result, flags
 
 
 def _verified_render_evidence(
@@ -298,13 +332,9 @@ class GeoMapReviewTool(BaseTool):
 
     async def _review_without_ledger(self, arguments, context, path, error):
         """Review pixels locally without certifying or automatically repairing a map job."""
-        config = context.metadata["geoharness_config"]
-        result, budget = await review_with_budget(path, config=config, task=arguments.task,
-            evidence={"backend": "unknown", "ledger_unavailable": True},
-            retry_invalid_response=arguments.retry_invalid_response,
-            retry_service_failure=arguments.retry_service_failure,
-            metadata=context.metadata, map_id=arguments.map_id or path.stem,
-            client=context.metadata.get("map_review_client"), pixel_only=True)
+        result, budget = await review_pixels(path, arguments=arguments, context=context,
+            identity=arguments.map_id or path.stem,
+            evidence={"backend": "unknown", "ledger_unavailable": True})
         result.diagnostics.update(ledger_error=error, repair_authorized=False,
                                   quality_status="draft", receipt_status="unregistered")
         payload = public_payload(result.model_dump())
@@ -391,13 +421,8 @@ class GeoMapReviewTool(BaseTool):
             evidence.pop("render_metadata", None)
             evidence.pop("backend_proof", None)
         # Geometry checks belong to rendering; they never substitute for image review.
-        result, budget = await review_with_budget(
-            path, config=config, task=arguments.task, evidence=evidence,
-            retry_invalid_response=arguments.retry_invalid_response,
-            retry_service_failure=arguments.retry_service_failure,
-            metadata=context.metadata, map_id=identity,
-            client=context.metadata.get("map_review_client"), pixel_only=True,
-        )
+        result, budget = await review_pixels(path, arguments=arguments, context=context,
+            identity=identity, evidence=evidence)
         from geoharness.cartography.review_progress import assess_repair_progress
 
         result.diagnostics['repair_progress'] = assess_repair_progress(

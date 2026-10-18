@@ -157,6 +157,7 @@ async def build_geo_runtime(
 
     # Refresh between model turns, including continue_pending; do not duplicate
     # data profiles in the persisted conversation or expose configuration secrets.
+    from geoharness.cartography.quality import _review_secrets
     from geoharness.data.task_context import model_data_context
     from geoharness.model_context import current_state_context, project_history
     from geoharness.task_budget import budget_context
@@ -166,8 +167,10 @@ async def build_geo_runtime(
         engine.tool_metadata) + model_data_context(
         engine.tool_metadata, cwd=cwd, config=config,
     )
+    archive_root = Path(config.execution.outputs_dir).expanduser()
+    archive_root = archive_root if archive_root.is_absolute() else cwd / archive_root
     api_client.history_projector = lambda request: project_history(
-        request, settings=config.agent, cwd=cwd)
+        request, settings=config.agent, cwd=archive_root, secrets=_review_secrets(config))
 
     # 8b. Warm up in the background: geopandas/rasterio imports plus the first
     # directory scans take a second or two (longer on cold AV caches). Doing
@@ -420,5 +423,3 @@ def _verify_mcp_isolation(bundle: RuntimeBundle, config: GeoConfig) -> None:
             len(leaked),
             leaked,
         )
-
-

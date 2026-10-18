@@ -105,7 +105,9 @@ def _attached_analysis(delivery: dict) -> list[dict]:
             measured = artifact_facts(sources[0], key=facts['key'],
                 numeric_fields=list(facts.get('numeric', {})),
                 group_by=list(facts.get('groups', {})),
-                predicates=[item['predicate'] for item in facts.get('counts', {}).values()])
+                predicates=[item['predicate'] for item in facts.get('counts', {}).values()],
+                include_median=any('median' in v for v in facts.get('numeric', {}).values()),
+                stratify_by=facts.get('stratify_by', ()))
             expected = {k: v for k, v in facts.items() if k != 'source'}
             actual = {k: v for k, v in measured.items() if k != 'source'}
             if actual != expected:
@@ -235,6 +237,12 @@ def build_delivery_summary(
         "analysis_explanation": explanation,
         "analysis": analysis,
         "attached_analysis_reports": analysis_reports,
+        "final_answer_facts": [{"report": r['report'], "source_sha256": r['source_sha256'],
+            "row_count": r['facts']['row_count'], "numeric": r['facts']['numeric'],
+            "groups": r['facts']['groups'], "counts": r['facts']['counts'],
+            "strata": r['facts'].get('strata', []), "method": r.get('method'),
+            "analysis_correctness": 'unverified'}
+            for r in analysis_reports if r['status'] == 'persisted_values_checked'],
         "page_reviews": page_reviews,
         "remaining_issues": remaining,
         "quality_notice": notice,
@@ -292,4 +300,6 @@ def write_delivery_summary(
     markdown_path.write_text(_markdown(summary), encoding="utf-8")
     return {"summary_json": str(json_path), "summary_markdown": str(markdown_path),
             "quality_notice": summary['quality_notice'],
+            "analysis_correctness": summary['analysis_correctness'],
+            "final_answer_facts": summary['final_answer_facts'],
             "remaining_issues": summary['remaining_issues']}

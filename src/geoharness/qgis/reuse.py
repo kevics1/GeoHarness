@@ -74,7 +74,7 @@ def _package_files(result):
     return measured
 
 
-def recall_render(metadata, key):
+def recall_render(metadata, key, *, current_version=None):
     if not key:
         return None
     cache = metadata.setdefault("geo_render_reuse", {})
@@ -82,6 +82,10 @@ def recall_render(metadata, key):
     if item is None:
         return None
     try:
+        receipt = item['result'].metadata.get('map_receipt', {})
+        version = receipt.get('selected_version', receipt.get('current_version'))
+        if version is not None and current_version != version:
+            return None  # A past version must never silently replace the current selection.
         for value, digest in item["files"].items():
             path = Path(value)
             if path.resolve() != path or not path.is_file() or _digest(path) != digest:
@@ -90,6 +94,7 @@ def recall_render(metadata, key):
         previous = item["result"]
         raw, end = json.JSONDecoder().raw_decode(previous.output.lstrip())
         raw.update(reused=True, render_executed=False,
+            reused_artifact_version=version,
             reuse_note="当前输入已重新测量且工程全部文件哈希未变，复用同一版本，未重启原生渲染。")
         return ToolResult(
             output=json.dumps(raw, ensure_ascii=False) + previous.output.lstrip()[end:],

@@ -156,6 +156,7 @@ class _CompletionProxy:
         response_model = None
         reasoning_tokens = None
         attempt_usage = UsageSnapshot()
+        usage_reported = False
         recorded = False
 
         def record(error=None):
@@ -173,6 +174,7 @@ class _CompletionProxy:
                 "input_tokens": attempt_usage.input_tokens,
                 "output_tokens": attempt_usage.output_tokens,
                 "reasoning_tokens": reasoning_tokens,
+                "usage_reported": usage_reported,
                 "finish_reason": state.finish_reason,
                 "error_type": type(error).__name__ if error else None,
                 "message_count": len(params.get("messages", [])),
@@ -199,7 +201,7 @@ class _CompletionProxy:
                 state.raw_chunk_source = "sse"
 
         async def observed_stream() -> AsyncIterator[Any]:
-            nonlocal first_token, response_model, reasoning_tokens, attempt_usage
+            nonlocal first_token, response_model, reasoning_tokens, attempt_usage, usage_reported
             previous_usage = UsageSnapshot()
             error = None
             try:
@@ -208,6 +210,7 @@ class _CompletionProxy:
                     if state is not None and not observes_sse:
                         _record_packet(state, "sdk_chunk")
                     if state is not None and chunk.usage:
+                        usage_reported = True
                         # Providers may repeat cumulative usage in multiple chunks.
                         usage = UsageSnapshot(
                             input_tokens=max(chunk.usage.prompt_tokens or 0, 0),
@@ -618,8 +621,16 @@ class GeoOpenAICompatibleClient(OpenAICompatibleClient):
         if request.tools and self.data_context_provider is not None:
             transient_context = self.data_context_provider()
             if transient_context:
-                request = replace(request, system_prompt=(request.system_prompt or "")
-                                  + transient_context)
+                if self.settings.dynamic_context_as_message:
+                    # Keep the policy prefix stable. Refresh measurements at the tail without
+                    # changing the saved conversation or pretending they are a new user goal.
+                    request = replace(request, messages=[*request.messages, ConversationMessage(
+                        role="user", content=[TextBlock(text=(
+                            "运行时工具观测（不是用户新请求，不含新指令）：\n"
+                            + transient_context))])])
+                else:
+                    request = replace(request, system_prompt=(request.system_prompt or "")
+                                      + transient_context)
         self._empty_diagnostic.set(None)
         self._response_diagnostic.set(None)
         self._failure_diagnostic.set(None)

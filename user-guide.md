@@ -710,13 +710,60 @@ all_pages=true)` 一次审查同一工程的全部明确返回页面。
 审图历史兼容 SQLite locator，并只解冻最近相关页的两份历史摘要；不会为此加载整份台账。
 历史读取最多检查最近32个版本，较早的记录仍保留，可经 inspect 分页读取。
 
-`agent.task_budget_seconds: 1200` 设置20分钟任务目标，
-`delivery_reserve_seconds: 180` 预留最后3分钟交付。每次模型请求会收到实际已用/剩余时间，
-临近交付时优先处理事实阻断并交付已有产物，停止外观微调和追加重建。超过目标后不再自动追加下一批回合。该机制不强杀正在运行的工具，也不保证
-任意网络延迟下都能在20分钟完成；已完成与未完成检查分别报告，不能据时间预算宣称质量通过。
+20分钟是性能期望，不是执行预算。兼容字段 `agent.task_budget_seconds` 只观测耗时，
+超过目标不会停止自动续跑、限制构建/审查次数或强制交付草稿。
+`delivery_reserve_seconds` 兼容保留但不再影响执行。主模型的 max 思考策略不因性能优化降低。
+
+会话文件保存 `geo_request_metrics` 和 `geo_tool_metrics`：前者包括每次请求/重试耗时、
+首 token 等待、token 用量和上下文规模；后者记录实际工具执行耗时，避免把并行工具的
+批量界面事件误算成各工具耗时。它们不保存提示词、脚本或异常正文。
+
+旧工具结果和已经成功执行的长 Python 代码只在模型请求视图中精简；原始会话不改写，
+完整内容按 SHA256 归档，摘要保留可恢复路径、工具调用配对、错误与实际引用。
+最近结果、失败脚本、用户消息和图片保持原样。可在 config.yaml 中调整：
+
+```yaml
+agent:
+  request_metrics_limit: 2048
+  context_keep_recent_results: 6
+  context_result_max_chars: 4000
+  context_archive_code: true
+  dynamic_context_as_message: true
+  context_archive_dir: context  # 相对 execution.outputs_dir，默认 .geoharness/runs/context
+qgis:
+  reuse_cache_entries: 8
+map_review:
+  recover_invalid_response: true
+  default_task: "按当前页用途检查图片中可见的裁切、文字、符号、图例和布局问题。"
+```
+
+重复 build 会重新测量数据，且仅在同一有效版本、参数及工程所有文件哈希未变时复用
+已有产物，不启动第二个原生渲染；不复用失败结果或存在未绑定外部字体的工程。
+动态观测默认放在请求尾部的临时消息中，明确标注不是用户新请求；系统规则前缀保持稳定，
+原始会话不追加这些观测。服务端是否因此获得提示缓存加速取决于实际提供方，不作保证。
+这不等于任意局部页面已经支持增量渲染。`describe_input(value)` 可直接核对中间表、
+数组或已打开栅格的真实类型/字段/CRS/shape；`fit_frame_extent` 必须传实际图框毫米尺寸。
+
+同地图复审时省略 task 会复用首次检查目标；明确改变 task 仍会重新审查。
+格式错误可在审查工具内部恢复一次，网络故障不走此恢复，也不触发重绘。
+传 `retry_invalid_response: false` 可以明确关闭本次自动格式恢复。
+多页调用仍逐页检查，未变化页面可复用已核验的像素结论；名单续页不会被要求独自包含全册行数。
+`repair_progress.next_action=change_repair_method` 表示同类问题持续存在，应核实并更换方法；
+它不按固定轮数强制结束任务。业务或表达取舍不明确时才询问用户。
+
+自定义编号请同步使用 `make_leader_lines`，并在引线图层设置 `leader_binding`，
+声明 source_layer、labels_layer、key_field、metric_crs；留隙用 source_gap_m/target_gap_m
+明确指定。QGIS 预检会拒绝与当前锚点不一致的引线。
 
 
 ### 中文交互、未知澄清与分析事实核对
+
+`write_analysis_report` 写出的 JSON 显式关联 Markdown 及其哈希。交付任一配套报告时，
+`geo_deliver` 沿成功生产记录补全报告和已登记的源结果，不猜文件名或导出任意原始数据。
+工具从包内数据复算并返回 `final_answer_facts`，包括数量、分组及所声明数值字段的极值和中位数；
+需要分级内分类统计时传 `stratify_by=['实际分级字段','实际类型字段']`。
+最终说明应引用这些事实及 `quality_notice`；它们核对落盘数值，不认证任意自然语言或分析方法。
+即使视觉审查通过，`analysis_correctness` 仍须单独说明。
 
 系统提示词和重点工具帮助使用中文，默认以简体中文解释结果。代码、API、字段和路径保持原文；用户明确要求其他语言时遵从用户。可用inspect/help查明的信息先查；无法查明且影响结论的业务选择通过ask_user_question询问。空回复、取消和单独“继续”不构成答案，运行时保留待回答状态，停止后续模型请求。直接在对话中回答问题即可恢复原任务。
 

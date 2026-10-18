@@ -33,6 +33,9 @@ def test_moving_anchors_invalidates_old_leaders_and_regeneration_fixes_them():
     json.dumps(bad, allow_nan=False)
     fixed = make_leader_lines(points, anchors, key='id', metric_crs=3857)
     assert fixed.attrs['leader_check']['status'] == 'passed'
+    custom = make_leader_lines(points.rename_geometry('actual_point'),
+                              anchors.rename_geometry('actual_anchor'), key='id', metric_crs=3857)
+    assert custom.attrs['leader_check']['status'] == 'passed'
 
 
 def test_trimmed_symbol_edge_gaps_must_be_explicit_and_geometry_still_matches():

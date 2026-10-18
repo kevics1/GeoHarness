@@ -46,6 +46,10 @@ def test_render_cache_binds_data_and_rechecks_every_packaged_file(tmp_path):
     cached = recall_render(state, "actual-key")
     assert cached.metadata["reused"] and not cached.metadata["render_executed"]
     assert result.metadata["render_executed"]  # Original result is untouched.
+    result.metadata['map_receipt'] = {'selected_version': 1}
+    remember_render(state, 'versioned', result, limit=8)
+    assert recall_render(state, 'versioned', current_version=2) is None
+    assert recall_render(state, 'versioned', current_version=1) is not None
     source.write_bytes(b"changed bytes")
     assert recall_render(state, "actual-key") is None
     payload = {"layers": [{"file_path": "random-temporary-path", "name": "source"}],
@@ -68,3 +72,4 @@ def test_describe_input_measures_intermediate_types_shapes_and_nulls():
     assert actual["rows"] == 2 and actual["null_counts"] == {"numeric_text": 1}
     actual = describe_input(np.array([[1., float("inf")]]))
     assert actual["shape"] == [1, 2] and actual["nonfinite_count"] == 1
+    assert describe_input(pd.DataFrame({'crs': ['text'], 'geometry': ['text']}))['kind'] == 'table'

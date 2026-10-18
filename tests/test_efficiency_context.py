@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from geoharness.config.settings import AgentConfig
 from geoharness.model_context import project_history
 from geoharness.performance import MeasuredRegistry
-from geoharness.telemetry import safe_metrics
+from geoharness.telemetry import safe_metrics, timing_summary
 
 
 def history():
@@ -66,6 +66,24 @@ def test_projection_failure_and_non_json_keep_full_context(tmp_path, monkeypatch
     assert project_history(request, cwd=tmp_path, settings=AgentConfig())[0] == request
 
 
+def test_old_successful_code_projection_is_explicit_recoverable_and_never_saves_secrets(tmp_path):
+    request = history()
+    original_code = "print('measured')\n" * 500
+    request.messages[3].content[0].input['code'] = original_code
+    projected, stats = project_history(request, cwd=tmp_path, settings=AgentConfig())
+    block = projected.messages[3].content[0]
+    assert stats['archived_inputs'] == 1 and block.id == '1'
+    assert request.messages[3].content[0].input['code'] == original_code
+    archive = next(tmp_path.rglob('*.py'))
+    assert archive.read_text(encoding='utf-8') == original_code
+    assert str(archive) in block.input['code'] and '不能' in block.input['code']
+    guarded = tmp_path / 'guarded'
+    no_archive, stats = project_history(request, cwd=guarded, settings=AgentConfig(),
+                                        secrets=('measured',))
+    assert stats['archived_inputs'] == 0
+    assert no_archive.messages[3].content[0] == request.messages[3].content[0]
+
+
 @pytest.mark.asyncio
 async def test_tool_metrics_measure_parallel_execution_independently_and_keep_result():
     class Input(BaseModel):
@@ -102,3 +120,13 @@ def test_persisted_metrics_exclude_payloads_credentials_and_nonfinite_values():
         limit=10, secrets=("secret-key",))
     assert result == [{"request_id": "one", "elapsed_seconds": 1.1,
                        "input_tokens": 12, "is_error": False}]
+
+
+def test_timing_summary_uses_interval_union_not_parallel_sum():
+    summary = timing_summary({'geo_task_timing': {'started_at': 90},
+        'geo_tool_metrics': [{'started_at': 100, 'elapsed_seconds': 10},
+                             {'started_at': 105, 'elapsed_seconds': 10}],
+        'geo_request_metrics': [{'started_at': 115, 'elapsed_seconds': 5}]}, now=130)
+    assert summary['wall_elapsed_seconds'] == 40
+    assert summary['measured_busy_seconds'] == 20
+    assert summary['unattributed_seconds'] == 20

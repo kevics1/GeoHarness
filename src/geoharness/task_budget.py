@@ -6,6 +6,8 @@ import time
 
 def start_task(metadata, config):
     metadata["geo_task_timing"] = {"started_at": time.time()}
+    metadata["geo_tool_call_counts"] = {}
+    metadata.setdefault("geo_current_state", {}).clear()
 
 def budget_status(metadata, config, *, now=None):
     seconds = config.agent.task_budget_seconds

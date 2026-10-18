@@ -895,6 +895,7 @@ class GeoQgisProjectTool(BaseTool):
                 if arguments.action == "spec":
                     return ToolResult(output=json.dumps({"status": "draft_saved",
                         "spec_ref": reference, "spec_path": path,
+                        "input_normalizations": input_normalizations,
                         "inspect_call": {"action": "inspect", "spec_ref": reference},
                         "layers": [{"layer_index": index, "layer_key": layer.get("layer_key"),
                                     "name": layer.get("name", "")}
@@ -1097,7 +1098,13 @@ class GeoQgisProjectTool(BaseTool):
                     "changed; run preflight again", is_error=True,
                     metadata={"deterministic_error": True, "render_executed": False})
         reuse_key = render_key(payload, config) if arguments.action == "create" else None
-        reused = recall_render(context.metadata, reuse_key)
+        current_version = None
+        if reuse_key and owner:
+            from geoharness.cartography.jobs import map_mutation_state
+
+            current_version = map_mutation_state(context.metadata, cwd=context.cwd,
+                config=config, map_id=owner.map_id)['latest_version']
+        reused = recall_render(context.metadata, reuse_key, current_version=current_version)
         if reused is not None:
             return reused
         if arguments.action == "preflight":

@@ -7,26 +7,50 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from openharness.engine.messages import ToolResultBlock
+from openharness.engine.messages import ToolResultBlock, ToolUseBlock
 from openharness.utils.fs import atomic_write_text
 
 
-def project_history(request, *, settings, cwd):
+def project_history(request, *, settings, cwd, secrets=()):
     """Only archive old Geo tool results; preserve calls, user text, images and recent results."""
     calls = {block.id: block.name for message in request.messages for block in message.tool_uses}
     results = [block for message in request.messages for block in message.content
                if isinstance(block, ToolResultBlock)]
     old = {id(block) for block in results[:-settings.context_keep_recent_results]}
+    old_calls = {b.tool_use_id for b in results if id(b) in old and not b.is_error}
     messages = []
-    saved = count = 0
+    saved = count = codes = 0
     archive = Path(settings.context_archive_dir).expanduser()
     archive = (archive if archive.is_absolute() else Path(cwd) / archive).resolve()
     for message in request.messages:
         content = []
         for block in message.content:
+            if (settings.context_archive_code and isinstance(block, ToolUseBlock)
+                    and block.id in old_calls and block.name == 'geo_python'
+                    and isinstance(block.input.get('code'), str)
+                    and len(block.input['code']) > settings.context_result_max_chars
+                    and not any(s in block.input['code'] for s in secrets)):
+                code = block.input['code']
+                digest = hashlib.sha256(code.encode('utf-8')).hexdigest()
+                path = archive / (digest + '.py')
+                try:
+                    if (not path.is_file()
+                            or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+                        atomic_write_text(path, code)
+                    stub = ('# 历史调用代码摘要，不能将此摘要作为新脚本执行。\n'
+                            f'# full_code_path: {path}\n# full_code_sha256: {digest}\n')
+                    if len(stub) < len(code):
+                        content.append(block.model_copy(update={
+                            'input': {**block.input, 'code': stub}}))
+                        saved += len(code) - len(stub)
+                        codes += 1
+                        continue
+                except OSError:
+                    pass
             if (id(block) not in old or not isinstance(block, ToolResultBlock)
                     or not calls.get(block.tool_use_id, "").startswith("geo_")
-                    or len(block.content) <= settings.context_result_max_chars):
+                    or len(block.content) <= settings.context_result_max_chars
+                    or any(s in block.content for s in secrets)):
                 content.append(block)
                 continue
             try:
@@ -59,7 +83,8 @@ def project_history(request, *, settings, cwd):
                 # Projection is an optimization: a write failure must not lose context.
                 content.append(block)
         messages.append(message.model_copy(update={"content": content}))
-    return replace(request, messages=messages), {"archived_results": count, "saved_chars": saved}
+    return replace(request, messages=messages), {
+        "archived_results": count, "archived_inputs": codes, "saved_chars": saved}
 
 
 def current_state_context(metadata):
