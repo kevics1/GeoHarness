@@ -117,7 +117,8 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
     assert not mapped.is_error, mapped.output
     job_id = mapped.metadata["map_id"]
     assert "map_job_state" in context.metadata
-    assert Path(mapped.metadata["qgis_project"]).parent == tmp_path / "exports/editable"
+    assert not mapped.metadata.get('qgis_project')
+    assert not list(tmp_path.rglob('*.qgz'))
     footer = mapped.metadata["layout"]["footer_text"]
     for text in ("受影响 2", "未影响 1", "20 m", "EPSG:32648", "EPSG:32647"):
         assert text in footer
@@ -127,7 +128,9 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
     assert "qgis_patch" not in review_prompt
     assert '"page_index"' in review_prompt
     receipt = mapped.metadata["map_receipt"]
-    assert receipt["quality_status"] == "passed"
+    assert receipt['quality_status'] == 'passed'
+    assert receipt['stages']['packaged']['status'] == 'unverified'
+    assert receipt['stages']['packaged']['preview_integrity'] == 'passed'
     assert receipt["analysis_correctness"] == "unverified"
     assert all(
         receipt["stages"][stage]["status"] == "passed"
@@ -136,7 +139,6 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
             "rendered",
             "layout_checked",
             "visual_checked",
-            "packaged",
         )
     )
     denied = await GeoCartographyTool().execute(

@@ -170,8 +170,10 @@ def relocate_package(metadata: dict, destination: Path, config: Any) -> dict:
         raise
     result = {**metadata, "project_dir": str(destination), "publication": publication}
     for key in ("project_file", "project_manifest", "preview_path", "primary_map", "output_path"):
-        result[key] = str(destination / Path(metadata[key]).relative_to(source))
-    result["qgis_project"] = result["project_file"]
+        if metadata.get(key):
+            result[key] = str(destination / Path(metadata[key]).relative_to(source))
+    if result.get('project_file'):
+        result["qgis_project"] = result["project_file"]
     if metadata.get("native_facts", {}).get("page_previews"):
         result["native_facts"] = {**metadata["native_facts"], "page_previews": [
             {**item, "path": str(destination / Path(item["path"]).relative_to(source))}
@@ -227,7 +229,33 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
                 # Consume a writer failure without replacing the user's cancellation.
                 pass
             raise
-        bindings = [layer.pop("_source_binding") for layer in layers]
+        from geoharness.data.task_context import resolve_registered_path
+
+        bindings = []
+        for index, layer in enumerate(layers):
+            binding = layer.pop('_source_binding')
+            locator = binding.get('file_path')
+            resolved = (resolve_registered_path(locator, context.metadata, cwd=context.cwd,
+                config=config) if locator else '')
+            path = Path(resolved) if resolved else None
+            if path is not None and not path.is_absolute():
+                path = context.cwd / path
+            if path is not None and path.is_file():
+                binding.update(file_path=str(path.resolve()), source_layer='')
+            else:
+                # Inline/PostGIS data has no persistent local source. Preserve
+                # its real input once, before the temporary bridge files vanish;
+                # it is input evidence, not an editable project or layer copy of
+                # an existing business file.
+                inputs = Path(config.execution.outputs_dir).expanduser()
+                inputs = inputs if inputs.is_absolute() else context.cwd / inputs
+                inputs.mkdir(parents=True, exist_ok=True)
+                frozen = Path(tempfile.mkdtemp(prefix='map-input-', dir=inputs)) / (
+                    f'source-{index}' + Path(layer['file_path']).suffix)
+                shutil.copy2(layer['file_path'], frozen)
+                layer['file_path'] = str(frozen)
+                binding.update(file_path=str(frozen), source_layer='features', derivation=None)
+            bindings.append(binding)
         native = GeoQgisProjectInput(
             action="preflight" if args.action == "preflight" else "create",
             layers=layers,
@@ -345,10 +373,10 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
                           is_error=True, metadata={**metadata, **checked.metadata})
     return ToolResult(
         output=(
-            f"QGIS map: {desired}\nEditable project: {metadata['project_file']}\n"
+            f"QGIS预览：{desired}\n预览目录：{metadata['project_dir']}\n"
             f"Visual review: {checked.metadata['review_status']}\n"
             f"Report: {checked.metadata.get('review_path', 'unverified')}\n"
-            "Use the recorded primary_map PNG with geo_deliver; PDF is an additional export."
+            "将primary_map或project_dir交给geo_deliver生成一次可编辑工程；PDF可附加。"
         ),
         metadata={
             **metadata,
@@ -359,9 +387,8 @@ async def render_qgis_map(tool: Any, args: Any, rule: dict, context: Any) -> Too
             "image_path": str(primary),
             "image_sha256": digest,
             "backend": "qgis",
-            "project_fidelity": "saved_layout",
+            "project_fidelity": metadata.get('project_fidelity', 'preview_only'),
             "project_dir": metadata["project_dir"],
-            "project_file": metadata["project_file"],
             "project_manifest": metadata["project_manifest"],
             "map_id": args.map_id,
             "map_receipt": receipt,

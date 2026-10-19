@@ -81,7 +81,7 @@ async def test_native_incremental_spec_paginates_all_roster_rows(tmp_path):
         patches=[{"path": ["title"], "value": "居民点名册"}]), context)
     assert not checked.is_error, checked.output
     created = await tool.execute(GeoQgisProjectInput(action="create",
-        plan_ref=checked.metadata["plan_ref"]), context)
+        plan_ref=checked.metadata["plan_ref"]), context, _materialize=True)
     assert not created.is_error, created.output
     manifest = json.loads(Path(created.metadata["project_manifest"]).read_text(encoding="utf-8"))
     tables = manifest["layout"]["label_tables"]

@@ -35,7 +35,7 @@ async def test_number_table_and_detail_labels_are_retained_in_saved_layout(tmp_p
                 "detail_frame": {"focus_layers": [1], "label_layers": [1]},
                 "label_table": {"layer_index": 1, "fields": ["number", "name"],
                                     "headers": {"number": "编号", "name": "名称"},
-                                "columns": 3, "height_mm": 55}}), context)
+                                "columns": 3, "height_mm": 55}}), context, _materialize=True)
     assert not created.is_error, created.output
     manifest = json.loads(Path(created.metadata["project_manifest"]).read_text(encoding="utf-8"))
     tables = manifest["layout"]["label_tables"]

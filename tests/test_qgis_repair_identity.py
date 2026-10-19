@@ -45,7 +45,7 @@ async def test_native_package_rebuild_preserves_business_schema_and_analysis(
     created = await tool.execute(GeoQgisProjectInput(action="create", dpi=72,
         layers=[{"file_path": str(source), "name": "assets", "label_field": "name"}],
         analysis_manifests=[analysis["manifest_path"]],
-        layout={"legend": False, "scale_bar": False}), context)
+        layout={"legend": False, "scale_bar": False}), context, _materialize=True)
     assert not created.is_error, created.output
     manifest_path = Path(created.metadata["project_manifest"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

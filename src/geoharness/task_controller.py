@@ -372,7 +372,12 @@ async def execute_direct(context, tool, arguments):
 
     from geoharness.task_store import committed_result
 
-    values = arguments.model_dump(mode='json')
+    # Preserve true explicit-field identity across automatic dispatch. A full
+    # model_dump() materializes every default and makes a frozen spec_ref/plan_ref
+    # call look as if the caller supplied unrelated fields; revalidation then
+    # rejects legitimate runs. Unset fields are reconstructed by the tool's
+    # Pydantic defaults at execution time.
+    values = arguments.model_dump(mode='json', exclude_unset=True)
     identity = 'auto_' + tool.name + '_' + _hash(values)[:16]
     node = TaskNode(id=identity, tool=tool.name, arguments=values)
     try:

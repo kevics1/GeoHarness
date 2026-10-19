@@ -37,7 +37,9 @@ async def test_real_preflight_short_create_and_readable_report(tmp_path):
     assert not read.is_error, read.output
     created = await tool.execute(GeoQgisProjectInput(action="create", plan_ref=reference), context)
     assert not created.is_error, created.output
-    assert Path(created.metadata["project_file"]).is_file()
+    assert Path(created.metadata["preview_path"]).is_file()
+    assert not created.metadata.get('project_file')
+    assert not list(tmp_path.rglob('*.qgz'))
     assert len(created.output) < 16000
     assert "project_manifest" in created.output
     saved = report_path.read_bytes()

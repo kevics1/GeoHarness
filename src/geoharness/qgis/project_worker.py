@@ -38,7 +38,7 @@ def _layout_input_digest(payload: dict[str, Any]) -> str:
         "action", "map_id", "output_path", "output_format", "project_format",
         "strict_layout", "_frozen_frames", "_consume_plan",
         "_creation_spec", "_layout_origin", "_layout_zoom_history", "_candidate_probe",
-        "_page_reuse",
+        "_page_reuse", "_preview_only",
     }}
     bound["layout"] = {key: value for key, value in (payload.get("layout") or {}).items()
                        if key != "layout_plan"}
@@ -166,7 +166,19 @@ def _font_identities(layout: Any, layers: list[Any], context: Any) -> dict[str, 
     from qgis.PyQt.QtGui import QFont
 
     info = json.loads(layout.customProperty("geoharness/font", "{}"))
-    result = {"layout": _font_identity(QFont(info["family"]), info, context)}
+    # User-authored projects need not carry GeoHarness font properties. Bind
+    # actual label fonts too, rather than inventing a configured family.
+    from qgis.core import QgsLayoutItemLabel
+
+    result = {}
+    if info.get('family'):
+        result['layout'] = _font_identity(QFont(info['family']), info, context)
+    # Item UUIDs are regenerated when a structured layout is compiled again.
+    fonts = [_font_identity(item.textFormat().font(), {}, context)
+             for item in layout.items() if isinstance(item, QgsLayoutItemLabel)]
+    for index, identity in enumerate(sorted(fonts, key=lambda value: json.dumps(
+            value, sort_keys=True))):
+        result[f'item_{index}'] = identity
     for index, layer in enumerate(layers):
         if isinstance(layer, QgsVectorLayer) and layer.labelsEnabled() and layer.labeling():
             info = json.loads(layer.customProperty("geoharness/label_font", "{}"))
@@ -2373,13 +2385,23 @@ def _export_geometry_facts(layout: Any, labels: dict, dpi: float) -> dict[str, A
         "scope": "actual_export_geometry_and_native_symbol_state; not_pixel_acceptance"}
 
 
-def _packaged_creation_spec(spec: Any, layers: list[dict], layout: dict) -> dict | None:
-    """Rebuild only from a supplied creation contract and the delivered package assets."""
+def _packaged_creation_spec(
+    spec: Any, layers: list[dict], layout: dict, *, preview_only=False,
+) -> dict | None:
+    """Rebuild only from a supplied creation contract and the delivered package assets.
+
+    A frozen preview has no packaged layers yet. Keep its original locators so
+    delivery can re-open the same sources and materialize once; portable paths
+    are rewritten only for a project that was actually packaged.
+    """
     if not isinstance(spec, dict) or not isinstance(spec.get("parameters"), dict):
         return None
     result = json.loads(json.dumps(spec))
     parameters = result["parameters"]
     selected = parameters.get("layers", [])
+    parameters.pop("project_fidelity", None)
+    if preview_only:
+        return result
     if len(selected) != len(layers):
         raise ValueError("Creation parameters must match the packaged source layer array")
     for index, (source, packaged) in enumerate(zip(selected, layers)):
@@ -2420,6 +2442,9 @@ def _export_layout(
     tables = label_table_facts(layout)
     image_settings = QgsLayoutExporter.ImageExportSettings()
     image_settings.dpi = payload.get('dpi', 150)
+    # QGIS otherwise embeds a new Created timestamp on every identical export,
+    # making reviewed preview and final project PNGs have different file hashes.
+    image_settings.exportMetadata = False
     labels, roster_previews, page_previews = {}, [], []
     for index in range(layout.pageCollection().pageCount()):
         frame_ids = [name for name in ('main_map', 'detail_map')
@@ -2492,9 +2517,12 @@ def _save_package(
     payload: dict[str, Any],
     context: Any,
 ) -> dict[str, Any]:
+    """Export the frozen native layout; persist an editable project only at delivery."""
     from qgis.core import Qgis
 
-    layer_info = [
+    preview_only = bool(payload.get("_preview_only"))
+    layer_info = [{**_layer_metadata(layer), 'source_index': index}
+                  for index, layer in enumerate(layers)] if preview_only else [
         _snapshot_layer(layer, index, project, context) for index, layer in enumerate(layers)
     ]
     layout_plan = json.loads(layout.customProperty("geoharness/layout_plan", "null"))
@@ -2527,57 +2555,33 @@ def _save_package(
     engine_settings = project.labelingEngineSettings()
     engine_settings.setFlag(Qgis.LabelingFlag.CollectUnplacedLabels, True)
     project.setLabelingEngineSettings(engine_settings)
-    project_path = Path(context.output_path(None, "map." + payload.get("project_format", "qgz")))
-    project.setPresetHomePath("")
-    project.setFilePathStorage(Qgis.FilePathType.Relative)
-    project.setFileName(str(project_path))
-    if not project.write():
-        raise ValueError(f"QGIS could not save the packaged project: {project.error()}")
-    from qgis.core import QgsProject
+    project_path = None
+    if preview_only:
+        # Match QGIS's native save/read normalization without writing a project.
+        # Table widths and item coordinates otherwise round only at delivery,
+        # changing even visible glyph pixels between preview and final layout.
+        from qgis.core import QgsPrintLayout, QgsReadWriteContext
+        from qgis.PyQt.QtXml import QDomDocument
 
-    reopened = QgsProject()
-    try:
-        _register_project_fonts(project_path, context)
-        if not reopened.read(str(project_path)):
-            raise ValueError(f"QGIS could not reopen its packaged project: {reopened.error()}")
-        if not all(layer.isValid() for layer in reopened.mapLayers().values()):
-            raise ValueError("Packaged project contains invalid data references")
-        _restore_font_metadata(reopened, project_path, context, package=False)
-        _validate_project_coordinates(
-            reopened, reopened.layoutManager().printLayouts(),
-            strict_layout=payload.get("strict_layout", False),
-        )
-        saved_layout = next(
-            (item for item in reopened.layoutManager().printLayouts()
-             if item.name() == layout.name()),
-            None,
-        )
-        if saved_layout is None:
-            raise ValueError("Packaged project did not preserve the selected print layout")
-        if payload.get("_consume_plan") and layout_plan is not None:
-            saved_layers = sorted(reopened.mapLayers().values(), key=lambda item:
-                int(item.customProperty("geoharness/source_index", -1)))
-            expected = [(index, layer.id()) for index, layer in enumerate(layers)]
-            actual = [(int(layer.customProperty("geoharness/source_index", -1)), layer.id())
-                      for layer in saved_layers]
-            if actual != expected:
-                raise ValueError("Saved project did not preserve source_index to layer ID bindings")
-            for original, saved in zip(layers, saved_layers):
-                if _layer_metadata(original).get("feature_count") != \
-                        _layer_metadata(saved).get("feature_count"):
-                    raise ValueError("Saved project did not preserve native feature counts")
-            recorded = json.loads(saved_layout.customProperty("geoharness/layout_plan", "null"))
-            if recorded != layout_plan:
-                raise ValueError("Saved project did not preserve its frozen layout_plan")
-            _validate_plan_layout(saved_layout, reopened, saved_layers, payload,
-                                  layout_plan, context)
-        # Native save/read normalizes floating coordinates and scale-bar metrics.
-        # Export the saved layout so preview pixels correspond to the delivered QGS.
-        preview, output, native_facts = _export_layout(saved_layout, payload, context)
+        document = QDomDocument('preview-layout')
+        rw_context = QgsReadWriteContext()
+        element = layout.writeXml(document, rw_context)
+        document.appendChild(element)
+        normalized = QgsPrintLayout(project)
+        if not normalized.readXml(element, document, rw_context):
+            raise ValueError('QGIS could not normalize the preview layout in memory')
+        project.layoutManager().removeLayout(layout)
+        project.layoutManager().addLayout(normalized)
+        layout = normalized
+        # Do not write a .qgz or copy layer data. The in-memory project/layout is
+        # exactly the frozen contract that delivery will materialize and recheck.
+        _validate_project_coordinates(project, [layout],
+                                      strict_layout=payload.get("strict_layout", False))
+        preview, output, native_facts = _export_layout(layout, payload, context)
         from geoharness.qgis.layout_table import export_full_roster
 
-        export_full_roster(saved_layout, context)
-        layout_info = _layout_metadata(saved_layout)
+        export_full_roster(layout, context)
+        layout_info = _layout_metadata(layout)
         if payload.get("_consume_plan") and layout_plan is not None:
             for name, frame in native_facts["frames"].items():
                 planned = layout_plan["frames"].get(name)
@@ -2587,28 +2591,104 @@ def _save_package(
                     frame["focus_scope"] = planned.get("focus_scope",
                                                        "validated_current_layout_plan")
                     frame["subject_contracts"] = planned.get("subject_contracts", [])
-    finally:
-        reopened.clear()
+    else:
+        project_path = Path(context.output_path(
+            None, "map." + payload.get("project_format", "qgz")))
+        project.setPresetHomePath("")
+        project.setFilePathStorage(Qgis.FilePathType.Relative)
+        project.setFileName(str(project_path))
+        if not project.write():
+            raise ValueError(f"QGIS could not save the packaged project: {project.error()}")
+        from qgis.core import QgsProject
+
+        reopened = QgsProject()
+        try:
+            _register_project_fonts(project_path, context)
+            if not reopened.read(str(project_path)):
+                raise ValueError(f"QGIS could not reopen its packaged project: {reopened.error()}")
+            if not all(layer.isValid() for layer in reopened.mapLayers().values()):
+                raise ValueError("Packaged project contains invalid data references")
+            _restore_font_metadata(reopened, project_path, context, package=False)
+            _validate_project_coordinates(
+                reopened, reopened.layoutManager().printLayouts(),
+                strict_layout=payload.get("strict_layout", False),
+            )
+            saved_layout = next(
+                (item for item in reopened.layoutManager().printLayouts()
+                 if item.name() == layout.name()),
+                None,
+            )
+            if saved_layout is None:
+                raise ValueError("Packaged project did not preserve the selected print layout")
+            if payload.get("_consume_plan") and layout_plan is not None:
+                saved_layers = sorted(reopened.mapLayers().values(), key=lambda item:
+                    int(item.customProperty("geoharness/source_index", -1)))
+                expected = [(index, layer.id()) for index, layer in enumerate(layers)]
+                actual = [(int(layer.customProperty("geoharness/source_index", -1)),
+                           layer.id()) for layer in saved_layers]
+                if actual != expected:
+                    raise ValueError(
+                        "Saved project did not preserve source_index to layer ID bindings")
+                for original, saved in zip(layers, saved_layers):
+                    if _layer_metadata(original).get("feature_count") != \
+                            _layer_metadata(saved).get("feature_count"):
+                        raise ValueError("Saved project did not preserve native feature counts")
+                recorded = json.loads(saved_layout.customProperty(
+                    "geoharness/layout_plan", "null"))
+                if recorded != layout_plan:
+                    raise ValueError("Saved project did not preserve its frozen layout_plan")
+                _validate_plan_layout(saved_layout, reopened, saved_layers, payload,
+                                      layout_plan, context)
+            # Native save/read normalizes floating coordinates and scale-bar metrics.
+            # Export the saved layout so preview pixels correspond to the delivered QGS.
+            preview, output, native_facts = _export_layout(saved_layout, payload, context)
+            from geoharness.qgis.layout_table import export_full_roster
+
+            export_full_roster(saved_layout, context)
+            layout_info = _layout_metadata(saved_layout)
+            if payload.get("_consume_plan") and layout_plan is not None:
+                for name, frame in native_facts["frames"].items():
+                    planned = layout_plan["frames"].get(name)
+                    if planned is not None:
+                        frame.update({key: planned[key] for key in (
+                            "focus_bbox", "normalized_center", "bbox_fraction", "coverage")})
+                        frame["focus_scope"] = planned.get(
+                            "focus_scope", "validated_current_layout_plan")
+                        frame["subject_contracts"] = planned.get("subject_contracts", [])
+        finally:
+            reopened.clear()
     digest = hashlib.sha256(preview.read_bytes()).hexdigest()
     native_facts["image_sha256"] = digest
-    creation_spec = _packaged_creation_spec(payload.get("_creation_spec"), layer_info, layout_info)
+    creation_spec = _packaged_creation_spec(payload.get("_creation_spec"), layer_info,
+                                           layout_info, preview_only=preview_only)
     readme = Path(context.output_path(None, "README.md"))
-    readme.write_text(
-        "# Editable QGIS map\n\nOpen `" + project_path.name + "` in QGIS. Packaged data and "
-        "styles are local snapshots; source files were not changed. Edit the saved print "
-        "layout, save it, then use geo_qgis_project export to create a new package.\n\n"
-        "`preview.png` is the first page exported from that same layout. This is an "
-        "unverified draft; successful QGIS export does not certify visual or analytical "
-        "quality.\n\n"
-        "Explicit custom fonts, when present, are copied into `assets/fonts/` and registered "
-        "by GeoHarness before re-export. QGIS desktop does not automatically register font "
-        "files from GeoHarness custom properties. If a custom font is absent on another "
-        "computer, select an installed font in QGIS or install the supplied font yourself. "
-        "GeoHarness does not install fonts into the operating system.\n",
-        encoding="utf-8",
-    )
+    if preview_only:
+        readme.write_text(
+            "# Frozen QGIS preview\n\nThis directory contains the measured preview and "
+            "layout contract only. No editable .qgz or copied layer data was written. "
+            "geo_deliver materializes exactly one editable project from this frozen version; "
+            "it must match every page image and the recorded layout_plan.\n",
+            encoding="utf-8",
+        )
+    else:
+        readme.write_text(
+            "# Editable QGIS map\n\nOpen `" + project_path.name + "` in QGIS. Packaged data "
+            "and styles are local snapshots; source files were not changed. Edit the saved "
+            "print layout, save it, then use geo_qgis_project export to create a new package.\n\n"
+            "`preview.png` is the first page exported from that same layout. This is an "
+            "unverified draft; successful QGIS export does not certify visual or analytical "
+            "quality.\n\n"
+            "Explicit custom fonts, when present, are copied into `assets/fonts/` and "
+            "registered by GeoHarness before re-export. QGIS desktop does not automatically "
+            "register font files from GeoHarness custom properties. If a custom font is absent "
+            "on another computer, select an installed font in QGIS or install the supplied "
+            "font yourself. GeoHarness does not install fonts into the operating system.\n",
+            encoding="utf-8",
+        )
     manifest_path = Path(context.output_path(None, "project.json"))
-    files = [project_path, preview, output, readme, manifest_path]
+    files = [preview, output, readme, manifest_path]
+    if project_path is not None:
+        files.insert(0, project_path)
     roster = context.run_dir / 'roster_full.csv'
     if roster.is_file():
         files.append(roster)
@@ -2624,8 +2704,8 @@ def _save_package(
             files.extend(path for path in directory.rglob("*") if path.is_file())
     manifest = {
         "backend": "qgis",
-        "project_fidelity": "saved_layout",
-        "project_file": project_path.name,
+        "project_fidelity": "preview_only" if preview_only else "saved_layout",
+        "project_file": project_path.name if project_path is not None else "",
         "preview": "preview.png",
         "preview_sha256": digest,
         "quality_status": "draft",
@@ -2641,15 +2721,18 @@ def _save_package(
             {**item, "path": Path(item["path"]).relative_to(context.run_dir).as_posix()}
             for item in native_facts.get("page_previews", [])]},
         "creation_spec": creation_spec,
+        "materialization_request": payload.get('_materialization_request'),
+        "export_binding": payload.get('_export_binding'),
         "automatic_repair_eligible": creation_spec is not None,
         "files": sorted({path.relative_to(context.run_dir).as_posix() for path in files}),
     }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
     return {
         "backend": "qgis",
-        "project_fidelity": "saved_layout",
+        "project_fidelity": "preview_only" if preview_only else "saved_layout",
         "project_dir": str(context.run_dir),
-        "project_file": str(project_path),
+        "project_file": str(project_path) if project_path is not None else "",
         "project_manifest": str(manifest_path),
         "output_path": str(output),
         "preview_path": str(preview),
@@ -2668,7 +2751,6 @@ def _save_package(
         "automatic_repair_eligible": creation_spec is not None,
         "render_executed": True,
     }
-
 
 def _project_layers(project: Any) -> list[Any]:
     """Include non-tree dependencies without changing saved drawing order or visibility."""
@@ -2903,6 +2985,34 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
             layout = layouts[0]
         else:
             raise ValueError("Export requires one saved layout or an explicit layout_name")
+        # Preserve the saved-project workflow without recreating its edited
+        # layout from template parameters. Bind all local dataset companions,
+        # assets, fonts and the project bytes before any packaging mutation.
+        source_specs = []
+        for node in _project_xml(source_project).findall('.//projectlayers/maplayer'):
+            path, options = _local_source(node.findtext('datasource', ''), context,
+                                          base=source_project.parent)
+            source_specs.append({'file_path': str(path) + ('|' + options if options else ''),
+                                 'kind': 'raster' if node.get('type') == 'raster' else 'vector'})
+
+        def file_digest(path):
+            digest = hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            return digest.hexdigest()
+
+        payload['_export_binding'] = {
+            'source_project': str(source_project),
+            'source_project_sha256': file_digest(source_project),
+            'sources': _native_source_identities({'layers': source_specs}, context),
+            'assets': [{'path': str(path), 'sha256': file_digest(path)} for path in assets],
+            'runtime': _runtime_identity(), 'fonts': _font_identities(layout, layers, context),
+        }
+        payload['_materialization_request'] = {'action': 'export', 'parameters': {
+            **{key: payload[key] for key in (
+                'layout_name', 'dpi', 'output_format', 'output_path', 'project_format')
+                if key in payload}, 'project_path': str(source_project)}}
         return _save_package(project, layout, layers, payload, context)
     finally:
         if preprocessor_id is not None:

@@ -176,7 +176,8 @@ def guard_map_mutations(execute):
                     if ref:
                         jobs.record_map_draft(job, context.metadata, cwd=context.cwd,
                                               config=config, spec_ref=ref)
-                if not reviewing and action in {"create", "build"}:
+                if (not reviewing and action in {"create", "build"}
+                        and not kwargs.get('_materialize')):
                     ref = result.metadata.get("spec_ref")
                     raw = (load_spec(ref, cwd=context.cwd, settings=config.qgis) if ref else
                            packet["parameters"] if packet else arguments.model_dump(

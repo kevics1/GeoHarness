@@ -391,6 +391,8 @@ class GeoPythonTool(BaseTool):
         "注入路径：RUN_DIR（唯一写入根/当前 cwd）、SOURCE_CWD、"
         "DATA_DIRS:list[Path]（直接迭代；[0] 是工作区，不是数据集目录）。"
         "只有 os.environ['DATA_DIRS'] 是用 os.pathsep 分隔的字符串。"
+        "下列GeoPandas/栅格/事实助手仅backend=python注入；backend=qgis使用"
+        "Project、processing、INPUTS、RUN_DIR和显式导入的PyQGIS API。"
         "DATA_REFS:dict[stable_id,record{name,path,ref}]；名称是值，不是 ID 键。"
         "resolve_data(ref)->Path；read_vector(ref,target_crs=None)->GeoDataFrame，"
         "使用每图层登记编码和仅 Python 可见的 __geoh_id 做稳定连接。"
@@ -406,6 +408,11 @@ class GeoPythonTool(BaseTool):
         "native_layer(ref,derivation=None,name=None,style=None,label_field=None,"
         "label_style=None,layer_name=None) 保留来源/派生关系；"
         "entity_join(source,table,key=...) 按身份连接；score_risk 使用显式假定权重；"
+        "nearest_distance(source,reference,key=真实ID,field=新距离字段,metric_crs=米制投影)"
+        "返回保留原CRS/索引的完整实体；verify_nearest_distances(source,reference,key=...,"
+        "field=...,metric_crs=...,absolute_tolerance=0.11)逐实体独立复核米制最近距离。"
+        "禁止将set_index(业务ID)后的最近邻Series直接赋给RangeIndex；"
+        "最近邻属性用entity_join按真实ID关联，等距并列需明确选择政策。"
         "sample_raster_points(path,points,band=1) 处理点 CRS。"
         "extent_geometry(west=...,south=...,east=...,north=...,crs=...) 生成带 CRS 的"
         "裁剪几何。artifact_facts(path,key=...,numeric_fields=[],predicates=[],"
@@ -715,6 +722,9 @@ class GeoPythonTool(BaseTool):
             "make_leader_lines": "points,labels,key,metric_crs -> 按ID连接，略去零长度引线",
             "write_analysis_report": "path,source,key,method等 -> 同源JSON/中文Markdown事实报告",
             "entity_join": "source, table, key=... -> key-joined GeoDataFrame; never positional",
+            "nearest_distance": "source,reference,key,field,metric_crs -> 按ID关联的米制最近距离",
+            "verify_nearest_distances": "source,reference,key,field,metric_crs,"
+                "absolute_tolerance=0.11 -> 独立几何复核，含错值/空值数量和至多5个实体诊断",
             "projection": "Reproject GeoDataFrame/GeoSeries, not iterrows() pandas Series rows",
             "native_layer": "ref, derivation=None -> layer retaining original source/provenance",
             "mask_raster": "CRS-aware GeoSeries/GeoDataFrame masking -> (array, Affine transform); "

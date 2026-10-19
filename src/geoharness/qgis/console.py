@@ -81,7 +81,14 @@ class ConsoleGuard:
             if any(path.is_relative_to(root) for root in self.context.read_roots):
                 return path
             raise PermissionError('Console directory is outside read roots')
-        return self.context.read_path(str(path))
+        # WorkerContext validates both this locator and native VRT dependencies.
+        # Its trusted header read emits another Python open audit event.
+        active = self.active
+        self.active = False
+        try:
+            return self.context.read_path(str(path))
+        finally:
+            self.active = active
 
     def audit(self, event, args):
         if not self.active:

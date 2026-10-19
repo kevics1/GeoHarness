@@ -468,6 +468,22 @@ def _install_guards(spec: dict[str, Any], tracker: Any = None) -> None:
 
     original_read = geopandas.read_file
     original_to_file = geopandas.GeoDataFrame.to_file
+    original_nearest = geopandas.sjoin_nearest
+    original_setitem = geopandas.GeoDataFrame.__setitem__
+
+    @wraps(original_nearest)
+    def nearest_join(*args, **kwargs):
+        joined = original_nearest(*args, **kwargs)
+        return tracker.nearest.record(joined) if tracker is not None else joined
+
+    @wraps(original_setitem)
+    def checked_assignment(self, key, value):
+        if tracker is not None and isinstance(key, str):
+            tracker.nearest.check_assignment(self, key, value)
+        return original_setitem(self, key, value)
+
+    geopandas.sjoin_nearest = nearest_join
+    geopandas.GeoDataFrame.__setitem__ = checked_assignment
 
     def guarded_table_reader(original):
         @wraps(original)
@@ -948,6 +964,8 @@ def _child_main() -> None:
         "write_raster": raster_helpers.write_raster,
         "raster_backdrop": raster_helpers.raster_backdrop,
         "entity_join": contracts.entity_join,
+        "nearest_distance": contracts._nearest_helpers().nearest_distance,
+        "verify_nearest_distances": contracts._nearest_helpers().verify_nearest_distances,
         "score_risk": confirmed_score,
         "sample_raster_points": contracts.sample_raster_points,
         "extent_geometry": contracts.extent_geometry,

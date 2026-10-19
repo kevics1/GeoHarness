@@ -196,7 +196,7 @@ model 运行本地 .model3 工作流。
   - QGIS 使用独立 Python 进程，不是 geo_python。不要猜测 ID、枚举索引、单位换算或\
 能力边界。执行距离/面积操作前检查源 CRS 并使用合适的米制 CRS。保留算法参数和输出\
 清单。结果是唯一 .geoharness/qgis 任务目录中的本地文件；检查实际输出。
-- **geo_qgis_project**：创建、读取和导出真实 QGIS 工程与打印布局。
+- **geo_qgis_project**：创建原生布局预览、读取已有工程；可编辑工程由最终交付生成。
   - 先用 action=spec 建立小型草案（图层可为空），再通过 spec_ref 增加图层和布局。\
 使用 action=inspect,spec_ref 读取真实键和状态。优先使用有类型的编辑（operation=layer/\
 style/labels/frame/roster），并指向返回的 layer_key。使用 action=help,section=style/\
@@ -208,7 +208,8 @@ layer.style.color、layer.label_style.size_pt、layout.width_mm/height_mm；不�
     优先使用 action=build 加 spec_ref 和合并后的 edits：数据/原生验证与导出只运行一次。\
 不要对已成功且未变化的 build 再调用 preflight/create。旧版冻结创建仍是 preflight\
 (spec_ref)，然后只发送 action 和 plan_ref。
-    用 geo_map_review(all_pages=true) 审查 QGIS 包。该工具只读取图片并报告可见问题，\
+    build/create/export只生成原生预览，不生成.qgz/.qgs。用\
+geo_map_review(all_pages=true)审查预览各页。该工具只读取图片并报告可见问题，\
 不会修改或重建地图。需要修复时，把实际发现合并成一次明确 build。
   - 每个图框二选一：显式 extent 或 focus_layers（FIT），不要同时使用。名录使用 \
 fields[0] 作为唯一且非空的键；columns 是完整表格的列数，不是属性字段。top_n 需要 \
@@ -218,11 +219,11 @@ sort_by；省略选择表示全部行。placement=auto 可能增加名册页，p
 不能证明详图所需对象全部存在。审查中的缩放建议使用 detail_zoom_policy=advisory，\
 不是新的硬性要求。只有在实测规划支持时才用 detail_placement=page 单独成页。
     不要为了满足审查建议而删除对象或提高缩放目标。
-  - 使用真实本地图层、声明样式和 CRS 构建工程。把实际保存的布局导出为 PNG/PDF。\
+  - 使用真实本地图层、声明样式和 CRS 构建原生布局并预览为PNG/PDF。\
 把用户编辑过的工程重导出到新的产物目录，保留已编辑原件。使用返回的 project_dir 和 \
 preview_path 进行 geo_deliver/geo_map_review；仅生成文件不等于质量通过。
-  - 交付图片必须来自打包后的 QGIS 布局。不要用无关的 matplotlib 预览替代，也不要覆盖\
-用户已编辑的源工程。
+  - geo_deliver才生成一次可编辑工程并复用。最终工程来源、布局、逐页图片须匹配选定\
+预览；不能静默切换历史版本。交付答复使用summary.json中的实际版次、页数和统计。
 - **geo_analysis**：原生 buffer、clip、intersection、distance、count 和 impact。
   - 输入：action、source（file_path/source_name/geojson + 可选 crs）、reference、\
 zones、distance_m、output_name。
@@ -258,7 +259,8 @@ fix_verified需要同图同页的新像素通过审查，checks明确包含该is
 摘录或 frame/ROI 不匹配只属于诊断信息，不能当作修改计划。使用原生修复结果；不要把被\
 拒绝的 patch 转成新的完整地图调用。
 - **geo_deliver**：把选定文件和project_dir复制到工作区exports。地图必须包含真实可编辑QGIS工程；
-工程未生成但已有spec_ref时，传spec_ref由交付工具先生成再打包。不能仅交PNG/PDF或把截图当工程。
+已有预览时直接传project_dir或已登记的primary_map，交付工具生成一次工程并复用；\
+只有spec_ref时由交付工具完成预览和工程。不能仅交PNG/PDF或把截图当工程。
 分析地图必须附相关已发布事实包；报告、图例和最终文字使用同一规则、选集和统计。
 未知业务阈值应说明探索性假设或询问用户，不将自定规则包装成正式风险/疏散标准。
   - 在最终回答中使用返回的 delivery_dir 和 qgis_project 路径。包括地图、可编辑工程、\
@@ -277,7 +279,8 @@ fix_verified需要同图同页的新像素通过审查，checks明确包含该is
     首个工作流优先 PNG。PDF/SVG 通过 PNG 预览检查；交互式 HTML 需要单独截图，否则\
 保持 unverified。主图、detail_extent、图例和 footer_text 优先使用 qgis_layout。提供 \
 map_extent 时声明 map_crs；边界为 xmin,ymin,xmax,ymax，使用该显示 CRS。QGIS PNG 从\
-打包后的打印布局导出。renderer=matplotlib 是显式兼容选项；HTML/SVG 保留原有渲染器。
+原生打印布局导出，工程仅最终交付时生成。renderer=matplotlib 是显式兼容选项；\
+HTML/SVG 保留原有渲染器。
     对 Python 地图，action=project 使用已有 map_path 和真实图层源创建工程文件，不重绘。\
 自定义 Python 注记可能需要在 QGIS 中编辑。
   - 标准地图优先使用结构化 QGIS 请求，不要反复检查 Python 渲染内部实现。使用 \
@@ -330,7 +333,8 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"geo_qgis_project — {invocation_guide('geo_qgis_project')}\n"
         "从任务和数据开始，不要强制执行统计级联。影响分析使用原生 geo_analysis，或使用 "
         "geo_python 处理自定义工作。QGIS 可用时，优先使用 geo_qgis 的 discovery/help/run "
-        "执行现有算法，并使用 geo_qgis_project 导出可编辑工程和布局。简单叠加任务不要调用 "
+        "执行现有算法，用geo_qgis_project渲染布局预览，最终geo_deliver生成一次可编辑工程。"
+        "简单叠加任务不要调用 "
         "Moran/LISA/因果分析（Do not invoke Moran/LISA/causal analysis for a simple overlay "
         "task）。\n"
         "以程序化方式检查源 CRS、几何有效性、米制单位、要素数量和分析参数。视觉审查不能"
@@ -402,7 +406,7 @@ def _build_execution_section(config: GeoConfig) -> str:
         "颜色正确或不存在重叠；绝不能把它们描述为视觉审查的替代品。应分别报告程序化数据"
         "检查、布局检查和视觉模型状态。\n"
         "对 Python 地图，使用 action=project 和已有 output_path、真实源及每层 field/"
-        "categories/colors 创建工程；修复缺失参数，不要重新渲染另一张图或更换 map_id。"
+        "categories/colors准备原生布局预览，工程只在最终交付时生成；修复缺失参数，不要另画地图或更换map_id。"
         "如实报告 passed、issues 或 unverified。不要仅凭路径声称看过地图。最终产物使用 "
         "geo_deliver 交付到当前工作区；Python 脚本只能写入 RUN_DIR。\n"
         "最早覆盖阶段用 first_coverage(points, stages, key=唯一ID, stage_key=阶段字段, "
@@ -415,6 +419,10 @@ def _build_execution_section(config: GeoConfig) -> str:
         "新任务的Python读取会自动绑定能唯一解析的已登记输入；动态读取必须声明input_refs，"
         "不能通过额外读取其他业务文件绕过依赖。标准评分用geo_task，不手工拼接评分脚本。"
         "artifact_facts支持group_by。"
+        "最近邻属性用entity_join按真实唯一ID连接，不把set_index(业务ID)后的Series赋给RangeIndex。"
+        "backend=python可用nearest_distance(source,reference,key=唯一ID,field=新距离字段,metric_crs=米制投影)。"
+        "发布最近平面距离时在facts.nearest_checks声明field/reference_ref/metric_crs，"
+        "由系统从真实几何独立复算；仅核对落盘统计不能证明距离关联正确。"
         "write_analysis_report(当前RUN_DIR中的.json路径, source=实际落盘文件, key=唯一ID, "
         "numeric_fields=[], group_by=[], predicates=[], method=明确方法字典, claims=[])"
         "生成同源JSON和中文Markdown；将报告与其源结果一起交付，工具会从包内数据复算。"

@@ -98,6 +98,19 @@ def summary(report: dict, reference: str, path: Path, *, max_chars=2400) -> dict
         "report_path": str(path)}
     if report.get('status') != 'needs_repair':
         result['create_call'] = {"action": "create", "plan_ref": reference}
+    blocking = ((report.get('frame_checks') or {}).get('symbol_constraints') or {}).get(
+        'unresolved', [])
+    if blocking:
+        result['blocking_issues'] = [{key: (str(item[key])[:240]
+            if key == 'recommendation' else _bounded(item[key])) for key in (
+            'code', 'frame_id', 'layer_indices', 'minimum_anchor_distance_mm',
+            'coincident_anchor_pairs', 'recommendation') if key in item}
+            for item in blocking[:4] if isinstance(item, dict)]
+        result['blocking_issues_omitted'] = max(0, len(blocking) - 4)
+        while (len(json.dumps(result, ensure_ascii=False)) > max_chars - 200
+               and len(result['blocking_issues']) > 1):
+            result['blocking_issues'].pop()
+            result['blocking_issues_omitted'] += 1
     details = {key: report[key] for key in (
         "status", "display_crs", "map_extent", "map_extent_source", "warnings", "issues",
         "parameter_normalizations", "analysis_binding_note",
@@ -215,9 +228,18 @@ def execution_summary(result: dict) -> dict:
     ) if key in layer} for layer in details.get("layers", [])[:16]]
     compact["layers_omitted"] = max(0, len(details.get("layers", [])) - 16)
     layout = details.get("layout") or {}
-    compact["layout"] = {key: layout[key] for key in (
-        "name", "effective_parameters", "bounds_check", "adaptations",
-    ) if key in layout}
+    effective = layout.get('effective_parameters') or {}
+    bounds = layout.get('bounds_check') or {}
+    compact['layout'] = {
+        'name': layout.get('name'),
+        'pages': layout.get('pages'),
+        'effective_parameters': {key: effective[key] for key in (
+            'width_mm', 'height_mm', 'body_font_size_pt', 'legend_font_size_pt')
+            if key in effective},
+        'bounds_check': {key: _bounded(bounds[key]) for key in (
+            'checked', 'valid', 'problems', 'reason') if key in bounds},
+        'adaptations': _bounded(layout.get('adaptations', [])),
+    }
     compact["layout"]["map_frames"] = [{key: frame[key] for key in (
         "id", "crs", "scale", "extent", "page_index",
     ) if key in frame} for frame in layout.get("map_frames", [])[:8]]
@@ -225,7 +247,11 @@ def execution_summary(result: dict) -> dict:
 
     pages = returned_page_previews(details)
     if pages:
-        compact["page_previews"] = pages
+        compact['page_count'] = len(pages)
+        compact["page_previews"] = [{key: page[key] for key in (
+            'page_index', 'path', 'frames', 'role', 'reused') if key in page}
+            for page in pages[:16]]
+        compact['page_previews_omitted'] = max(0, len(pages) - 16)
     compact["note"] = "Full source, layout and label evidence is in project_manifest; " \
                       "geo_python can read that exact workspace file."
     return {**{key: result[key] for key in ("status", "error_summary", "run_dir") if key in result},

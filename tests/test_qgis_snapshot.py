@@ -26,6 +26,16 @@ def _context(tmp_path, **qgis_settings):
     return ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
 
 
+def _captured_preview(tmp_path):
+    # Capture-only workers report the real preview output shape; they do not
+    # supply files or qualify for successful artifact/visual registration.
+    return {'status': 'succeeded', 'result': {
+        'project_dir': str(tmp_path / 'capture'),
+        'project_manifest': str(tmp_path / 'capture/project.json'),
+        'preview_path': str(tmp_path / 'capture/preview.png'),
+        'project_fidelity': 'preview_only'}}
+
+
 def _vector(path, *, changed=False, count=1):
     gpd.GeoDataFrame(
         {"name": ["changed" if changed else "original"] * count},
@@ -58,7 +68,7 @@ async def test_datetime_categories_reach_frozen_worker_as_matching_strings(tmp_p
         frame = gpd.read_file(spec["file_path"], layer=spec["layer_name"])
         assert frame["time"].tolist() == ["2020-03-30T19:00:00"]
         assert spec["style"]["categories"][0]["value"] == frame["time"].iloc[0]
-        return {"status": "succeeded", "result": {}}
+        return _captured_preview(tmp_path)
 
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
     arguments = GeoQgisProjectInput(action="create", layers=[{
@@ -89,7 +99,7 @@ async def test_create_worker_uses_preflight_vector_after_original_changes(
         assert spec["name"] == "source"
         assert frozen.parent in kwargs["read_roots"]
         snapshots.append(frozen)
-        return {"status": "succeeded", "result": {}}
+        return _captured_preview(tmp_path)
 
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
     arguments = GeoQgisProjectInput(
@@ -123,7 +133,7 @@ async def test_create_worker_uses_frozen_raster_pixels(tmp_path, monkeypatch):
             assert np.all(dataset.read(1) == 3)
             assert all(Path(path).parent == frozen.parent for path in dataset.files)
         snapshots.append(frozen)
-        return {"status": "succeeded", "result": {}}
+        return _captured_preview(tmp_path)
 
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
     result = await GeoQgisProjectTool().execute(
@@ -204,7 +214,7 @@ async def test_shapefile_attribute_change_during_freezing_is_not_hidden_by_shp_h
 
     async def runner(action, payload, **kwargs):
         calls.append(payload)
-        return {"status": "succeeded", "result": {}}
+        return _captured_preview(tmp_path)
 
     monkeypatch.setattr(gpd, "read_file", changing_read)
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
@@ -269,7 +279,7 @@ async def test_safe_local_vrt_is_frozen_without_depending_on_original_pixels(tmp
             assert np.all(dataset.read(1) == 3)
             assert all(Path(path).parent == frozen.parent for path in dataset.files)
         snapshots.append(frozen)
-        return {"status": "succeeded", "result": {}}
+        return _captured_preview(tmp_path)
 
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
     result = await GeoQgisProjectTool().execute(
@@ -320,7 +330,7 @@ async def test_create_freezes_the_selected_gpkg_layer(tmp_path, monkeypatch, sel
         frozen = gpd.read_file(spec["file_path"], layer=spec["layer_name"])
         assert frozen["name"].tolist() == ["selected"]
         assert frozen["fid"].tolist() == [42]
-        return {"status": "succeeded", "result": {}}
+        return _captured_preview(tmp_path)
 
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
     result = await GeoQgisProjectTool().execute(
@@ -344,7 +354,7 @@ async def test_create_preserves_optional_empty_layer_and_count_checks(tmp_path, 
         spec = payload["layers"][1]
         assert gpd.read_file(spec["file_path"], layer=spec["layer_name"]).empty
         calls.append(payload)
-        return {"status": "succeeded", "result": {}}
+        return _captured_preview(tmp_path)
 
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", runner)
     layers = [{"file_path": str(source)}, {"file_path": str(empty), "required": False}]
@@ -482,15 +492,19 @@ async def test_real_worker_package_and_receipt_use_frozen_analysis_data(tmp_path
         GeoQgisProjectInput(
             action="create", layers=[{"file_path": str(source), "expected_feature_count": 1}],
             analysis_manifests=[manifest["manifest_path"]], dpi=36,
-        ), context,
+        ), context, _materialize=True,
     )
     assert not result.is_error, result.output
     assert Path(result.metadata["project_dir"]).is_relative_to(configured_outputs)
     packaged = gpd.read_file(Path(result.metadata["project_dir"]) / "data/layer_0.gpkg")
     assert packaged["name"].tolist() == ["original"]
     assert packaged.geometry.iloc[0].equals_exact(original.geometry.iloc[0], 1e-12)
-    assert result.metadata["map_receipt"]["stages"]["data_checked"]["status"] == "passed"
-    assert result.metadata["map_receipt"]["analysis_correctness"] == "unverified"
+    from geoharness.cartography.tracking import track_render_result
+
+    tracked = track_render_result(result, context, result.metadata['map_id'],
+        preflight=result.metadata['preflight'], analysis=result.metadata['preflight']['analysis'])
+    assert tracked.metadata["map_receipt"]["stages"]["data_checked"]["status"] == "passed"
+    assert tracked.metadata["map_receipt"]["analysis_correctness"] == "unverified"
     facts = json.loads((Path(result.metadata["project_dir"]) /
                         "analysis/verified-facts.json").read_text(encoding="utf-8"))
     assert facts == result.metadata["preflight"]["analysis"]

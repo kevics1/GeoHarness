@@ -80,7 +80,7 @@ async def test_native_detail_page_is_complete_and_table_source_does_not_draw(tmp
             "detail_frame": {"purpose": "分析用途说明不会替代可见标题"},
             "label_table": {"layer_index": "roster", "fields": ["id", "name"],
                             "keys": [7.123, 9.123], "precision": {"id": 1},
-                            "placement": "pages", "columns": 1}}), context)
+                            "placement": "pages", "columns": 1}}), context, _materialize=True)
     assert not created.is_error, created.output
     manifest_path = Path(created.metadata["project_manifest"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

@@ -46,11 +46,12 @@ class GeoDeliverInput(BaseModel):
         "仅交非地图数据时可留空。"
     ))
     version_policy: Literal["prefer_checked", "selected"] = Field(
-        default="prefer_checked",
+        default="selected",
         description=(
-        "可选，默认 prefer_checked。prefer_checked = 选择最新、未变化且通过实测布局检查的版本；"
-        "selected = 明确交付请求的这张图，即使它有已知问题也按草稿交付。"
-        "两者都不会伪造视觉通过。地图有成熟候选时优先使用默认值。"
+        "可选，默认 selected。selected = 严格交付 primary_map/project_dir 对应的同一已登记"
+        "版本，绝不静默替换成历史候选；即使有已知问题也按草稿交付。"
+        "prefer_checked为兼容值，同样保留选择；未指定图片时使用当前版本。"
+        "两者都不会伪造视觉通过。"
     ))
     files: list[str] = Field(
         default_factory=list,
@@ -62,9 +63,9 @@ class GeoDeliverInput(BaseModel):
         ),
     )
     project_dir: str = Field(default="", description=(
-        "可选。geo_qgis_project 成功返回的便携工程目录；地图交付必须有真实工程，"
+        "可选。geo_qgis_project 成功返回的预览或工程目录；地图交付必须有真实工程，"
         "已有登记主图时可自动恢复目录，只有草案时改用 spec_ref。"
-        "内含 project.json 和可编辑 .qgz/.qgs。"
+        "预览目录内含project.json；首次交付生成一次可编辑.qgz/.qgs并复用。"
         "只交 PNG/PDF 而无真实工程会被拒绝，不能把图片当等价工程。"
         "传准确返回路径，不是 exports 父目录；工程用于后续在 QGIS 中继续修复。"
         "纯粹的非地图图片/PDF附件才可显式设置 allow_report_only=true。"
@@ -230,7 +231,6 @@ class GeoDeliverTool(BaseTool):
             files, _ = complete_analysis_bundle(files, resolve)
             primary = resolve(arguments.primary_map) if arguments.primary_map else None
             project_directory = arguments.project_dir
-            candidate_report = None
             selection = {"policy": arguments.version_policy, "changed": False}
             selected_maps = [file for file in files if file.suffix.lower() in _MAP_SUFFIXES]
             selection_source = primary or (selected_maps[0] if len(selected_maps) == 1 else None)
@@ -250,29 +250,12 @@ class GeoDeliverTool(BaseTool):
                 map_id=arguments.map_id, artifact_path=selection_source)
             if initial_receipt.get("job_id") and initial_receipt.get("artifact_registered"):
                 selection["selected_version"] = initial_receipt.get("selected_version")
-            if (arguments.version_policy == "prefer_checked" and initial_receipt.get("job_id")
-                    and initial_receipt.get("artifact_registered", False)):
-                stages = initial_receipt["stages"]
-                known_problem = any(stages[key]["status"] in {"issues", "stale", "failed"}
-                    for key in ("rendered", "layout_checked", "data_checked", "visual_checked"))
-                candidate = initial_receipt.get("delivery_candidate")
-                if known_problem or (arguments.map_id and selection_source is None):
-                    if candidate is None:
-                        raise ValueError("Selected map has no unchanged candidate passing measured "
-                            "layout checks. Repair it, or explicitly use version_policy=selected "
-                            "to retain the requested draft.")
-                    primary = resolve(candidate["image_path"])
-                    files = [file for file in files if file != selection_source]
-                    project_directory = candidate.get("project_dir") or ""
-                    candidate_report = candidate.get("review_path")
-                    selection.update(changed=primary != selection_source,
-                        selected_version=candidate["version"],
-                        requested_version=initial_receipt.get("selected_version"),
-                        reason=candidate["reason"], project_available=bool(project_directory))
+                selection["requested_version"] = initial_receipt.get("selected_version")
+            selection['reason'] = '严格交付选定版本；不按历史覆盖或审查分数回退'
+            selection['explicitly_pinned'] = bool(arguments.primary_map or arguments.project_dir)
             if primary is None and not files and arguments.map_id and selection_source is not None:
                 primary = selection_source
             elif (primary is None and not files and arguments.map_id
-                  and arguments.version_policy == "selected"
                   and initial_receipt.get("image_path")):
                 primary = resolve(initial_receipt["image_path"])
                 packaged = initial_receipt["stages"]["packaged"]
@@ -309,13 +292,9 @@ class GeoDeliverTool(BaseTool):
                 )
             if primary is not None and primary not in files:
                 files.append(primary)
-            report_file = (resolve(arguments.review_path)
-                           if arguments.review_path and not selection["changed"] else None)
-            if selection["changed"] and arguments.review_path:
-                old_report = resolve(arguments.review_path)
-                files = [file for file in files if file != old_report]
-            if selection["changed"] and candidate_report:
-                report_file = resolve(candidate_report)
+            report_path = arguments.review_path or initial_receipt.get('stages', {}).get(
+                'visual_checked', {}).get('report_reference', {}).get('path')
+            report_file = resolve(report_path) if report_path else None
             if report_file is not None and report_file not in files:
                 files.append(report_file)
             project_files: list[tuple[Path, Path]] = []
@@ -638,7 +617,24 @@ class GeoDeliverTool(BaseTool):
                 map_ids={arguments.map_id, receipt.get('job_id'), receipt.get('map_id')})
             if pending:
                 payload['quality_status'] = 'draft'
-                payload['remaining_issues'] = [*payload.get('remaining_issues', []), *pending]
+                selected = receipt.get('selected_version')
+                version = next((v for v in receipt.get('versions', [])
+                                if v.get('version') == selected), {})
+                digests = {version.get('image_sha256'), *(
+                    r.get('image_sha256') for r in version.get('page_reviews', {}).values())}
+                current = [item for item in pending if item.get('state') != 'needs_recheck'
+                           and item.get('last_image_sha256') in digests]
+                from geoharness.cartography.review_progress import _same_concern
+
+                # Raw review issues and task-owned identities describe the same
+                # observation; prefer its stable ID rather than double-counting.
+                raw_issues = [issue for issue in payload.get('remaining_issues', [])
+                    if not any(_same_concern(issue, finding) or all(
+                        issue.get(key) == finding.get(key) for key in (
+                            'severity', 'description', 'location', 'issue_code'))
+                        for finding in current)]
+                payload['remaining_issues'] = [*raw_issues, *current]
+                payload['historical_findings'] = [item for item in pending if item not in current]
                 payload['finding_status'] = 'needs_explicit_disposition'
 
             payload.update(write_delivery_summary(
@@ -655,12 +651,66 @@ class GeoDeliverTool(BaseTool):
                     raise ValueError('spec_ref与project_dir二选一；已有工程直接传project_dir')
                 from geoharness.cartography.delivery_project import materialize_project
 
+                if arguments.map_id:
+                    from geoharness.qgis.specification import load_spec
+
+                    parameters = load_spec(arguments.spec_ref, cwd=workspace,
+                                           settings=config.qgis)
+                    if parameters.get('map_id') != arguments.map_id:
+                        raise ValueError('spec_ref与map_id不属于同一地图；先修正交付参数')
+
                 generated = await materialize_project(context, arguments.spec_ref)
                 if arguments.map_id and arguments.map_id != generated.get('map_id'):
                     raise ValueError('生成的工程与指定map_id不一致；使用同一地图的真实spec_ref')
                 arguments = arguments.model_copy(update={
                     'project_dir': generated['project_dir'],
                     'map_id': generated.get('map_id', arguments.map_id)})
+            else:
+                candidate = arguments.project_dir
+                selected_image = arguments.primary_map
+                if not selected_image:
+                    images = [value for value in arguments.files
+                              if Path(value).suffix.lower() == '.png']
+                    if len(images) == 1:
+                        selected_image = images[0]
+                if not candidate and (arguments.map_id or selected_image):
+                    from geoharness.cartography.jobs import map_job_receipt
+
+                    selected = map_job_receipt(context.metadata, cwd=workspace, config=config,
+                        map_id=arguments.map_id, artifact_path=(
+                            resolve(selected_image) if selected_image else None))
+                    candidate = selected.get('stages', {}).get('packaged', {}).get('project_dir')
+                if candidate:
+                    root = (workspace / candidate).resolve()
+                    descriptor = root / 'project.json'
+                    document = None
+                    if descriptor.is_file():
+                        descriptor = resolve(str(descriptor))
+                        if descriptor.stat().st_size > 4 * 1024 * 1024:
+                            raise ValueError('预览清单过大；检查实际原生预览')
+                        document = json.loads(descriptor.read_text(encoding='utf-8'))
+                    if document and document.get('project_fidelity') == 'preview_only':
+                        from geoharness.cartography.delivery_project import materialize_project
+                        from geoharness.cartography.jobs import map_job_receipt
+
+                        image = (root / document['preview']).resolve()
+                        if not image.is_relative_to(root):
+                            raise ValueError('预览图片不能越过原生输出目录')
+                        frozen = map_job_receipt(context.metadata, cwd=workspace, config=config,
+                                                artifact_path=resolve(str(image)))
+                        if arguments.map_id:
+                            requested = map_job_receipt(context.metadata, cwd=workspace,
+                                config=config, map_id=arguments.map_id)
+                            if requested.get('job_id') != frozen.get('job_id'):
+                                raise ValueError('project_dir与map_id不属于同一地图')
+                        if arguments.primary_map and hashlib.sha256(resolve(
+                                arguments.primary_map).read_bytes()).hexdigest() != frozen.get(
+                                    'image_sha256'):
+                            raise ValueError('primary_map与选定预览不一致；先修正交付参数')
+                        generated = await materialize_project(context, preview_dir=str(root))
+                        arguments = arguments.model_copy(update={
+                            'project_dir': generated['project_dir'],
+                            'map_id': generated.get('map_id', arguments.map_id)})
             publication = asyncio.create_task(asyncio.to_thread(publish))
             try:
                 result = await asyncio.shield(publication)
@@ -707,7 +757,17 @@ class GeoDeliverTool(BaseTool):
                 is_error=True,
                 metadata={**payload, "execution_status": "failed", "delivery_executed": False},
             )
-        return ToolResult(output=json.dumps(result, ensure_ascii=False, indent=2), metadata=result)
+        visible = {key: result[key] for key in (
+            'delivery_dir', 'qgis_project', 'primary_map', 'selection', 'quality_status',
+            'review_status', 'quality_notice', 'summary_json', 'summary_markdown',
+            'manifest_path', 'receipt_status', 'delivery_status', 'finding_status', 'files')
+            if key in result}
+        visible['file_count'] = len(result.get('files', []))
+        visible['current_issue_count'] = sum(i.get('severity') in {'error', 'warning'}
+            for i in result.get('remaining_issues', []))
+        visible['historical_finding_count'] = len(result.get('historical_findings', []))
+        visible['next_action'] = '依据summary.json/summary.md中的实际版本、页面和事实说明交付。'
+        return ToolResult(output=json.dumps(visible, ensure_ascii=False), metadata=result)
 
     def is_read_only(self, arguments: BaseModel) -> bool:
         return False

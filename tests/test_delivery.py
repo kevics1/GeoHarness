@@ -46,7 +46,8 @@ async def test_native_map_has_editable_project_and_default_workspace_output(tmp_
     )
     assert not mapped.is_error, mapped.output
     assert Path(mapped.metadata["output_path"]).parent == tmp_path / "exports"
-    assert Path(mapped.metadata["qgis_project"]).is_file()
+    assert not mapped.metadata.get('qgis_project')
+    assert not list(tmp_path.rglob('*.qgz'))
     delivered = await GeoDeliverTool().execute(
         GeoDeliverInput(
             files=[mapped.metadata["output_path"], mapped.metadata["review_path"]],

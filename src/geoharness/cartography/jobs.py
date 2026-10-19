@@ -403,10 +403,17 @@ def _package(
     )
     matched = bool(digest and preview_digest == digest == manifest.get("preview_sha256"))
     project = manifest.get("project_file")
-    project_path = (root / project).resolve() if isinstance(project, str) else root / "map.qgs"
-    if not project_path.is_relative_to(root):
-        raise ValueError("Map project reference escapes its directory")
-    project_exists = project_path.is_file()
+    preview_only = manifest.get("project_fidelity") == "preview_only"
+    # A preview-only package is complete without a .qgz. Its portable project is
+    # deliberately deferred to the first delivery, where every source/layout/page
+    # identity is rechecked before the single materialization.
+    project_exists = False
+    if not preview_only:
+        project_path = (root / project).resolve() if isinstance(project, str) else (
+            root / "map.qgs")
+        if not project_path.is_relative_to(root):
+            raise ValueError("Map project reference escapes its directory")
+        project_exists = project_path.is_file()
     status = (
         "passed" if matched and project_exists and all(f["sha256"] for f in files) else "unverified"
     )
@@ -417,6 +424,8 @@ def _package(
         "image_sha256": digest,
         "files": files,
         "project_fidelity": manifest.get("project_fidelity", "unverified"),
+        "preview_integrity": (
+            "passed" if matched and all(f['sha256'] for f in files) else "unverified"),
         "fidelity_note": ("QGIS reference layout differs from the supplied image; "
                           "package check verifies file integrity only."
                           if manifest.get("project_fidelity") == "reference" else ""),
@@ -552,8 +561,9 @@ def record_map_version(
             _register(index, job_id, image, digest)
         if project_dir is not None:
             root = _path(project_dir, cwd)
-            for name in (manifest.get("project_file", "map.qgs"), manifest.get("preview")):
-                if isinstance(name, str):
+            # Preview-only manifests intentionally have no project_file.
+            for name in (manifest.get("project_file"), manifest.get("preview")):
+                if isinstance(name, str) and name:
                     path = (root / name).resolve()
                     if path.is_relative_to(root) and (file_digest := _sha(path)):
                         _register(index, job_id, path, file_digest)
@@ -616,7 +626,9 @@ def record_map_selection(
         if version is None:
             raise ValueError("Selected image is not an existing map version")
         previous = version["stages"]["packaged"]
-        if previous.get("status") != "passed" or _stale_files(previous):
+        preview_valid = (previous.get('project_fidelity') == 'preview_only'
+                         and previous.get('preview_integrity') == 'passed')
+        if (previous.get("status") != "passed" and not preview_valid) or _stale_files(previous):
             raise ValueError("Original selected package changed")
         if project_dir is not None:
             package, manifest = _package(project_dir, cwd, version["image_sha256"], config)
@@ -626,7 +638,10 @@ def record_map_selection(
                 return sorted((Path(f["path"]).resolve().relative_to(root).as_posix(), f["sha256"])
                               for f in stage.get("files", []))
 
-            if package.get("status") != "passed" or signature(package) != signature(previous):
+            valid_copy = (package.get('status') == 'passed' or (
+                package.get('project_fidelity') == 'preview_only'
+                and package.get('preview_integrity') == 'passed'))
+            if not valid_copy or signature(package) != signature(previous):
                 raise ValueError("Selected copy must preserve every package file SHA256")
             version["stages"]["packaged"] = package
             root = _path(project_dir, cwd)
@@ -640,6 +655,63 @@ def record_map_selection(
         _save(directory, job, index)
         _sync_state(metadata, cwd, directory, index)
         return _receipt(job, index, artifact=image, selected_version=version["version"])
+
+
+def record_map_materialization(
+    job_id, metadata, *, cwd, config, image_path, project_dir, selected_version,
+):
+    """Attach the first editable package to exactly the approved preview version."""
+    with _LOCK:
+        directory = _directory(cwd, config)
+        job, index = _job(directory, job_id), _index(directory)
+        image = _path(image_path, cwd)
+        version = _matching_version(job, image, selected_version=selected_version)
+        if version is None or _sha(image) != version.get('image_sha256'):
+            raise ValueError('交付预览版本或图片已变化；重新确认实际版本')
+        previous = version['stages']['packaged']
+        if _stale_files(previous):
+            raise ValueError('冻结预览文件已变化；不能沿用原审查记录生成工程')
+        if previous.get('project_fidelity') != 'preview_only':
+            raise ValueError('只有尚未物化的预览可以绑定首次工程')
+        original = _read(Path(previous['manifest_path']), {})
+        package, manifest = _package(project_dir, cwd, version['image_sha256'], config)
+        if package['status'] != 'passed':
+            raise ValueError('最终工程预览与冻结图片不一致；保留原预览和工程供定位')
+        if original.get('export_binding'):
+            if original['export_binding'] != manifest.get('export_binding'):
+                raise ValueError('冻结预览的原工程或数据已变化；重新预览与审查')
+        else:
+            inventory = (original.get('creation_spec') or {}).get('source_inventory')
+            if inventory is not None and inventory != (
+                    manifest.get('creation_spec') or {}).get('source_inventory'):
+                raise ValueError('冻结预览来源文件在工程生成期间发生变化；不能沿用原审查')
+            for key in ('source_identities', 'input_digest'):
+                before = (original.get('layout_plan') or {}).get(key)
+                after = (manifest.get('layout_plan') or {}).get(key)
+                if before is None or before != after:
+                    raise ValueError('冻结预览的来源或布局契约已变化；重新预览与审查')
+        old_pages = _map_page_files(version)
+        candidate = {**version, 'stages': {**version['stages'], 'packaged': package}}
+        new_pages = _map_page_files(candidate)
+        if (set(old_pages) != set(new_pages) or any(
+                old_pages[n]['sha256'] != new_pages[n]['sha256'] for n in old_pages)):
+            raise ValueError('最终工程逐页像素与冻结预览不一致；不能复用原审查结论')
+        version['stages']['packaged'] = package
+        version['materialization'] = {
+            'status': 'passed', 'selected_version': selected_version,
+            'spec_ref': (original.get('creation_spec') or {}).get('spec_ref', ''),
+            'preview_manifest': previous['manifest_path'],
+            'preview_manifest_sha256': _sha(Path(previous['manifest_path'])),
+            'scope': 'same_sources_layout_and_all_page_images',
+        }
+        root = _path(project_dir, cwd)
+        for name in (manifest['project_file'], manifest['preview']):
+            path = (root / name).resolve()
+            _register(index, job_id, path, _sha(path))
+        _aggregate_page_reviews(version, new_pages)
+        _save(directory, job, index)
+        _sync_state(metadata, cwd, directory, index)
+        return _receipt(job, index, artifact=image, selected_version=selected_version)
 
 
 def _map_page_files(version: dict) -> dict[int, dict]:

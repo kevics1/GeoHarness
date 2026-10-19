@@ -122,6 +122,24 @@ def _attached_analysis(delivery: dict) -> list[dict]:
                 if ({k: v for k, v in package_measured.items() if k != 'source'} !=
                         {k: v for k, v in facts.items() if k != 'source'}):
                     raise ValueError('Result request disagrees with delivered statistics')
+                if request.nearest_checks:
+                    from geoharness.analysis.result_package import _nearest_checks
+
+                    previous = report.get('nearest_checks', [])
+                    if len(previous) != len(request.nearest_checks):
+                        raise ValueError('Nearest verification evidence missing')
+                    copied = {}
+                    for check, saved in zip(request.nearest_checks, previous):
+                        hashes = saved['reference_inventory']
+                        if not set(hashes.values()) <= copied_hashes:
+                            raise ValueError('Nearest reference companions not delivered intact')
+                        digest = hashes[saved['reference']]
+                        copied[check.reference_ref] = next(p for p in files if _sha(p) == digest)
+                    fresh = _nearest_checks(sources[0], request, copied.__getitem__)
+                    for actual_check, saved in zip(fresh, previous):
+                        if any(actual_check.get(k) != v for k, v in saved.items()
+                               if k not in {'reference', 'reference_inventory'}):
+                            raise ValueError('Nearest check disagrees with delivered geometry')
             measured = artifact_facts(sources[0], key=facts['key'],
                 numeric_fields=list(facts.get('numeric', {})),
                 group_by=list(facts.get('groups', {})),
@@ -269,6 +287,7 @@ def build_delivery_summary(
             for r in analysis_reports if r['status'] == 'persisted_values_checked'],
         "page_reviews": page_reviews,
         "remaining_issues": remaining,
+        "historical_findings": delivery.get('historical_findings', []),
         "quality_notice": notice,
         "delivered_files": delivery.get('files', []),
     }
@@ -310,6 +329,10 @@ def _markdown(summary: dict) -> str:
         if isinstance(issue, dict):
             lines.append(f"- 待解决（{issue.get('severity', 'unknown')}）："
                          f"{issue.get('description', '')}")
+    history = summary.get('historical_findings', [])
+    if history:
+        lines.extend(['', f'历史待处置记录：{len(history)}项；未计入当前页面错误/警告。',
+                      '稳定issue_id、旧图片身份和处置状态见summary.json。'])
     return "\n".join(lines)
 
 

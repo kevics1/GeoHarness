@@ -822,8 +822,8 @@ class GeoQgisProjectInput(BaseModel):
     """Authoritative native QGIS project contract.
 
     Typical flow: help (optional) -> spec -> build(spec_ref, edits) -> optional
-    inspect/preflight -> geo_map_review -> geo_deliver. A successful build creates
-    the editable .qgz/.qgs project and its PNG/PDF preview in one native job.
+    inspect/preflight -> geo_map_review -> geo_deliver. Build renders a native
+    preview; only delivery materializes the editable .qgz/.qgs package.
     """
 
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
@@ -855,11 +855,11 @@ class GeoQgisProjectInput(BaseModel):
         "build", "create", "inspect", "export", "preflight", "spec", "help", "recover"
     ] = Field(
         description=(
-            "必填。build = 在一个原生作业中应用 spec_ref+edits、验证、渲染并打包，"
+            "必填。build = 在一个原生作业中应用 spec_ref+edits、验证并渲染预览，"
             "是正常出图的首选；spec = 保存/修改草案并返回 spec_ref；preflight = 只验证；"
             "create = 仅兼容旧冻结流程，只接受 action+plan_ref；"
             "inspect = 只读查看返回的 spec/plan/工程/地图台账；"
-            "export = 从已有 .qgs/.qgz 重新打包，不改原工程；"
+            "export = 从已有 .qgs/.qgz 渲染预览，不改原工程；"
             "help = 读取某一字段组的真实 schema；recover = 检查已登记 map_id 的台账。"
             "不要在本工具中使用 geo_qgis Processing 的 INPUT/OUTPUT 参数。"
         ))
@@ -922,7 +922,7 @@ class GeoQgisProjectInput(BaseModel):
     project_path: str = Field(default="", description=(
         "已有本地 .qgs/.qgz 文件，仅 inspect/export 使用。"
         "inspect/export 会保留其图层、CRS、布局；不要同时传新的 layers/crs/layout。"
-        "export 产生新的便携快照，不会原地覆盖用户工程。"
+        "export 只产生预览与重建参数；可编辑快照在最终geo_deliver时生成。"
     ))
     title: str = Field(default="", description=(
         "地图上实际可见的标题文字，不是 layout.name、图层名或文件名；会按预留标题带测量。"
@@ -947,8 +947,8 @@ class GeoQgisProjectInput(BaseModel):
         "spec/build/create 不使用该字段。"
     ))
     output_format: Literal["png", "pdf"] = Field(default="png", description=(
-        "与工程一起导出的预览格式：png 用于像素审查，pdf 用于打印/矢量核对；"
-        "两种情况都会产生可编辑工程。"
+        "预览格式：png 用于像素审查，pdf 用于打印/矢量核对；"
+        "build/create/export不生成工程，geo_deliver才生成一次并复用。"
     ))
     output_path: str = Field(default="", description=(
         "可选。仅相对文件名，位于本次原生 RUN_DIR 内；省略由工具生成。"
@@ -956,7 +956,7 @@ class GeoQgisProjectInput(BaseModel):
     ))
     project_format: Literal["qgz", "qgs"] = Field(default="qgz", description=(
         "可编辑工程格式：qgz 为便携压缩工程，qgs 为未压缩工程；都是真实 QGIS 工程，"
-        "不是把 PNG 改名。交付默认需要该工程。"
+        "最终交付时才使用该格式生成工程；预览阶段不写工程文件。"
     ))
     dpi: int = Field(default=150, ge=36, le=600, description=(
         "栅格预览 DPI。改变 DPI 会改变像素尺寸，不改变布局的毫米几何；"
@@ -1133,7 +1133,8 @@ class GeoQgisProjectInput(BaseModel):
 class GeoQgisProjectTool(BaseTool):
     name = "geo_qgis_project"
     description = (
-        "权威 QGIS 地图契约：本地数据/data: 引用 -> 可编辑工程，并从同一布局导出 PNG/PDF。"
+        "权威 QGIS 地图契约：本地数据/data: 引用 -> 原生布局PNG/PDF预览。"
+        "build/create/export均不生成工程；审查选定预览后geo_deliver一次生成可编辑工程并复用。"
         "一次保存 spec，再用 build(spec_ref, edits by layer_key) 在单个原生作业和单次模型"
         "往返中完成验证与导出。把相关图层/样式/标注/图框/名册编辑合并进该 build。"
         "用 help(section=style/labels/frame/layout/edits) 查看实际运行时 schema；不要使用 "
@@ -1146,7 +1147,7 @@ class GeoQgisProjectTool(BaseTool):
         "图层从下到上绘制；原生样式使用 style.renderer/field/categories。每个图框声明 "
         "purpose 和必需对象覆盖；显式 extent 与 focus_layers 互斥。审查中的缩放偏好使用 "
         "advisory；保留所有声明的对象。使用 project_path 进行 inspect/export 会保留用户"
-        "编辑并写出新的可移植快照。使用原生分析输出/derivation 取得可验证来源。实际像素"
+        "编辑；交付时写出可移植快照。使用原生分析输出/derivation 取得可验证来源。实际像素"
         "审查前输出保持 draft；最终交付使用 geo_deliver。"
     )
     input_model = GeoQgisProjectInput
@@ -1190,7 +1191,8 @@ class GeoQgisProjectTool(BaseTool):
     @guard_map_errors
     @guard_map_mutations
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext,
-                      *, _source_bindings: list[dict] | None = None) -> ToolResult:
+                      *, _source_bindings: list[dict] | None = None,
+                      _materialize: bool = False) -> ToolResult:
         assert isinstance(arguments, GeoQgisProjectInput)
         config = context.metadata.get("geoharness_config")
         if config is None:
@@ -1380,9 +1382,13 @@ class GeoQgisProjectTool(BaseTool):
             # Inputs remain alive through worker shutdown, including cancellation.
             with TemporaryDirectory(prefix="geoh-qgis-inputs-") as directory:
                 result = await self._execute(arguments, context, Path(directory).resolve(),
-                                             source_bindings=_source_bindings)
+                                             source_bindings=_source_bindings,
+                                             spec_reference=spec_reference,
+                                             materialize=_materialize)
         else:
-            result = await self._execute(arguments, context, source_bindings=_source_bindings)
+            result = await self._execute(arguments, context, source_bindings=_source_bindings,
+                                         spec_reference=spec_reference,
+                                         materialize=_materialize)
         if spec_reference and not result.is_error:
             raw = result.output.lstrip()
             visible, end = json.JSONDecoder().raw_decode(raw)
@@ -1414,7 +1420,7 @@ class GeoQgisProjectTool(BaseTool):
         return result
 
     async def _execute(self, arguments, context, snapshot_directory=None,
-                       *, source_bindings=None) -> ToolResult:
+                       *, source_bindings=None, materialize=False, spec_reference='') -> ToolResult:
         from geoharness.cartography.mutation_control import current_owner
 
         owner = current_owner()
@@ -1465,16 +1471,37 @@ class GeoQgisProjectTool(BaseTool):
                 for index, layer in enumerate(arguments.layers) if layer._normalized_style_fields
             ]
         payload = arguments.model_dump(exclude={"action"}, exclude_none=True)
+        if arguments.action in {'create', 'export'}:
+            # Only the trusted delivery caller can request a portable project.
+            # This flag is deliberately absent from the model-visible input schema.
+            payload['_preview_only'] = not materialize
         if preflight:
-            creation = arguments.model_dump(exclude={"action"},
-                                            exclude_unset=True)
+            creation = requested
             if not creation.get("crs"):
                 creation["crs"] = preflight["display_crs"]
             if creation.get("layout"):
                 creation["layout"].pop("layout_plan", None)
+            # Freezing copies sources into a temporary directory. The creation
+            # contract must retain the real business locators, otherwise a later
+            # delivery materialization points at deleted temporary files.
+            bindings = preflight.get("source_bindings", [])
+            for layer, binding in zip(creation.get("layers", []), bindings):
+                if isinstance(layer, dict) and isinstance(binding.get("file_path"), str):
+                    layer["file_path"] = binding["file_path"]
+                if isinstance(layer, dict) and binding.get('layer_key'):
+                    layer['layer_key'] = binding['layer_key']
+                if (isinstance(layer, dict) and isinstance(binding.get("source_layer"), str)
+                        and binding["source_layer"]):
+                    layer["layer_name"] = binding["source_layer"]
+                elif isinstance(layer, dict):
+                    # Freezing names a temporary single-layer GPKG. Do not carry
+                    # that synthetic layer name back to the original source.
+                    layer.pop("layer_name", None)
             payload["_creation_spec"] = {
+                "spec_ref": spec_reference,
                 "parameters": creation,
-                "source_bindings": preflight.get("source_bindings", []),
+                "source_bindings": bindings,
+                "source_inventory": preflight.get('source_inventory', {}),
                 "analysis_manifests": preflight.get("analysis_manifests", []),
             }
         if preflight:
@@ -1572,7 +1599,7 @@ class GeoQgisProjectTool(BaseTool):
         identity = arguments.map_id or map_identity(
             arguments.title or Path(arguments.project_path).stem or "qgis-map"
         )
-        reserved = arguments.action in {"create", "export"}
+        reserved = arguments.action in {"create", "export"} and not materialize
         if reserved:
             from geoharness.cartography.tracking import bind_map_job
 
@@ -1631,6 +1658,17 @@ class GeoQgisProjectTool(BaseTool):
         if result.get("status") != "succeeded" and reserved:
             refund_map_render(identity, context.metadata)
         details: dict[str, Any] = result.get("result") or {}
+        if result.get('status') == 'succeeded' and arguments.action in {'create', 'export'}:
+            required = ['project_dir', 'project_manifest', 'preview_path']
+            if materialize:
+                required.append('project_file')
+            missing = [key for key in required if not isinstance(details.get(key), str)
+                       or not details[key]]
+            if missing:
+                result = {**result, 'status': 'failed', 'error_summary':
+                    'NativeOutputContractError: native renderer returned no ' + ', '.join(missing)}
+                if reserved:
+                    refund_map_render(identity, context.metadata)
         if preflight and details.get("layout_plan"):
             _apply_native_frame_evidence(preflight, details)
         metadata = {**details, **result, "map_id": identity, "preflight": preflight,
@@ -1689,6 +1727,7 @@ class GeoQgisProjectTool(BaseTool):
                                     business_fields=business_fields)
             for source, binding in zip(snapshot.layout_sources, source_bindings):
                 source.update(source=binding.get("file_path", source["source"]),
+                              source_layer=binding.get('source_layer') or '',
                               derivation=binding.get("derivation"),
                               layer_key=binding.get("layer_key", source["layer_key"]))
         for original, layer in zip(snapshot.original_sources, arguments.layers):
@@ -1713,6 +1752,21 @@ class GeoQgisProjectTool(BaseTool):
         report = self._preflight(frozen, context, snapshot=snapshot)
         report["layout_sources"] = snapshot.layout_sources
         report["source_bindings"] = snapshot.original_sources
+        report['source_inventory'] = {str(path): digest
+                                      for path, digest in snapshot.source_digests.items()}
+        if source_bindings is not None:
+            # Temporary bridge GPKGs are not the persistent business locators.
+            # Bind the real originals (or explicitly retained inline inputs).
+            from geoharness.data.artifacts import sha256_file
+
+            report['source_inventory'] = {}
+            for binding in source_bindings:
+                path = Path(binding['file_path'])
+                companions = [path]
+                if path.suffix.lower() == '.shp':
+                    companions.extend(p for p in path.parent.glob(path.stem + '.*')
+                                      if p.suffix.lower() in {'.dbf', '.shx', '.prj', '.cpg'})
+                report['source_inventory'].update({str(p): sha256_file(p) for p in companions})
         # Analysis evidence was checked at original locators, against frozen GDFs.
         # Sources may change after this point: the worker only uses the snapshots.
         snapshot.verify_sources()

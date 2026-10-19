@@ -193,7 +193,9 @@ async def test_native_map_preview_matches_portable_project(tmp_path):
     assert project == tmp_path / "exports/editable"
     assert Path(metadata["output_path"]).read_bytes().startswith(b"\x89PNG")
     manifest = json.loads((project / "project.json").read_text(encoding="utf-8"))
-    assert Path(metadata["project_file"]).is_file()
+    assert not metadata.get('project_file')
+    assert not list(tmp_path.rglob('*.qgz'))
+    assert manifest['project_fidelity'] == 'preview_only'
     assert Path(metadata["output_path"]).parent == tmp_path / "exports"
     assert (
         hashlib.sha256(Path(metadata["output_path"]).read_bytes()).hexdigest()
@@ -204,6 +206,12 @@ async def test_native_map_preview_matches_portable_project(tmp_path):
     assert len(manifest["layout"]["map_frames"]) == 2
     assert metadata["layers"][0]["categories"][0]["color"] == "#ff0000"
     assert source.is_file()
+    from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
+
+    delivered = await GeoDeliverTool().execute(GeoDeliverInput(
+        project_dir=str(project)), context)
+    assert not delivered.is_error, delivered.output
+    assert Path(delivered.metadata['qgis_project']).is_file()
 
 
 async def test_corrupt_source_is_a_tool_error_before_render(tmp_path):

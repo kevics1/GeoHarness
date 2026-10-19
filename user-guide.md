@@ -461,7 +461,7 @@ geo_deliver 可指定 primary_map（兼容 map_path）和 review_path。交付�
 
 工程编辑后的有效参数读取实际元素；纸张尺寸统一为mm，文字保留实际值与单位，仅Points字号另提供pt字段。`creation_parameters` 保存创建模板参数。硬布局检查支持毫米场景；用户将整个布局场景单位改成其他单位时，导出保留布局，检查状态为未核验并返回原因，不误报通过。
 
-QGIS 原生新建/导出标记 `project_fidelity=saved_layout`，PNG、PDF 和预览从保存后重新打开的同一布局导出。给现有 Python/Matplotlib 图片补工程的 `action=project` 保留兼容，标记 `project_fidelity=reference`：QGIS 布局是参考布局，包内预览是原图副本，不能据此认定两者一致。需要同源交付请使用默认 QGIS 制图，再检查实际预览。
+QGIS 原生build/create/export先返回 `project_fidelity=preview_only` 的布局预览与重建清单，不写 `.qgz/.qgs`，也不反复复制整套数据。最终 `geo_deliver` 才生成 `project_fidelity=saved_layout` 的便携工程，核对来源、布局契约和每页图片身份；不匹配时拒绝复用先前审查结论。给现有 Python/Matplotlib 图片补工程的 `action=project` 保留兼容，标记 `project_fidelity=reference`：QGIS 布局是参考布局，包内预览是原图副本，不能据此认定两者一致。
 
 同一请求内，相同参数和未变化的本地输入触发同一确定性检查错误时，工具返回已有诊断并标记 `duplicate_error_blocked`，不重复执行该检查或重绘。文件内容摘要和状态共同判断输入是否变化，保留时间戳的同大小修改也会使缓存失效。修改参数、数据、关联分析输出或读取配置后可以重新执行。文件锁、超时等暂时故障不会按确定性错误缓存；没有稳定本地身份的目录别名、含外部依赖的栅格/VRT、已有工程的 inspect/export、plan_ref 短引用和超过64MiB总读取上限的输入保留正常执行。该机制帮助避免无效循环，不能保证模型每次都给出正确参数。
 
@@ -473,7 +473,7 @@ QGIS 原生新建/导出标记 `project_fidelity=saved_layout`，PNG、PDF 和�
 
 PNG/PDF 默认使用 QGIS。配置 `cartography.static_renderer: qgis`，调用 `geo_cartography` 时可指定 `map_crs` 和 `qgis_layout`。`qgis_layout.detail_extent` 使用 `{xmin,ymin,xmax,ymax}`，与主图范围同属显示坐标系；`footer_text` 提供备注。主图、可选详图、图例和底栏分区生成，类别颜色复用已有桥接规则，中文字体与标注缓冲/放置由 QGIS 处理。这些设置不证明每个标签都已显示或位置正确，仍须检查实际成图。
 
-返回的 `project_file` 是真实 QGIS 工程，`preview_path` 是从它的打印布局导出的 PNG。修改工程的图层、样式或打印布局并保存后，使用 `geo_qgis_project(action="export",project_path="...")` 导出新工程和图片。交付以返回的 `primary_map` PNG 与 `project_dir` 为主，PDF 可附加。视觉审查未完成时仍为草稿。
+预览返回 `preview_path` 和 `project_dir`（保存重建清单与各页预览，此时没有工程文件）。修改用户已有工程并保存后，使用 `geo_qgis_project(action="export",project_path="...")` 预览该工程，不覆盖原件。最终把选定 `project_dir` 传给 `geo_deliver`，由它生成一次真实工程；重复交付相同版本复用已生成工程。交付返回的 `qgis_project` 是可编辑文件，PDF可附加。视觉审查未完成时仍为草稿。
 
 需要旧静态路径时指定 `renderer="matplotlib"` 或配置 `cartography.static_renderer: matplotlib`；HTML/SVG 保留原有渲染入口。QGIS 禁用或启动失败时，默认路径会给出具体错误。
 
@@ -503,7 +503,7 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 
 新预检计划同时绑定当时地图版本与可编辑草案头。绘出新版本或草案被修改后，旧计划返回最新版本、`inspect_call/preflight_call`，需要对最新草案重新预检。旧版未包含绑定的计划保留兼容，创建回执明确标为 `legacy_unbound`。
 
-每次创建返回 `latest_version/latest_spec_ref`，这是下一次编辑的依据；交付候选可以是不同的历史版本。`inspect(spec_ref=...)` 可查看 `mutation_state`，其中记录当前或最近操作、阶段、开始/结束和失败/取消状态。历史草案可以inspect，更新或预检过期草案会给出恢复入口。导出现有历史工程仍保留其实际样式，不自动套用最新草案。
+每次创建返回 `latest_version/latest_spec_ref`，这是下一次编辑的依据。交付固定所指定图片/目录对应的版本；只给map_id时使用当前版本，不按历史分数替换。`inspect(spec_ref=...)` 可查看 `mutation_state`，其中记录当前或最近操作、阶段、开始/结束和失败/取消状态。历史草案可以inspect，更新或预检过期草案会给出恢复入口。导出现有历史工程仍保留其实际样式，不自动套用最新草案。
 
 ### 完整详图页与只用于名录的数据
 
@@ -529,7 +529,7 @@ QGIS 新建模板会在导出前检查自身分区、图例/文字内容溢出�
 
 图片已渲染而登记失败时，回执保留实际图片路径、render_executed和receipt_status，不再统一称为未开始。图片审查可在台账不可读情况下保存独立像素报告；其地图质量保持draft、登记状态为unregistered，不认证整个工程。
 
-交付默认仍按已核验候选规则执行。若台账不可读，调用者可以显式指定version_policy="selected"并给出实际文件，保存带ledger_errors的草稿恢复包；它不执行历史候选替换、不宣称质量通过。原始台账、旧地图和先前交付目录不会被此降级路径清空。
+交付默认 `version_policy="selected"`，固定请求版本；旧值 `prefer_checked` 为兼容值，同样不替换。若台账不可读且已有真实工程，调用者可给出实际文件，保存带ledger_errors的草稿恢复包，不宣称质量通过。尚未物化的预览需要恢复台账后生成工程。原始台账、旧地图和先前交付目录不会被此降级路径清空。
 
 
 ## 分析输入与事实核对
@@ -877,7 +877,7 @@ QGIS 对象不跨调用保存，`console_state` 及 `CONSOLE_RESULT` 只能是�
 交付自动附加选中工程所引用的事实包、源和中文报告，并从复制后的数据重新核对统计、选集与单位。
 
 系统创建且依赖可测的工程按页复用 PNG：改名单表题只重画名单；共享数据、样式、字体或
-布局变化按依赖失效。未知或用户编辑工程保守重画；QGIS 工程仍完整保存/读回，PDF按当前完整布局导出。
+布局变化按依赖失效。未知或用户编辑工程保守重画；预览阶段不保存工程，最终交付才保存/读回工程，PDF按当前完整布局导出。
 预检 `needs_repair` 表示检测到支持范围内的硬符号冲突，不返回误导性的 `create_call`；
 需先调整比例尺、符号或真实覆盖同一对象的详图。任意符号、引线和所有文字的精确碰撞仍不能由该检查认证。
 完全同坐标的多个记录保留风险提示，需要核实重复数据、叠加或聚合的业务含义；
@@ -903,11 +903,15 @@ QGIS 布局尺寸使用 mm，地图范围使用当前地图 CRS 的单位，不�
 已发出的 data 引用随任务持久保存；上下文只显示近期引用，不撤销较早引用。
 跨会话恢复仍验证原文件签名和生产者，源变化后应重新加载，不能强行复用旧引用。
 
-地图交付必须有真实 `.qgz/.qgs` 工程。已有工程可传 `project_dir`，或由已登记的主图
-恢复工程；只有草案时传 `spec_ref`，交付工具先生成工程与预览再打包，工程生成仍受
+地图交付必须有真实 `.qgz/.qgs` 工程。已有预览或工程可传 `project_dir`，或由已登记的主图
+恢复；只有草案时传 `spec_ref`，交付工具完成预览和工程再打包，工程生成仍受
 权限和工具钩子约束。`project_dir` 与 `spec_ref` 二选一。只有 PNG/PDF 而无工程或草案
 会返回 `missing_project`，不会从图片伪造工程。分析地图还须绑定已发布的事实包；
 手写统计文件不等于已验证事实包。草稿也包含工程，质量状态仍如实记录。
+同一冻结版本重复交付会复用首次生成的工程；重启后通过同一 `project_dir`、已登记图片
+或当前草案 `spec_ref` 交付也会核对并复用。草案内容改变后必须重新预览。
+若工程生成被中断且持久记录没有确定结果，系统保留记录并要求检查 `geo_task` 操作证据
+和原生运行目录，不会自动重复生成；本轮不提供未知中断状态的自动恢复。
 纯 CSV/JSON/Markdown 数据包保持兼容；无地图任务的图片/PDF报告附件可显式用
 `allow_report_only=true`，它不能绕过已指定主地图的工程要求。
 
@@ -921,3 +925,38 @@ QGIS 布局尺寸使用 mm，地图范围使用当前地图 CRS 的单位，不�
 `fix_verified` 还须是同一地图、同一页的新图片原生审查通过，`checks` 明确包含该
 `issue_id`，且当前图片 SHA256 匹配。改变后的图片再次报告同一问题会重新打开它。
 这些处置不直接认证视觉或业务质量；交付附带仍未解决的问题，并保留草稿状态。
+
+### 最近距离与实体关联
+
+`backend=python` 的 `nearest_distance(source, reference, key="实际唯一ID", field="distance_m",
+metric_crs="实际米制投影")` 返回带新距离字段的完整 GeoDataFrame，保留源 CRS 和行索引。
+需要避难场所名称、容量等属性时，用 `entity_join` 按真实 ID 连接最近邻表；等距并列记录
+先明确选择规则。不要把 `set_index("gid")` 后的 Series 直接赋给以行号为索引的居民点表。
+执行入口会检查可追踪的最近邻 Series 与目标几何的对应关系，在错配写出前拒绝执行；
+这不等同于验证任意 Python 派生逻辑。
+
+`verify_nearest_distances(source, reference, key="实际唯一ID", field="distance_m",
+metric_crs="实际米制投影", absolute_tolerance=0.11)` 独立复算每个实体到参照几何的
+最近平面距离，返回错值、空值数量和至多 5 个实体诊断。它不计算路网、通行时间或设施容量。
+这些助手仅在 `backend=python` 注入；原生 QGIS 控制台使用 `Project`、`processing` 和
+`INPUTS`，标准分析仍优先 QGIS Processing。
+
+发布最近距离事实时，在 `geo_task(action="publish_analysis", ...)` 的 `facts` 中声明：
+
+```json
+{
+  "key": "实际唯一ID",
+  "numeric_fields": ["distance_m"],
+  "units": {"distance_m": "m"},
+  "method": {"operation": "最近平面距离", "metric_crs": "EPSG:32648"},
+  "nearest_checks": [{
+    "field": "distance_m",
+    "reference_ref": "工具返回的实际参照文件路径或data:引用",
+    "metric_crs": "EPSG:32648"
+  }]
+}
+```
+
+示例投影仅示意，应使用真实分析投影。系统按几何逐实体复算，错值或空值拒绝发布；参照文件
+哈希随结果包绑定，并在复用、交付时重新核对。交付包包含复核参照及其伴随文件。
+未声明 `nearest_checks` 的包只能说明落盘统计自洽，不能据此声称最近距离计算正确。

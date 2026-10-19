@@ -64,6 +64,55 @@ def test_full_and_subset_keep_separate_missing_denominators_and_reuse(tmp_path):
     assert original['analysis_correctness'] == 'unverified'
 
 
+def test_nearest_publication_recomputes_geometry_rejects_wrong_ids_and_binds_reference(tmp_path):
+    context, source, _ = produced(tmp_path, vector=True)
+    frame = gpd.read_file(source)
+    reference = tmp_path / 'shelters.gpkg'
+    gpd.GeoDataFrame({'id': [7]}, geometry=[Point(1000, 0)], crs=3857).to_file(reference)
+
+    def persist(values):
+        frame['distance_m'] = values
+        frame.to_file(source)
+        manifest = source.parent / 'manifest.json'
+        document = json.loads(manifest.read_text('utf-8'))
+        next(entry for entry in document['files'] if entry['path'] == str(source))['sha256'] = (
+            sha256_file(source))
+        manifest.write_text(json.dumps(document), encoding='utf-8')
+
+    facts = FactRequest(key='id', numeric_fields=['distance_m'], units={'distance_m': 'm'},
+        method={'operation': 'nearest'}, nearest_checks=[{'field': 'distance_m',
+        'reference_ref': str(reference), 'metric_crs': 'EPSG:3857'}])
+    persist([1000]*234)
+    with pytest.raises(ValueError, match='nearest_distance_mismatch'):
+        publish_package(context, source_ref=str(source), request=facts)
+    persist([1000-i for i in range(234)])
+    result = publish_package(context, source_ref=str(source), request=facts)
+    checked = verify_package(Path(result['package_path']))
+    assert checked['nearest_checks'][0]['rows'] == 234
+    assert checked['nearest_checks'][0]['status'] == 'passed'
+    import shutil
+
+    from geoharness.analysis.result_package import delivery_packages
+
+    selected = delivery_packages(context.metadata, [source], {}, lambda value: Path(value))
+    delivered = tmp_path / 'delivered'
+    delivered.mkdir()
+    copied = [str(shutil.copy2(path, delivered / path.name)) for path in selected]
+    attached = _attached_analysis({'delivery_dir': str(delivered), 'files': copied})
+    assert attached[0]['status'] == 'persisted_values_checked'
+    assert attached[0]['execution_evidence']['nearest_distance_status'] == (
+        'independently_recomputed')
+    # Copied-reference edits cannot silently retain a verification claim.
+    gpd.GeoDataFrame({'id': [7]}, geometry=[Point(900, 0)], crs=3857).to_file(
+        delivered / reference.name)
+    assert _attached_analysis({'delivery_dir': str(delivered), 'files': copied}
+                              )[0]['status'] == 'unverified'
+    # A reference edit invalidates publication even if output bytes are intact.
+    gpd.GeoDataFrame({'id': [7]}, geometry=[Point(1100, 0)], crs=3857).to_file(reference)
+    with pytest.raises(ValueError, match='nearest_distance_mismatch'):
+        verify_package(Path(result['package_path']))
+
+
 def test_map_binding_recomputes_package_and_rejects_unrelated_or_changed_cache(tmp_path):
     context, source, subset = produced(tmp_path, vector=True)
     package = publish_package(context, source_ref=str(source), request=request())

@@ -72,7 +72,7 @@ async def test_unrelated_previous_analysis_cannot_attach_to_new_thematic_map(tmp
         "status": "verified", "analyses": [], "footer_text": "旧地图的统计",
     }
     result = await GeoQgisProjectTool().execute(_create(), context)
-    assert not result.is_error, result.output
+    assert result.is_error and 'NativeOutputContractError' in result.output
     assert payloads[0]["analysis_facts"]["status"] == "none"
     assert payloads[0]["analysis_facts"]["analyses"] == []
     assert "旧地图" not in json.dumps(payloads[0]["analysis_facts"], ensure_ascii=False)
@@ -177,7 +177,8 @@ async def test_create_forwards_styles_and_roots_and_flattens_delivery_metadata(
             "run_dir": str(tmp_path / "run"),
             "result": {
                 "project_dir": str(tmp_path / "run"),
-                "project_file": str(tmp_path / "run/map.qgz"),
+                "project_file": "",
+                "project_manifest": str(tmp_path / 'run/project.json'),
                 "preview_path": str(tmp_path / "run/preview.png"),
                 "quality_status": "draft",
                 "visual_review_status": "unverified",
@@ -207,7 +208,8 @@ async def test_create_forwards_styles_and_roots_and_flattens_delivery_metadata(
     )
     result = await GeoQgisProjectTool().execute(arguments, context)
     assert not result.is_error
-    assert result.metadata["project_file"] == str(tmp_path / "run/map.qgz")
+    assert not result.metadata.get('project_file')
+    assert calls[0][1]['_preview_only'] is True
     assert result.metadata["quality_status"] == "draft"
     assert result.metadata["visual_review_status"] == "unverified"
     assert calls[0][0] == "project_create"
@@ -237,7 +239,10 @@ async def test_create_and_export_share_budget_and_keep_saved_layout(tmp_path, mo
 
     async def fake_runner(action, payload, **kwargs):
         calls.append((action, payload))
-        return {"status": "succeeded", "result": {"quality_status": "draft"}}
+        return {"status": "succeeded", "result": {"quality_status": "draft",
+            'project_dir': str(tmp_path / 'run'),
+            'project_manifest': str(tmp_path / 'run/project.json'),
+            'preview_path': str(tmp_path / 'run/preview.png')}}
 
     monkeypatch.setattr("geoharness.qgis.runner.execute_qgis", fake_runner)
     context = _context(tmp_path, repairs=0)
@@ -284,7 +289,7 @@ async def test_export_recovers_saved_project_job_unless_map_id_is_explicit(
     result = await GeoQgisProjectTool().execute(
         GeoQgisProjectInput(action="export", project_path="saved-as.qgs", map_id=map_id), context,
     )
-    assert not result.is_error, result.output
+    assert result.is_error and 'NativeOutputContractError' in result.output
     assert calls[0]["project_path"] == "saved-as.qgs"
     assert recovered == ([] if map_id else [Path("saved-as.qgs")])
     if not map_id:

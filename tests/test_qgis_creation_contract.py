@@ -37,7 +37,9 @@ async def test_creation_capsule_preserves_raw_notes_focus_and_original_derivatio
                     {"value": None, "label": "Other / NULL", "color": "#ffffff"}]}}],
         layout={"main_frame": {"focus_layers": [0]}, "footer_text": "用户原备注"},
     ), context)
-    assert not result.is_error, result.output
+    # This capture-only worker supplies no map files. It still exposes the exact
+    # creation payload, but cannot satisfy the successful-render output contract.
+    assert result.is_error and 'NativeOutputContractError' in result.output
     payload = captured[0]
     capsule = payload["_creation_spec"]
     assert capsule["parameters"]["layout"]["footer_text"] == "用户原备注"

@@ -219,10 +219,11 @@ def contract_help(section: str) -> dict:
     result = {"section": section, "contract": "geo_qgis_project",
         "cautions": section_cautions(section),
         "workflow": [
-            "新建：spec(action=spec, layers=[...], title, crs, layout?) -> 返回 spec_ref；"
-            "再用 build(action=build, spec_ref, edits) 一次验证、渲染、打包。",
-            "修订：对同一 spec_ref 提交局部 typed edits；成功后使用返回的 latest_spec_ref。",
-            "旧版兼容：preflight(spec_ref) -> create(action+plan_ref)；新变更不要走这条旧路径。",
+            "新建：spec(layers,title,crs,layout?) -> spec_ref；"
+            "build(spec_ref,edits?)验证并渲染预览；"
+            "预览/审图不写工程，geo_deliver才生成一次工程并复用。",
+            "修订：build(spec_ref,edits)，后续使用返回的latest_spec_ref。",
+            "旧版：preflight(spec_ref) -> create(action+plan_ref)。",
         ],
         "rules": [
             "create 只接受 action+plan_ref；spec_ref 只能用于 build/spec/preflight/inspect。",
@@ -365,6 +366,10 @@ def describe_layers(parameters: dict, *, context, config) -> list[dict]:
 
 def save_spec(parameters: dict, *, cwd, settings) -> tuple[str, str]:
     parameters = canonical_spec(parameters)
+    # A draft is never a portable package. Remove any transient preview/package
+    # marker so delivery cannot mistake a saved spec for an already materialized
+    # project.
+    parameters.pop("project_fidelity", None)
     content = json.dumps(parameters, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":"), allow_nan=False).encode("utf-8")
     digest = hashlib.sha256(content).hexdigest()

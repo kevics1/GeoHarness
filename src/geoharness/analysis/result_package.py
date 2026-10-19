@@ -18,6 +18,19 @@ from geoharness.data.artifacts import assert_usable_artifact, sha256_file
 from geoharness.execution.contracts import artifact_facts, write_analysis_report
 
 
+class NearestCheck(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    field: str = Field(min_length=1, max_length=256,
+        description='当前源文件内需要逐实体独立复核的最近距离字段，单位米。')
+    reference_ref: str = Field(min_length=1,
+        description='实际用于距离计算的参照矢量文件路径或data:引用；必须是同一时次/选集。'
+        '多图层GPKG先明确另存单图层，不猜测图层或按文件名寻找。')
+    metric_crs: str = Field(min_length=1,
+        description='实际计算所用的米制投影，例如EPSG:32648；不可用经纬度或仅重贴CRS。')
+    absolute_tolerance: float = Field(default=0.11, ge=0, le=10, allow_inf_nan=False,
+        description='逐实体允许的舍入误差，单位米；默认0.11米，不能用于掩盖实体错配。')
+
+
 class FactRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     key: str = Field(min_length=1, max_length=256,
@@ -33,6 +46,10 @@ class FactRequest(BaseModel):
         description='明确命名当前文件的完整成员范围，例如“全体234处”或“重点13处”；分母不跨选集混用。')
     units: dict[str, str] = Field(default_factory=dict, max_length=64,
         description='numeric_fields内字段到单位的映射，例如{distance_m:"m",population:"人"}。')
+    nearest_checks: list[NearestCheck] = Field(default_factory=list, max_length=16,
+        description='需要证明最近距离正确时逐字段声明field/reference_ref/metric_crs；'
+        '系统直接从真实几何独立复算每个实体，错值或空值拒绝发布。'
+        '不声明时只能证明落盘统计自洽，不能宣称距离计算正确；不适用于路网/时间成本距离。')
     method: dict = Field(min_length=1,
         description='实际方法/参数/规则/缺失政策；距离面积方法注明metric_crs。方法是声明，'
         '不因统计核对通过而获得科学认证；未知业务阈值须明确假设或询问用户。')
@@ -72,6 +89,31 @@ def _selection(request, facts, inventory, member_digest):
             'scope_name': request.scope_name, 'scope': 'all_rows_of_exact_source'}
 
 
+def _nearest_checks(source, request, resolve):
+    import geopandas as gpd
+
+    from geoharness.execution.nearest import verify_nearest_distances
+
+    if len({check.field for check in request.nearest_checks}) != len(request.nearest_checks):
+        raise ValueError('每个最近距离字段只能声明一次复核')
+    reports = []
+    for check in request.nearest_checks:
+        if check.field not in request.numeric_fields or request.units.get(check.field) != 'm':
+            raise ValueError('最近距离复核字段必须列入numeric_fields并声明单位m')
+        reference = Path(resolve(check.reference_ref))
+        assert_usable_artifact(reference)
+        before = _source_inventory(reference)
+        report = verify_nearest_distances(gpd.read_file(source), gpd.read_file(reference),
+            key=request.key, field=check.field, metric_crs=check.metric_crs,
+            absolute_tolerance=check.absolute_tolerance)
+        if before != _source_inventory(reference):
+            raise ValueError('距离复核期间参照数据发生变化')
+        if report['status'] != 'passed':
+            raise ValueError('nearest_distance_mismatch: ' + json.dumps(report, ensure_ascii=False))
+        reports.append({**report, 'reference': str(reference), 'reference_inventory': before})
+    return reports
+
+
 def publish_package(context, *, source_ref: str, request: FactRequest):
     from geoharness.data.task_context import resolve_registered_path
     from geoharness.qgis.worker_context import WorkerContext
@@ -108,6 +150,9 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
                         'analysis_correctness': 'unverified'}
         except (OSError, ValueError, KeyError, TypeError):
             continue
+    nearest = _nearest_checks(source, request, lambda ref: WorkerContext(
+        cwd, cwd, qgis_read_roots(config, cwd)).read_path(resolve_registered_path(
+            ref, context.metadata, cwd=cwd, config=config)))
     directory = Path(config.analysis.outputs_dir).expanduser()
     directory = (directory if directory.is_absolute() else cwd / directory).resolve()
     directory = directory / ('result-' + uuid4().hex)
@@ -122,6 +167,8 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
                   source_inventory=inventory,
                   units=request.units, producer=producer,
                   status='persisted_values_checked')
+    if request.nearest_checks:
+        report['nearest_checks'] = nearest
     # Actual execution evidence is sourced from the producer, never method prose.
     execution_evidence = {'storage_crs': report['facts'].get('crs'),
         'metric_crs': None, 'metric_crs_status': 'unknown',
@@ -136,6 +183,9 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
         elif producer['producer'] in {'geo_analysis', 'geo_accessibility'}:
             execution_evidence.update(metric_crs=document.get('metric_crs'),
                                        metric_crs_status='native_execution_record')
+    if request.nearest_checks:
+        execution_evidence['nearest_distance_status'] = 'independently_recomputed'
+        execution_evidence['nearest_fields'] = [item.field for item in request.nearest_checks]
     report['execution_evidence'] = execution_evidence
     if inventory != _source_inventory(source):
         raise ValueError('发布期间源数据发生变化，不能提交当前结果包')
@@ -197,6 +247,17 @@ def verify_package(path: Path, *, guard=None):
     if report.get('units') != request.units or report.get('method') != request.method:
         raise ValueError('结果包的单位或方法声明不一致')
     evidence = report.get('execution_evidence', {})
+    if request.nearest_checks:
+        # Reuse is bound to exact reference bytes as well as the output values.
+        previous = report.get('nearest_checks', [])
+        if len(previous) != len(request.nearest_checks):
+            raise ValueError('最近距离复核证据缺失')
+        references = {check.reference_ref: saved['reference']
+                      for check, saved in zip(request.nearest_checks, previous)}
+        nearest = _nearest_checks(source, request, lambda ref: (
+            guard.read_path(references[ref]) if guard else references[ref]))
+        if nearest != previous:
+            raise ValueError('距离复核参照来源或结果发生变化，须重建结果包')
     if evidence.get('producer_manifest'):
         manifest = Path(evidence['producer_manifest'])
         if guard:
@@ -231,8 +292,9 @@ def infer_packages(metadata, mapped_sources):
 def delivery_packages(metadata, files, project_document, resolve):
     """Attach only published facts actually referenced by this selected deliverable."""
     selected = set(files)
+    analysis = project_document.get('analysis') or {}
     bound = {str(Path(a['manifest_path']).resolve()) for a in
-             project_document.get('analysis', {}).get('analyses', [])
+             analysis.get('analyses', [])
              if isinstance(a, dict) and isinstance(a.get('manifest_path'), str)}
     for reference in metadata.get('geo_task_record', {}).get('analysis_packages', []):
         path = Path(reference).resolve()
@@ -249,8 +311,11 @@ def delivery_packages(metadata, files, project_document, resolve):
             if related_source not in selected:
                 continue
         package = verify_package(path)
-        for related in (path, Path(package['facts']['source']),
-                        Path(package['companions']['markdown']['path'])):
+        related_files = [path, Path(package['facts']['source']),
+                         Path(package['companions']['markdown']['path'])]
+        related_files.extend(Path(ref) for check in package.get('nearest_checks', [])
+                             for ref in check['reference_inventory'])
+        for related in related_files:
             target = resolve(str(related))
             if target not in files:
                 if len(files) >= 100:

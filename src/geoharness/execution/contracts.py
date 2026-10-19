@@ -14,6 +14,19 @@ from pathlib import Path
 from typing import Any
 
 
+def _nearest_helpers():
+    """Load the adjacent implementation in the isolated analysis interpreter."""
+    import sys
+
+    name = '_geoharness_nearest_helpers'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name('nearest.py'))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def preflight_code(code: str, input_aliases=None) -> list[dict]:
     """Compile before starting GIS; check unconditional top-level dependencies only."""
     tree = ast.parse(code)
@@ -185,6 +198,7 @@ class EntityTracker:
         self.sources: list[tuple[str, Any]] = []
         self.writes: dict[str, dict] = {}
         self.provenance: list[dict[str, Any]] = []
+        self.nearest = _nearest_helpers().NearestBindings()
 
     def record(self, path: Any, frame: Any) -> Any:
         if len(frame) and frame.crs is not None:
@@ -209,7 +223,7 @@ class EntityTracker:
             # A unique computed rank/score/distance is not an immutable identity.
             # Prefer explicit ID names, then entity names. Unknown schemas stay
             # unverified rather than inventing a key from a numeric measurement.
-            id_names = {'id', 'fid', 'objectid', 'uuid', '__geoh_id', '编号', '唯一编号'}
+            id_names = {'id', 'gid', 'fid', 'objectid', 'uuid', '__geoh_id', '编号', '唯一编号'}
             name_names = {'name', '名称', '名字', '地名', '居民点名称', '场所名称'}
             ids = [c for c in keys if str(c).lower() in id_names
                    or str(c).lower().endswith('_id')]
@@ -752,6 +766,7 @@ def check_claims(facts: dict, claims: list[dict]) -> dict:
 
 def write_contract_report(path: Path, tracker: EntityTracker, *, input_checks=None) -> None:
     path.write_text(json.dumps({"vector_writes": tracker.writes,
+                               "nearest_attachment_checks": tracker.nearest.checks,
                                "input_checks": input_checks or {},
                                "provenance": tracker.provenance,
                                "scientific_correctness": "unverified"},

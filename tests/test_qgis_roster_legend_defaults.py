@@ -41,7 +41,8 @@ async def test_rgb_legend_default_and_roster_title_survive_native_export(tmp_pat
             {'file_path': str(points), 'name': '辅助编号', 'show_in_legend': False}],
         layout={'label_table': {'layer_index': 1, 'fields': ['id', 'name', 'distance'],
             'headers': {'distance': '距离(m)'}, 'placement': 'pages', 'page_columns': 1,
-            'title': '合成对象名单', 'note': '编号对应合成地图；距离单位为米。'}}), context)
+            'title': '合成对象名单', 'note': '编号对应合成地图；距离单位为米。'}}), context,
+        _materialize=True)
     assert not created.is_error, created.output
     manifest = json.loads(Path(created.metadata['project_manifest']).read_text(encoding='utf-8'))
     pages = manifest['native_facts']['page_previews']

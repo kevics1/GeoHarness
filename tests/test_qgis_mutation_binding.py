@@ -81,7 +81,10 @@ async def test_cancel_waits_for_registration_thread_before_releasing_map(tmp_pat
     entered, release = Event(), Event()
 
     async def native(*args, **kwargs):
-        return {"status": "succeeded", "result": {}}
+        return {"status": "succeeded", "result": {
+            'project_dir': str(tmp_path / 'run'),
+            'project_manifest': str(tmp_path / 'run/project.json'),
+            'preview_path': str(tmp_path / 'run/preview.png')}}
 
     def register(result, *args, **kwargs):
         entered.set()

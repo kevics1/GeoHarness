@@ -96,7 +96,7 @@ def record(job_id, metadata, cwd, image, **kwargs):
     )
 
 
-async def test_delivery_selects_last_unchanged_layout_pass_and_keeps_matching_project(tmp_path):
+async def test_delivery_preserves_selection_even_when_history_has_better_candidate(tmp_path):
     from openharness.tools.base import ToolExecutionContext
 
     from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
@@ -121,22 +121,46 @@ async def test_delivery_selects_last_unchanged_layout_pass_and_keeps_matching_pr
     assert receipt["latest_version"] == 2
     assert receipt["delivery_candidate"]["version"] == 1
     delivered = await GeoDeliverTool().execute(GeoDeliverInput(
-        primary_map=str(bad), map_id=job_id, name="checked"), context)
+        map_id=job_id, version_policy="prefer_checked", name="checked"), context)
+    assert delivered.is_error and 'missing_project' in delivered.output
+    delivered = await GeoDeliverTool().execute(GeoDeliverInput(
+        map_id=job_id, primary_map=str(good), name='explicit-history'), context)
     assert not delivered.is_error, delivered.output
     result = delivered.metadata
     assert result["selection"]["selected_version"] == 1
+    assert result["selection"]["changed"] is False
+    assert result["selection"]["requested_version"] == 1
     assert Path(result["primary_map"]).read_bytes() == good.read_bytes()
     assert result["project_fidelity"] == "saved_layout"
     assert Path(result["qgis_project"]).is_file()
     assert result["quality_status"] == "draft"  # No visual review was performed.
 
+    # A later requested version must not be silently replaced under prefer_checked.
+    latest = tmp_path / "latest.png"
+    latest.write_bytes(b"newest requested map")
+    latest_project = tmp_path / "latest-project"
+    latest_layout = package(latest_project, latest)
+    latest_manifest = json.loads((latest_project / "project.json").read_text())
+    latest_manifest.update(backend="qgis", project_fidelity="saved_layout")
+    (latest_project / "project.json").write_text(json.dumps(latest_manifest), encoding="utf-8")
+    record(job_id, metadata, tmp_path, latest, preflight=preflight(),
+           layout=latest_layout, project_dir=latest_project)
+    pinned = await GeoDeliverTool().execute(GeoDeliverInput(
+        primary_map=str(latest), project_dir=str(latest_project), map_id=job_id,
+        version_policy="prefer_checked", name="pinned-latest"), context)
+    assert not pinned.is_error, pinned.output
+    assert Path(pinned.metadata["primary_map"]).read_bytes() == latest.read_bytes()
+    assert pinned.metadata["selection"]["selected_version"] == pinned.metadata[
+        "map_receipt"]["selected_version"]
+    assert pinned.metadata["selection"]["changed"] is False
+    assert pinned.metadata["selection"].get("explicitly_pinned") is True
+
     good.write_bytes(b"changed after check")
     stale = map_job_receipt(context.metadata, cwd=tmp_path, config=config, map_id=job_id)
-    assert stale["delivery_candidate"] is None
+    assert stale["delivery_candidate"]['version'] == 3
     refused = await GeoDeliverTool().execute(GeoDeliverInput(
-        primary_map=str(bad), map_id=job_id, name="blocked"), context)
+        map_id=job_id, primary_map=str(good), name="blocked"), context)
     assert refused.is_error
-    assert "no unchanged candidate" in refused.output
 
 
 def test_candidate_selection_prefers_visual_pass_over_unreviewed_version(tmp_path):
@@ -180,7 +204,7 @@ async def test_delivery_by_id_and_explicit_draft_preserve_selection_intent(tmp_p
     tool = GeoDeliverTool()
     by_id = await tool.execute(GeoDeliverInput(map_id=job_id), context)
     assert not by_id.is_error, by_id.output
-    assert Path(by_id.metadata["primary_map"]).read_bytes() == good.read_bytes()
+    assert Path(by_id.metadata["primary_map"]).read_bytes() == bad.read_bytes()
     explicit = await tool.execute(GeoDeliverInput(
         map_id=job_id, primary_map=str(bad), version_policy="selected"), context)
     assert not explicit.is_error, explicit.output
@@ -226,7 +250,7 @@ def test_candidate_excludes_changed_bound_report(tmp_path):
 
 
 @pytest.mark.parametrize("changed_during_copy", [False, True])
-async def test_delivery_fallback_uses_older_visual_report_after_restart(
+async def test_delivery_explicit_history_recovers_its_visual_report_after_restart(
     tmp_path, monkeypatch, changed_during_copy,
 ):
     from openharness.tools.base import ToolExecutionContext
@@ -272,7 +296,7 @@ async def test_delivery_fallback_uses_older_visual_report_after_restart(
 
         monkeypatch.setattr("geoharness.tools.geo_deliver.shutil.copy2", mutate_then_restore)
     result = await GeoDeliverTool().execute(GeoDeliverInput(
-        map_id=job_id, primary_map=str(bad)), context)
+        map_id=job_id, primary_map=str(good)), context)
     assert not result.is_error, result.output
     assert result.metadata["quality_status"] == ("draft" if changed_during_copy else "passed")
     assert result.metadata["snapshot_status"] == ("changed" if changed_during_copy else "passed")

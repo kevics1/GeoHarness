@@ -33,6 +33,8 @@ def observe_findings(metadata, *, cwd, map_id, page_index, image_sha256, review,
         for issue in review.get('issues', []) if review.get('status') == 'issues' else []:
             if issue.get('severity') not in {'warning', 'error'}:
                 continue
+            issue = {key: value for key, value in issue.items()
+                     if key not in {'issue_id', 'state', 'map_id', 'page_index'}}
             matched = next((old for old in previous if _same_concern(old['issue'], issue)), None)
             if matched is None:
                 identity = 'issue:' + hashlib.sha256(json.dumps(
@@ -50,6 +52,8 @@ def observe_findings(metadata, *, cwd, map_id, page_index, image_sha256, review,
                            if pixel_sha256 else True)
                 if changed and matched['state'] in {'dismissed', 'fix_verified', 'needs_recheck'}:
                     matched['state'] = 'open'
+            # Never let model-authored identity/state fields overwrite the task-owned
+            # finding id or lifecycle. Keep only the visible observations in `issue`.
             matched.update(issue=issue, last_image_sha256=image_sha256)
             if pixel_sha256 and pixel_sha256 not in matched.setdefault('seen_pixels', []):
                 matched['seen_pixels'].append(pixel_sha256)
@@ -132,6 +136,20 @@ def pending_findings(metadata, *, cwd, map_ids):
     identities = {value for value in map_ids if value}
     aliases = metadata.get('map_job_state', {}).get('aliases', {})
     identities.update(alias for alias, target in aliases.items() if target in identities)
-    return [{'issue_id': item['issue_id'], 'state': item['state'], **item['issue']}
-            for item in findings.values() if item['map_id'] in identities
-            and item['state'] not in {'dismissed', 'fix_verified'}]
+    pending = []
+    for item in findings.values():
+        if item['map_id'] not in identities or item['state'] in {'dismissed', 'fix_verified'}:
+            continue
+        # The visual model may return an empty issue_id. Spread first, then restore
+        # system-owned identity/state/page/version fields so whitespace or an empty
+        # string cannot make downstream findings untraceable or overwrite the ledger.
+        pending.append({
+            **item['issue'],
+            'issue_id': item['issue_id'],
+            'state': item['state'],
+            'map_id': item['map_id'],
+            'page_index': item['page_index'],
+            'first_image_sha256': item.get('first_image_sha256'),
+            'last_image_sha256': item.get('last_image_sha256'),
+        })
+    return pending

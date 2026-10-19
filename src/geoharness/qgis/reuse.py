@@ -32,6 +32,7 @@ def render_key(payload, config):
         "output_path": payload.get("output_path"),
         "project_format": payload.get("project_format"),
         "strict_layout": payload.get("strict_layout"),
+        "preview_only": payload.get('_preview_only', False),
         "qgis": config.qgis.model_dump(mode="json"),
     }, sort_keys=True).encode()).hexdigest()
 
@@ -66,6 +67,11 @@ def _package_files(result):
         measured[str(file)] = _digest(file)
     for key in ("output_path", "preview_path", "project_file"):
         value = result.metadata.get(key)
+        # A preview-only result deliberately has no editable project. Its absence
+        # is part of the frozen contract; requiring a fabricated project file would
+        # make every identical rebuild miss the cache and invoke QGIS again.
+        if key == "project_file" and not value:
+            continue
         if isinstance(value, str):
             file = Path(value).absolute()
             if file.resolve() != file or not file.is_file():

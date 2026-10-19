@@ -97,3 +97,22 @@ def test_png_metadata_change_cannot_prove_a_pixel_fix(tmp_path):
     with pytest.raises(ValueError, match='新像素'):
         review_findings(context, issue_id=identity, disposition='fix_verified',
                         reason='只更新了容器信息', evidence_operation_id=operation)
+
+
+def test_pending_findings_keep_system_identity_and_page_binding(tmp_path):
+    """A model-authored empty issue_id must not erase the stable registry id."""
+    context, _ = setup_context(tmp_path)
+    issue = {'severity': 'warning', 'issue_code': 'label_overlap',
+             'location': '主图', 'description': '标签重叠', 'issue_id': ''}
+    observed = record(context, tmp_path, 'a', [issue])
+    identity = observed['current'][0]['issue_id']
+    assert identity.startswith('issue:')
+    from geoharness.cartography.review_findings import pending_findings
+
+    pending = pending_findings(context.metadata, cwd=tmp_path, map_ids={'map'})
+    assert len(pending) == 1
+    assert pending[0]['issue_id'] == identity
+    assert pending[0]['state'] == 'open'
+    assert pending[0]['map_id'] == 'map'
+    assert pending[0]['page_index'] == 0
+    assert pending[0]['last_image_sha256'] == 'a'
