@@ -1,8 +1,48 @@
 # GeoHarness 使用指南
 
+## 当前主流程（2026-10-19）
+
+数据获取 → 数据审查 → 空间分析 → 非 QGIS 原生制图 → 原生图片审查 → 交付时一次生成 QGIS 工程。
+
+标准空间分析优先 `geo_qgis` Processing；`geo_python(backend="qgis")` 提供分析控制台。
+制图、修图和审图阶段不启动 QGIS，也不写 `.qgs/.qgz`。模型可见的
+`geo_qgis_project` 现在只有 `inspect(project_path=...)`，用来检查已有工程。
+本指南较早章节的 QGIS spec/build/create/export、qgis_layout 等示例属于高级兼容接口参考，
+不适用于当前模型主流程；兼容默认关闭，不要通过这些旧入口绕过审图。
+
+首次制图使用 `geo_cartography(action="render", scene={...})`。Scene 定义真实图层、
+显示 CRS、分类和稳定页面；完整字段有中文 Schema 与 `help` 示例。纸张、符号大小为 mm，
+字号为 pt，extent 为显示 CRS 的 xmin/ymin/xmax/ymax。页面按从底到顶引用图层 ID。
+名册 `table.layer/fields/headers` 自动分页并保留全部行，不猜测或截断对象。数值默认最多显示2位小数，`table.decimals` 可按字段指定0–8位；不会改写分析原值。
+后续使用返回的 `scene_ref` 加 `edits=[{target,id,changes}]`，按稳定 ID 合并修改。
+PNG 和多页 PDF 始终生成，可附加 SVG/HTML；静态审图不认证 HTML 交互功能。
+
+先处理返回的 `layout.bounds_check.problems`，再用
+`geo_map_review(file_path=preview_path, all_pages=true)`。工具只读取真实图片和登记问题。
+只改名单时，未变页面按内容身份、图片哈希和原审查证据继承 passed/issues；
+改变的页面仍须审查。语义疑问和美化建议保留为诊断，不能冒充像素缺陷；
+服务失败保留 unverified。未登记图片的独立审查不制造地图版本。
+
+分析包统一使用 `analysis_ref`（兼容 `package_path`）给制图；`report_path` 是给人看的
+Markdown，不能当 JSON。对于生产者实际读取过、同一任务已发布的前序结果，发布时自动
+按实体 ID 检查已发布数值/分类字段是否丢失或新增空值；子集按其真实成员比较。
+也可显式使用 `carry_from/carry_fields`。有意删除或重算字段须在 `field_changes`
+说明真实业务原因；这一机制不认证任意 Python 算法的科学正确性。
+
+`geo_deliver(project_dir=返回的原生目录)` 在数据、实测布局和全部页面审查通过且没有待处置
+问题时才冻结当前候选，首次生成可编辑 QGIS 图层和布局。生成后重开验证数据几何、属性、
+样式、图框和文字；PNG/PDF仍使用已审原生图片，不悄悄替换成 QGIS 重新渲染的图片。
+跨渲染器像素完全一致不在验证声明内。相同候选重复交付或重启后复用已有工程。
+未知中断结果保留记录、拒绝盲目重建；显式恢复入口仍待实现。
+
+旧配置 `cartography.static_renderer: qgis` 为兼容解析保留，但不会把新主流程切回 QGIS。
+用户模型、high 思考强度、视觉服务和凭证不因本轮更新而改变。更新后重启 `geoh run`
+载入新代码。20 分钟是效率目标，没有新增累计时间或调用次数截停。
+
+
 当前优先完成多图层叠加与影响范围分析，支持原生 GIS 和自主 Python 分析，并读取成图进行检查、修正和重绘。空间热点与栅格/地形是后续重点。
 
-本版本保留本地矢量/栅格及 QGIS 分析制图能力；暂不提供在线天地图瓦片下载工具。
+本版本保留本地矢量/栅格、QGIS 分析与最终工程导出能力；暂不提供在线天地图瓦片下载工具。
 
 ## 分析、引用与制图的执行契约
 
@@ -18,7 +58,7 @@
 
 `geo_accessibility` 提供道路网络可达性分析。输入道路、居民点、避难所及各自唯一非空 ID 字段；明确双向道路假设，或提供方向字段及每种取值的 `forward/reverse/both/closed` 映射，同时明确速度、最大吸附距离与米制投影。可选择具体时次的危险区域，排除与危险区域相交的路段、端点和连接线。输出逐居民点状态、原因、可达避难所数、完整路线和方法假设；距离包括端点连接线，时间分别使用道路与连接线速度。仅连接具有相同 XY 顶点的道路，不自动处理未打断交叉线或猜测桥梁层级。目标可显式选择最短总距离或按声明速度估计的最短时间；容量保留为属性，不进行容量分配。
 
-QGIS 地图可以分步配置：先 `geo_qgis_project(action="spec", title="专题图")` 保存草案，再用返回的 `spec_ref` 与 `patches=[{"path":["layers",0],"value":{"file_path":"实际路径","style":{"color":"#cc3300"}}}]` 逐层增加或修改。补全后以 `action="preflight", spec_ref=...` 进行实际数据和布局检查，再仅用 `action="create", plan_ref=...` 创建。不要在 `plan_ref` 创建时再次提交标题、格式或地图ID；改变配置需重新预检。
+以下两段仅解释历史工程接口，默认关闭，当前模型的工具表不提供这些动作。当前制图请使用文首的 `scene` / `scene_ref`；工程由交付入口生成。高级兼容代码仍可分步配置旧 QGIS 草案：先 `geo_qgis_project(action="spec", title="专题图")`，再用 `spec_ref` 与 `patches` 修改，实际预检后使用冻结的 `plan_ref` 创建；不能在冻结计划上再混入新配置。兼容调用同样不能绕过交付审查准入。
 
 同一地图框的显式范围与 `focus_layers` 自动聚焦互斥。名单表的 `fields[0]` 必须是唯一非空键；`columns` 指并排的完整表格数，而不是属性字段数。只显示前N项时必须明确 `top_n` 与 `sort_by`，也可用 `keys` 精确选择；不选择则保留全部。`placement="auto"` 在实测空间不足时自动增添名单页，`pages` 直接分页，`inline` 要求全部放在主页面。完整名单另存 `roster_full.csv`，名单页保留在可编辑工程中并导出页预览；主地图 PNG 对应工程的第1页。空间不足会返回实际行数、容量和尺寸，不通过静默删行解决。地图生成仍无版数上限；相同失败输入不变时应先修正，不机械重复执行。
 

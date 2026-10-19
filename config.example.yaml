@@ -24,7 +24,7 @@ agent:
 data:
   file_dir: .
 cartography:
-  static_renderer: qgis
+  static_renderer: matplotlib
   jobs_dir: .geoharness/maps  # Stable map job receipts inside the current workspace
   minimum_span_geographic: 0.02
   minimum_span_projected: 1000

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from geoharness.data.artifacts import lookup_reference
 from geoharness.data.task_context import data_ref_snapshot, resolve_registered_path
+from geoharness.execution.contracts import _reachable_ast
 
 
 def bind_managed_inputs(arguments, context):
@@ -40,7 +41,10 @@ def bind_managed_inputs(arguments, context):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     values[target.id] = literal(node.value)
-    for node in ast.walk(tree):
+    # Only visit nodes reachable in the actual control flow. A literal
+    # `if False:` probe or a debug branch must not force unrelated inputs to be
+    # declared for code that will never execute.
+    for node in _reachable_ast(tree):
         if not isinstance(node, ast.Call) or not node.args:
             continue
         name = node.func.id if isinstance(node.func, ast.Name) else ''
@@ -74,7 +78,10 @@ def bind_managed_inputs(arguments, context):
             if len(matches) != 1:
                 # An explicit alias remains usable; its file/hash are checked by the tool.
                 explicit = [v for v in bindings.values() if v == value]
-                if explicit:
+                # An alias may be supplied as its key in read_vector(alias), not
+                # only as the resolved file value. Never send a valid declared
+                # input to an unregistered-reference precondition failure.
+                if explicit or value in bindings:
                     continue
                 raise ValueError(f'读取引用未登记或不唯一：{value!r}；'
                                  '请inspect数据或声明input_refs。')

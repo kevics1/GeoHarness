@@ -1,7 +1,7 @@
 """GeoHarness tool registry — whitelist + native + MCP.
 
 Builds a ToolRegistry with only domain-relevant tools:
-- 10 native tools plus 2 optional QGIS tools: Processing and editable projects
+- 10 native tools plus 2 optional QGIS tools: Processing and read-only project inspection
 - 5 whitelisted OpenHarness tools (ask_user_question, skill, todo_write,
   tool_search, brief) — user interaction helpers
 - MCP tools (registered dynamically when MCP manager is connected)
@@ -18,11 +18,12 @@ from openharness.tools.base import ToolRegistry
 
 from geoharness.tools.geo_accessibility import GeoAccessibilityTool
 from geoharness.tools.geo_analysis import GeoAnalysisTool
-from geoharness.tools.geo_cartography import GeoCartographyTool
 from geoharness.tools.geo_db_data import GeoDBDataTool
 from geoharness.tools.geo_deliver import GeoDeliverTool
 from geoharness.tools.geo_map_review import GeoMapReviewTool
+from geoharness.tools.geo_native_map import GeoNativeMapTool
 from geoharness.tools.geo_python import GeoPythonTool
+from geoharness.tools.geo_qgis_inspect import GeoQgisProjectReadTool
 from geoharness.tools.geo_raster_data import GeoRasterDataTool
 from geoharness.tools.geo_task import GeoTaskTool
 from geoharness.tools.geo_vector_data import GeoVectorDataTool
@@ -65,7 +66,7 @@ def build_geo_tool_registry(
     registry.register(GeoDBDataTool())
     registry.register(GeoVectorDataTool())
     registry.register(GeoRasterDataTool())
-    registry.register(GeoCartographyTool())
+    registry.register(GeoNativeMapTool())
     registry.register(GeoAnalysisTool())
     registry.register(GeoAccessibilityTool())
     registry.register(GeoPythonTool(
@@ -78,10 +79,12 @@ def build_geo_tool_registry(
 
     if getattr(getattr(config, "qgis", None), "enabled", True):
         from geoharness.tools.geo_qgis import GeoQgisTool
-        from geoharness.tools.geo_qgis_project import GeoQgisProjectTool
 
         registry.register(GeoQgisTool())
-        registry.register(GeoQgisProjectTool())
+        # geo_qgis_project is read-only for the model: it inspects user-authored
+        # or delivered projects. All project compilation belongs to geo_deliver,
+        # which reads the reviewed native scene plan exactly once.
+        registry.register(GeoQgisProjectReadTool())
 
     # 2. Register whitelisted OpenHarness tools
     _register_whitelist_tools(registry)

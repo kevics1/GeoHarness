@@ -1133,8 +1133,9 @@ class GeoQgisProjectInput(BaseModel):
 class GeoQgisProjectTool(BaseTool):
     name = "geo_qgis_project"
     description = (
-        "权威 QGIS 地图契约：本地数据/data: 引用 -> 原生布局PNG/PDF预览。"
-        "build/create/export均不生成工程；审查选定预览后geo_deliver一次生成可编辑工程并复用。"
+        "QGIS 工程契约：读取/检查/导出现有工程，或在交付阶段生成最终可编辑工程。"
+        "普通制图/修图/审图不得调用本工具创建布局预览；先用geo_cartography原生渲染PNG/PDF，"
+        "再用geo_map_review读图。审图通过后geo_deliver一次生成可编辑工程并复用。"
         "一次保存 spec，再用 build(spec_ref, edits by layer_key) 在单个原生作业和单次模型"
         "往返中完成验证与导出。把相关图层/样式/标注/图框/名册编辑合并进该 build。"
         "用 help(section=style/labels/frame/layout/edits) 查看实际运行时 schema；不要使用 "

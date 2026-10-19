@@ -25,7 +25,9 @@ async def test_native_create_requests_preview_without_portable_layer_snapshots(
         return {'status': 'succeeded', 'result': {}}
 
     monkeypatch.setattr('geoharness.qgis.runner.execute_qgis', runner)
-    context = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': GeoConfig()})
+    context = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': GeoConfig(
+        qgis=GeoConfig().qgis.model_copy(update={
+            'allow_project_previews': True, 'allow_console_layouts': True}))})
     result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(
         action='create', layers=[{'file_path': str(source)}]), context)
     # This test stubs the native worker; its empty result cannot be treated as
@@ -73,7 +75,8 @@ async def test_native_multipage_preview_delivery_and_repeat_share_one_project(tm
     from geoharness.qgis.discovery import discover_qgis
     from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
 
-    config = GeoConfig()
+    config = GeoConfig(qgis=GeoConfig().qgis.model_copy(
+        update={'allow_project_previews': True, 'allow_console_layouts': True}))
     try:
         discover_qgis(config.qgis, cwd=tmp_path)
     except (ValueError, OSError) as exc:
@@ -163,14 +166,15 @@ async def test_native_multipage_preview_delivery_and_repeat_share_one_project(tm
 
 
 @pytest.mark.parametrize('change_source', [False, True])
-async def test_user_authored_project_export_previews_then_materializes_once(
+async def test_user_authored_export_without_data_contract_cannot_materialize(
     tmp_path, change_source,
 ):
     from geoharness.qgis.discovery import discover_qgis
     from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
     from geoharness.tools.geo_python import GeoPythonInput, GeoPythonTool
 
-    config = GeoConfig()
+    config = GeoConfig(qgis=GeoConfig().qgis.model_copy(
+        update={'allow_project_previews': True, 'allow_console_layouts': True}))
     try:
         discover_qgis(config.qgis, cwd=tmp_path)
     except (ValueError, OSError) as exc:
@@ -215,22 +219,31 @@ assert Project.write(str(RUN_DIR/'user.qgz'))
     manifest = json.loads((preview / 'project.json').read_text('utf-8'))
     assert manifest['project_fidelity'] == 'preview_only'
     assert not list(preview.rglob('*.qgz'))
+    # Compatibility export still requires a bound review before finalization.
+    # This is synthetic evidence, not a real visual/business acceptance.
+    from geoharness.cartography.jobs import map_job_receipt, record_map_review
+
+    receipt = map_job_receipt(context.metadata, cwd=tmp_path, config=config,
+        artifact_path=Path(exported.metadata['preview_path']))
+    for page in manifest['native_facts']['page_previews']:
+        image = preview / page['path']
+        record_map_review(receipt['job_id'], context.metadata, cwd=tmp_path, config=config,
+            image_path=image, review={'status': 'passed', 'image_sha256': hashlib.sha256(
+                image.read_bytes()).hexdigest(), 'issues': [], 'diagnostics': {
+                'page_visual_status': 'passed', 'review_binding': {
+                    'version': receipt['selected_version'], 'page_index': page['page_index'],
+                    'primary_image_sha256': receipt['image_sha256'],
+                    'manifest_sha256': hashlib.sha256((preview / 'project.json').read_bytes()
+                                                     ).hexdigest()}}})
     if change_source:
         changed = gpd.read_file(source)
         changed['id'] = [8, 9]
         changed.to_file(source)
-        denied = await GeoDeliverTool().execute(GeoDeliverInput(project_dir=str(preview)), context)
-        assert denied.is_error and '来源已变化' in denied.output
-        assert len(list(tmp_path.rglob('*.qgz'))) == 1
-        return
     delivered = await GeoDeliverTool().execute(GeoDeliverInput(project_dir=str(preview)), context)
-    assert not delivered.is_error, delivered.output
-    assert Path(delivered.metadata['qgis_project']).is_file()
-    count = len([p for p in tmp_path.rglob('*.qgz') if 'exports' not in p.parts])
-    assert count == 2  # The user's fixture and exactly one generated project.
-    again = await GeoDeliverTool().execute(GeoDeliverInput(project_dir=str(preview)), context)
-    assert not again.is_error, again.output
-    assert len([p for p in tmp_path.rglob('*.qgz') if 'exports' not in p.parts]) == count
+    # A visually accepted imported project still has no verified data contract.
+    # It must not generate a second project, even when its sources also changed.
+    assert delivered.is_error and 'delivery_not_ready' in delivered.output
+    assert len(list(tmp_path.rglob('*.qgz'))) == 1
     assert hashlib.sha256(original.read_bytes()).hexdigest() == digest
 
 

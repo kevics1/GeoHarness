@@ -74,7 +74,7 @@ def observe_operation(metadata, *, tool, action, result):
         'unverified' if tool == 'geo_deliver' else 'not_applicable')
     owner = {'geo_python': 'python', 'geo_task': 'python', 'geo_map_review': 'review',
              'geo_deliver': 'delivery', 'geo_qgis': 'qgis',
-             'geo_qgis_project': 'map_ledger'}.get(tool)
+             'geo_cartography': 'map_ledger', 'geo_qgis_project': 'map_ledger'}.get(tool)
     locator = next((details[k] for k in ('review_path', 'manifest_path', 'project_manifest')
                     if isinstance(details.get(k), str)), None)
     reference = None

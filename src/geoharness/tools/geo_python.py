@@ -192,7 +192,8 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
     if "Read path is outside allowed" in stderr:
         hints.append("Read only returned QGIS diagnostic files, previews and project.json, "
                      "not the QGIS directory/profile. "
-                     "Use geo_qgis_project inspect to list layouts. "
+                     "Use geo_qgis_project(action=inspect, project_path=...) only for an "
+                     "existing/final editable project; it cannot build a new map. "
                      "For QGIS fonts prefer font_family; explicit font_file must be in authorized "
                      "data/workspace. Do not inspect system directories or tool source code.")
     if "Input shapes do not overlap raster" in stderr or "WindowError" in stderr:
@@ -214,7 +215,8 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
         hints.append('先对实际中间表/数组执行describe_input(value)，核对字段、dtype、CRS或shape；'
                      '不要根据原始表或上一阶段假定字段仍存在，不要重做已成功的分析。')
     if 'Read path is outside allowed' in stderr and '.pdf' in code:
-        hints.append('工程PDF通过geo_qgis_project export和geo_deliver处理；'
+        hints.append('已有/最终工程的PDF用geo_qgis_project(action=inspect)读取；'
+                     '普通制图用geo_cartography原生渲染并geo_deliver交付，'
                      '使用实际返回的产物路径，不自行拼接工程内部文件名。')
     return hints
 

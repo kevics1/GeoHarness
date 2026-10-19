@@ -42,3 +42,11 @@ F1 engineering_checked：稳定ID分析及最近距离独立校验；默认字�
 F2 engineering_checked：普通build/create/export只渲染预览；交付冻结后一次生成工程并复用，包括重启后的同spec_ref入口。固定选定版本，逐页SHA、来源、布局绑定；未知中断记录不自动恢复。
 F3 engineering_checked：简短行动摘要、当前/历史问题分离、稳定ID去重、中文字段/help及指南同步，完整证据仍保留。
 F4 engineering_checked / business_acceptance_pending：完整1657项快照1634通过/23失败，修复后23项精确复验通过；收尾59项、最终wheel73项通过。已实际安装，127模块+34资源零差异，CLI17工具通过，安装后真实链29项通过。独立审查无有效报告，真实主/视觉模型业务质量与效率仍待验收，长期待办已记录TODO。保留high、配置、源数据、历史成果及.env.example既有修改。
+
+2026-10-19 用户进一步明确流程（取代旧方案的QGIS预览约定）：数据获取→数据审查→空间分析→非QGIS原生制图→原生图片审查通过→交付时一次生成可编辑QGIS文件。标准分析仍可用QGIS Processing；制图/修图不得启动QGIS。当前请求只读审查最新测试、统计问题并提出完整方案，尚未授权本轮新实现。
+G1 analysis_complete：审查森林火灾改15:37–15:57现有会话、SQLite、原生请求、15份图片审查及两份交付；89调用20错误、14 build、18 help；7次成功QGIS预览、2次交付工程。补核真实几何距离/名称234条一致，但最终高程由4空值退化为234空值；仅改名册后其他页像素相同，审查没有继承。原始数据SHA未变。
+G2 design_complete / implementation_not_started：完整方案已保存diagnostics/2026-10-19-native-workflow-review-and-plan.md。无QGIS制图的统一计划、分析字段契约、独立问题判定、交付准入与一次工程编译；跨渲染器不承诺字节同图，需同计划一致性验证。仅改renderer不够，旧Matplotlib工程是reference。新架构未实施，本轮不修改产品/配置，不运行真实模型或覆盖历史产物。
+
+G3 implementation_in_progress（用户已明确启动）：统一非QGIS制图计划/原生渲染与最终工程编译；审图准入、稳定页面/增量审查；输入别名/不可达预检/同任务调度；分析字段连续性；中文接口与文档；原生多页真实链及wheel/安装验收。主代理负责渲染和交付，独立子任务仅修改输入调度与分析契约，不修改配置或业务数据。
+
+G3 engineering_checked / business_acceptance_pending：统一Scene与非QGIS渲染/增量修图/页面审查绑定、一次最终可编辑工程、字段连续性和中文工具接口已实施并安装；最终wheel21项、收尾40项、原失败12项精确复验、安装后23项、133模块+34资源一致性及CLI17工具通过。真实视觉服务HTTP503；业务质量/耗时和独立审查不作通过声明。细节见diagnostics/2026-10-19-native-workflow-review-and-plan.md。

@@ -47,6 +47,14 @@ class QgisConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     enabled: bool = True
+    # Analysis and final project compilation are separate capabilities. Normal
+    # cartography/review must not start QGIS even when Processing is enabled.
+    allow_project_previews: bool = Field(default=False, description=(
+        "兼容开关，默认false。普通制图/修图/审图不得创建QGIS工程预览；"
+        "只有最终交付时由geo_deliver物化一次工程。"))
+    allow_console_layouts: bool = Field(default=False, description=(
+        "高级兼容开关，默认false。允许用户在PyQGIS控制台显式创建/编辑布局工程；"
+        "普通分析和主流程制图仍应使用geo_cartography与geo_deliver。"))
     install_dir: str = ""
     python_executable: str = ""
     prefix_path: str = ""
@@ -211,7 +219,7 @@ class CartographyConfig:
 
     default_template: str = ""
     outputs_dir: str = "exports"
-    static_renderer: str = "qgis"
+    static_renderer: str = "matplotlib"
     jobs_dir: str = ".geoharness/maps"
     minimum_span_geographic: float = 0.02
     minimum_span_projected: float = 1000
@@ -219,8 +227,8 @@ class CartographyConfig:
     bridge_rules: dict[str, BridgeRule] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.static_renderer not in {"qgis", "matplotlib"}:
-            raise ValueError("cartography.static_renderer must be qgis or matplotlib")
+        if self.static_renderer not in {"matplotlib", "qgis"}:
+            raise ValueError("cartography.static_renderer must be matplotlib or qgis")
         if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0
                for value in (self.minimum_span_geographic, self.minimum_span_projected)):
             raise ValueError("cartography minimum extent spans must be positive")
@@ -364,7 +372,7 @@ def _parse_cartography(raw: dict[str, Any] | None) -> CartographyConfig:
     return CartographyConfig(
         default_template=template,
         outputs_dir=outputs_dir,
-        static_renderer=raw.get("static_renderer", "qgis"),
+        static_renderer=raw.get("static_renderer", "matplotlib"),
         jobs_dir=_expand_vars(raw.get("jobs_dir") or CartographyConfig().jobs_dir),
         minimum_span_geographic=raw.get("minimum_span_geographic", 0.02),
         minimum_span_projected=raw.get("minimum_span_projected", 1000),

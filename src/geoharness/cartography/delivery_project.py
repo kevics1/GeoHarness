@@ -90,6 +90,9 @@ async def materialize_project(context, spec_ref='', *, preview_dir=''):
                 if bound == spec_ref:
                     preview_dir = str(descriptor.parent)
         if not preview_dir:
+            if not config.qgis.allow_project_previews:
+                raise ValueError('delivery_not_ready: 没有已登记已审候选；'
+                                 '先用geo_cartography原生制图和审图，不在交付入口创建QGIS预览')
             preview = await invoke(build)
             preview_dir = preview.get('project_dir')
     if not preview_dir:
@@ -109,6 +112,12 @@ async def materialize_project(context, spec_ref='', *, preview_dir=''):
                              artifact_path=image)
     if not receipt.get('artifact_registered') or not receipt.get('selected_version'):
         raise ValueError('交付只接受已登记且未变化的预览版本')
+    from geoharness.cartography.review_findings import pending_findings
+
+    if (any(receipt['stages'].get(stage, {}).get('status') != 'passed'
+            for stage in ('data_checked', 'layout_checked', 'visual_checked'))
+            or pending_findings(context.metadata, cwd=context.cwd, map_ids={receipt['job_id']})):
+        raise ValueError('delivery_not_ready: 数据、布局和全部图片审查须通过；未生成工程')
     package = receipt['stages']['packaged']
     selected = next(v for v in receipt['versions']
                     if v['version'] == receipt['selected_version'])

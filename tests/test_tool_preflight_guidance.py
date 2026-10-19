@@ -48,7 +48,10 @@ def test_tool_and_system_share_python_cautions_without_growing_the_description()
     prompt = _build_execution_section(GeoConfig())
     assert invocation_guide("geo_python") in GeoPythonTool.description
     assert invocation_guide("geo_python") in prompt
+    assert invocation_guide("geo_cartography") in prompt
     assert invocation_guide("geo_qgis_project") in prompt
+    assert "仅inspect" in prompt
+    assert "首选 build(spec_ref, edits)" not in prompt
     assert "read(1) is 2D" in prompt and "nodata, not fill_value" in prompt
     assert "调用前注意事项" in prompt
     assert len(GeoPythonTool.description) < 4463

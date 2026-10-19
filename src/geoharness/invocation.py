@@ -16,6 +16,19 @@ PYTHON_CAUTIONS = (
     "已确认的瞬态故障。",
 )
 
+NATIVE_CARTOGRAPHY_CAUTIONS = (
+    "geo_cartography 只做原生渲染，不启动 QGIS、不生成 .qgs/.qgz；普通制图、修图和"
+    "审图都走这里。不要调用 geo_qgis_project 构建普通地图。",
+    "纸面坐标单位是毫米(mm)，字体单位是 pt；extent 使用 Scene.crs 的坐标单位。"
+    "Layer.key 是真实唯一非空实体字段，select_keys 只选择对象，不移动真实几何。",
+    "页面从底到顶声明 layer id；extent 与 focus_layers 二选一。table.layer 必须是"
+    "实际 Layer.id；分类图例 categories 必须覆盖实际字段值，不能写占位符。",
+    "首次传完整 scene；之后用返回的 scene_ref + edits 按稳定 id 合并修改，不要重复"
+    "整套 scene。渲染返回 layout.problems 与 page_previews，先修确定缺陷再审图。",
+    "geo_map_review(all_pages=true) 只读取实际页面像素并登记审查；不改图。"
+    "全部必要页面通过且没有待处置问题后，geo_deliver 才生成一次可编辑工程。",
+)
+
 QGIS_CAUTIONS = (
     "首选 build(spec_ref, edits)：一个原生作业完成验证、渲染和打包。首次草案用 "
     "action=spec 并给 layers；已有草案才用 spec_ref。旧版冻结 create 只接受 "
@@ -30,12 +43,16 @@ QGIS_CAUTIONS = (
     "到 build/spec/create/preflight。",
     "名录 key_field（或第一个字段）必须唯一且非空；top_n 需要 sort_by 且会排除 keys。"
     "测量表格/图例空间；build/create 只证明工程产出，不代表视觉验收。",
-    "成功结果返回 project_dir/project_file 和 preview_path。制作地图最终交付时，"
-    "geo_deliver 必须带 project_dir；不能只交 PNG/PDF，也不能把截图当可编辑工程。",
+    "普通制图/修图/审图不生成工程，也不以本工具作为默认制图入口。只有用户明确检查/修改"
+    "已有工程，或已通过审图的冻结候选需要最终工程时才使用。最终工程由geo_deliver一次生成；"
+    "不能只交PNG/PDF，也不能把截图当可编辑工程。",
 )
 
 def invocation_guide(tool_name: str) -> str:
-    rules = PYTHON_CAUTIONS if tool_name == "geo_python" else QGIS_CAUTIONS
+    rules = (PYTHON_CAUTIONS if tool_name == "geo_python" else
+             NATIVE_CARTOGRAPHY_CAUTIONS if tool_name == "geo_cartography" else
+             ("geo_qgis_project仅inspect读取用户已有或交付后的工程；project_path为真实.qgs/.qgz路径。",
+              "没有build/create/export动作。制图使用geo_cartography；审图通过后geo_deliver一次生成工程。"))
     return "调用前注意事项（CALL-TIME CAUTIONS）：" + " ".join(rules)
 
 def section_cautions(section: str) -> list[str]:

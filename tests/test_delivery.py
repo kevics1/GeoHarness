@@ -23,7 +23,8 @@ def _script_project(tmp_path):
     image = tmp_path / "final-custom.png"
     Image.new("RGB", (20, 20), "white").save(image)
     project = export_map_project(
-        tmp_path / "project", output_path=image,
+        tmp_path / "project",
+        output_path=image,
         layers=[{"gdf": gpd.GeoDataFrame(geometry=[Point(0, 0)], crs=3857)}],
         render_kwargs={"mode": "layers"},
     )
@@ -32,8 +33,12 @@ def _script_project(tmp_path):
 
 @pytest.mark.asyncio
 async def test_native_map_has_editable_project_and_default_workspace_output(tmp_path):
-    config = GeoConfig(map_review=MapReviewConfig(enabled=False))
+    # Explicit legacy-QGIS compatibility fixture, not the model-facing map flow.
+    config = GeoConfig(qgis=GeoConfig().qgis.model_copy(update={"allow_project_previews": True}))
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
+    from test_map_receipt_workflow import PassingReviewer
+
+    context.metadata["map_review_client"] = PassingReviewer()
     data = gpd.GeoDataFrame({"value": [1, 2]}, geometry=[Point(0, 0), Point(1, 1)], crs=3857)
     mapped = await GeoCartographyTool().execute(
         GeoCartographyInput(
@@ -41,13 +46,14 @@ async def test_native_map_has_editable_project_and_default_workspace_output(tmp_
             field_name="value",
             output_format="png",
             title="可编辑地图",
+            renderer="qgis",
         ),
         context,
     )
     assert not mapped.is_error, mapped.output
     assert Path(mapped.metadata["output_path"]).parent == tmp_path / "exports"
-    assert not mapped.metadata.get('qgis_project')
-    assert not list(tmp_path.rglob('*.qgz'))
+    assert not mapped.metadata.get("qgis_project")
+    assert not list(tmp_path.rglob("*.qgz"))
     delivered = await GeoDeliverTool().execute(
         GeoDeliverInput(
             files=[mapped.metadata["output_path"], mapped.metadata["review_path"]],
@@ -143,8 +149,16 @@ async def test_project_source_names_resolve_against_workspace_not_process_cwd(
 @pytest.mark.asyncio
 async def test_delivery_filename_collisions_do_not_overwrite_selected_artifacts(tmp_path):
     paths = []
-    names = ("map-2.png", "map.png", "map.png", "DELIVERY.JSON", "PROJECT",
-             "SUMMARY.JSON", "summary.md", "MAP-RECEIPT.JSON")
+    names = (
+        "map-2.png",
+        "map.png",
+        "map.png",
+        "DELIVERY.JSON",
+        "PROJECT",
+        "SUMMARY.JSON",
+        "summary.md",
+        "MAP-RECEIPT.JSON",
+    )
     for index, name in enumerate(names):
         directory = tmp_path / str(index)
         directory.mkdir()
@@ -153,15 +167,21 @@ async def test_delivery_filename_collisions_do_not_overwrite_selected_artifacts(
         paths.append(str(path))
     ctx = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
     result = await GeoDeliverTool().execute(
-        GeoDeliverInput(files=paths, allow_report_only=True), ctx)
+        GeoDeliverInput(files=paths, allow_report_only=True), ctx
+    )
     assert not result.is_error, result.output
     copied = result.metadata["files"]
     assert len(set(copied)) == len(names)
     assert [Path(path).read_text(encoding="utf-8") for path in copied] == [
-        str(index) for index in range(len(names))]
+        str(index) for index in range(len(names))
+    ]
     assert Path(result.metadata["summary_json"]).name == "summary.json"
-    assert json.loads(Path(result.metadata["summary_json"]).read_text(encoding="utf-8"))[
-        "primary_map_sha256"] == result.metadata["primary_map_sha256"]
+    assert (
+        json.loads(Path(result.metadata["summary_json"]).read_text(encoding="utf-8"))[
+            "primary_map_sha256"
+        ]
+        == result.metadata["primary_map_sha256"]
+    )
 
 
 @pytest.mark.asyncio
@@ -172,15 +192,24 @@ async def test_delivery_rejects_map_from_different_project(tmp_path):
     other = tmp_path / "generic-native.png"
     Image.new("RGB", (20, 20), "red").save(other)
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
-    result = await GeoDeliverTool().execute(GeoDeliverInput(
-        files=[str(other)], project_dir=project["project_dir"],
-    ), context)
+    result = await GeoDeliverTool().execute(
+        GeoDeliverInput(
+            files=[str(other)],
+            project_dir=project["project_dir"],
+        ),
+        context,
+    )
     assert result.is_error and "differs" in result.output and "SHA256" in result.output
     assert not (tmp_path / "exports").exists()
     # An explicitly selected wrong primary map also fails, even when the right map is listed.
-    result = await GeoDeliverTool().execute(GeoDeliverInput(
-        files=[str(actual)], map_path=str(other), project_dir=project["project_dir"],
-    ), context)
+    result = await GeoDeliverTool().execute(
+        GeoDeliverInput(
+            files=[str(actual)],
+            map_path=str(other),
+            project_dir=project["project_dir"],
+        ),
+        context,
+    )
     assert result.is_error and "Primary map differs" in result.output
 
 
@@ -192,35 +221,64 @@ async def test_project_snapshot_rejects_changed_preview(tmp_path):
     preview = Path(project["project_dir"]) / "preview.png"
     Image.new("RGB", (20, 20), "red").save(preview)
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
-    result = await GeoDeliverTool().execute(GeoDeliverInput(
-        files=[str(image)], project_dir=project["project_dir"],
-    ), context)
+    result = await GeoDeliverTool().execute(
+        GeoDeliverInput(
+            files=[str(image)],
+            project_dir=project["project_dir"],
+        ),
+        context,
+    )
     assert result.is_error and "recorded snapshot" in result.output
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("review, quality", [
-    (None, "draft"),
-    ({"status": "unverified", "summary": "Unavailable"}, "draft"),
-    ({"status": "issues", "summary": "Legend clipped"}, "draft"),
-    ({"status": "passed", "summary": "Clear", "issues": []}, "draft"),
-    ({"status": "passed", "summary": "Repair needed", "layout_patch": {
-        "legend_outside": True,
-    }}, "draft"),
-    ({"status": "passed", "summary": "Clear", "issues": [
-        {"severity": "warning", "description": "Legend clipped"},
-    ]}, "draft"),
-])
+@pytest.mark.parametrize(
+    "review, quality",
+    [
+        (None, "draft"),
+        ({"status": "unverified", "summary": "Unavailable"}, "draft"),
+        ({"status": "issues", "summary": "Legend clipped"}, "draft"),
+        ({"status": "passed", "summary": "Clear", "issues": []}, "draft"),
+        (
+            {
+                "status": "passed",
+                "summary": "Repair needed",
+                "layout_patch": {
+                    "legend_outside": True,
+                },
+            },
+            "draft",
+        ),
+        (
+            {
+                "status": "passed",
+                "summary": "Clear",
+                "issues": [
+                    {"severity": "warning", "description": "Legend clipped"},
+                ],
+            },
+            "draft",
+        ),
+    ],
+)
 async def test_delivery_quality_requires_review_of_same_image(tmp_path, review, quality):
     image, project = _script_project(tmp_path)
     digest = hashlib.sha256(image.read_bytes()).hexdigest()
     cache = {digest: review} if review else {}
-    context = ToolExecutionContext(cwd=tmp_path, metadata={
-        "geoharness_config": GeoConfig(), "map_workflow_state": {"cache": cache},
-    })
-    result = await GeoDeliverTool().execute(GeoDeliverInput(
-        files=[str(image)], project_dir=project["project_dir"],
-    ), context)
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={
+            "geoharness_config": GeoConfig(),
+            "map_workflow_state": {"cache": cache},
+        },
+    )
+    result = await GeoDeliverTool().execute(
+        GeoDeliverInput(
+            files=[str(image)],
+            project_dir=project["project_dir"],
+        ),
+        context,
+    )
     assert not result.is_error, result.output
     assert result.metadata["quality_status"] == quality
     assert result.metadata["primary_map_sha256"] == digest
@@ -233,16 +291,33 @@ async def test_review_report_without_matching_hash_cannot_mark_delivery_passed(t
     image, project = _script_project(tmp_path)
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
     report = tmp_path / "map-review.json"
-    for report_hash, expected in [("", "draft"), ("0" * 64, "draft"), (
-        hashlib.sha256(image.read_bytes()).hexdigest(), "draft",
-    )]:
-        report.write_text(json.dumps({
-            "status": "passed", "summary": "Clear", "issues": [],
-            "image_sha256": report_hash,
-        }), encoding="utf-8")
-        result = await GeoDeliverTool().execute(GeoDeliverInput(
-            files=[str(image)], project_dir=project["project_dir"], review_path=str(report),
-        ), context)
+    for report_hash, expected in [
+        ("", "draft"),
+        ("0" * 64, "draft"),
+        (
+            hashlib.sha256(image.read_bytes()).hexdigest(),
+            "draft",
+        ),
+    ]:
+        report.write_text(
+            json.dumps(
+                {
+                    "status": "passed",
+                    "summary": "Clear",
+                    "issues": [],
+                    "image_sha256": report_hash,
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = await GeoDeliverTool().execute(
+            GeoDeliverInput(
+                files=[str(image)],
+                project_dir=project["project_dir"],
+                review_path=str(report),
+            ),
+            context,
+        )
         assert not result.is_error, result.output
         assert result.metadata["quality_status"] == expected
 
@@ -252,27 +327,42 @@ async def test_project_only_preserves_actual_risk_styles_and_extent(tmp_path, mo
     from PIL import Image
 
     points = gpd.GeoDataFrame(
-        {"RiskTier": ["High", "Low"]}, geometry=[Point(0, 0), Point(1, 1)], crs=3857,
+        {"RiskTier": ["High", "Low"]},
+        geometry=[Point(0, 0), Point(1, 1)],
+        crs=3857,
     )
     image = tmp_path / "script-styled.png"
     Image.new("RGB", (20, 20), "white").save(image)
     tool = GeoCartographyTool()
     monkeypatch.setattr(tool, "_render", lambda *args: pytest.fail("No project redraw"))
     ctx = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
-    result = await tool.execute(GeoCartographyInput(
-        action="project", output_path=str(image), map_extent=[-1, -1, 2, 2],
-        layers=json.dumps([{
-            "geojson": points.to_json(), "label": "Sites", "field_name": "RiskTier",
-            "categories": ["High", "Low"], "colors": ["#ff0000", "#00ff00"],
-        }]),
-    ), ctx)
+    result = await tool.execute(
+        GeoCartographyInput(
+            action="project",
+            output_path=str(image),
+            map_extent=[-1, -1, 2, 2],
+            layers=json.dumps(
+                [
+                    {
+                        "geojson": points.to_json(),
+                        "label": "Sites",
+                        "field_name": "RiskTier",
+                        "categories": ["High", "Low"],
+                        "colors": ["#ff0000", "#00ff00"],
+                    }
+                ]
+            ),
+        ),
+        ctx,
+    )
     assert not result.is_error, result.output
     manifest = json.loads(Path(result.metadata["project_file"]).read_text(encoding="utf-8"))
     assert manifest["preview_sha256"] == hashlib.sha256(image.read_bytes()).hexdigest()
     assert manifest["extent"] == [-1, -1, 2, 2]
     assert manifest["layers"][0]["style"]["column"] == "RiskTier"
     assert [item["color"] for item in manifest["layers"][0]["style"]["categories"]][:2] == [
-        "#ff0000", "#00ff00",
+        "#ff0000",
+        "#00ff00",
     ]
 
 
@@ -281,26 +371,53 @@ async def test_native_multilayer_tool_passes_risk_field_to_renderer_and_project(
     from PIL import Image
 
     points = gpd.GeoDataFrame(
-        {"RiskTier": ["High", "Low"]}, geometry=[Point(0, 0), Point(1, 1)], crs=3857,
+        {"RiskTier": ["High", "Low"]},
+        geometry=[Point(0, 0), Point(1, 1)],
+        crs=3857,
     )
-    context = ToolExecutionContext(cwd=tmp_path, metadata={
-        "geoharness_config": GeoConfig(map_review=MapReviewConfig(enabled=False)),
-    })
-    result = await GeoCartographyTool().execute(GeoCartographyInput(
-        action="export", output_format="png", output_path="risk.png",
-        renderer="matplotlib",
-        layers=json.dumps([{"geojson": points.to_json(), "field_name": "RiskTier"}]),
-    ), context)
+    from geoharness.tools.geo_native_map import GeoNativeMapTool, NativeMapInput
+
+    source = tmp_path / "risk.gpkg"
+    points.to_file(source)
+    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    result = await GeoNativeMapTool().execute(
+        NativeMapInput(
+            action="render",
+            scene={
+                "crs": "EPSG:3857",
+                "layers": [
+                    {
+                        "id": "risk",
+                        "source_ref": str(source),
+                        "symbol": {
+                            "field": "RiskTier",
+                            "categories": [
+                                {"value": "High", "label": "高", "color": "#ff0000"},
+                                {"value": "Low", "label": "低", "color": "#00ff00"},
+                            ],
+                        },
+                    }
+                ],
+            },
+        ),
+        context,
+    )
     assert not result.is_error, result.output
-    manifest = json.loads(Path(result.metadata["project_file"]).read_text(encoding="utf-8"))
-    style = manifest["layers"][0]["style"]
-    assert style["type"] == "categorizedSymbol" and style["column"] == "RiskTier"
+    assert not list(tmp_path.rglob("*.qgz"))
+    manifest = json.loads(Path(result.metadata["project_manifest"]).read_text(encoding="utf-8"))
+    style = manifest["layers"][0]["symbol"]
+    assert style["field"] == "RiskTier"
     colors = [item["color"] for item in style["categories"] if item["value"] is not None]
     assert len(set(colors)) == 2
-    with Image.open(result.metadata["output_path"]) as rendered:
-        pixels = {color for _count, color in rendered.convert("RGB").getcolors(
-            maxcolors=rendered.width * rendered.height
-        )}
+    with Image.open(
+        result.metadata.get("preview_path", result.metadata["output_path"])
+    ) as rendered:
+        pixels = {
+            color
+            for _count, color in rendered.convert("RGB").getcolors(
+                maxcolors=rendered.width * rendered.height
+            )
+        }
     from matplotlib.colors import to_rgb
 
     assert {tuple(round(channel * 255) for channel in to_rgb(color)) for color in colors} <= pixels
@@ -319,10 +436,13 @@ async def test_failed_native_render_refunds_only_its_reservation(tmp_path, monke
         return ToolResult(output="Render failed", is_error=True)
 
     monkeypatch.setattr(tool, "_run_off_loop", fail)
-    context = ToolExecutionContext(cwd=tmp_path, metadata={
-        "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=1)),
-        "map_workflow_state": {"maps": {"risk": {"renders": 1, "reviews": 0}}},
-    })
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={
+            "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=1)),
+            "map_workflow_state": {"maps": {"risk": {"renders": 1, "reviews": 0}}},
+        },
+    )
     points = gpd.GeoDataFrame(geometry=[Point(0, 0)], crs=3857)
     args = GeoCartographyInput(geojson=points.to_json(), map_id="risk", output_format="png")
     if cancelled:
@@ -335,7 +455,8 @@ async def test_failed_native_render_refunds_only_its_reservation(tmp_path, monke
 
 @pytest.mark.asyncio
 async def test_legacy_limit_allows_render_and_preserves_prior_success_accounting(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     tool = GeoCartographyTool()
     original = tool._run_off_loop
@@ -343,21 +464,32 @@ async def test_legacy_limit_allows_render_and_preserves_prior_success_accounting
     async def preflight_and_render(work, *, what):
         if what == "map rendering":
             from openharness.tools.base import ToolResult
+            from PIL import Image
 
-            return ToolResult(output="Rendered",
-                              metadata={"output_path": str(tmp_path / "map.png")})
+            Image.new("RGB", (24, 24), "white").save(tmp_path / "map.png")
+            return ToolResult(
+                output="Rendered", metadata={"output_path": str(tmp_path / "map.png")}
+            )
         assert what == "map preflight"
         return await original(work, what=what)
 
     monkeypatch.setattr(tool, "_run_off_loop", preflight_and_render)
-    context = ToolExecutionContext(cwd=tmp_path, metadata={
-        "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=0)),
-        "map_workflow_state": {"maps": {"risk": {"renders": 1, "reviews": 0}}},
-    })
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={
+            "geoharness_config": GeoConfig(map_review=MapReviewConfig(max_repairs=0)),
+            "map_workflow_state": {"maps": {"risk": {"renders": 1, "reviews": 0}}},
+        },
+    )
     points = gpd.GeoDataFrame(geometry=[Point(0, 0)], crs=3857)
-    result = await tool.execute(GeoCartographyInput(
-        geojson=points.to_json(), map_id="risk", output_format="png",
-    ), context)
+    result = await tool.execute(
+        GeoCartographyInput(
+            geojson=points.to_json(),
+            map_id="risk",
+            output_format="png",
+        ),
+        context,
+    )
     assert not result.metadata.get("render_budget_exhausted", False)
     assert context.metadata["map_workflow_state"]["maps"]["risk"]["renders"] == 2
 
@@ -390,23 +522,32 @@ async def test_failed_repair_releases_its_budget_and_preserves_actual_layout(
 
     async def review(*args, **kwargs):
         return MapReview(
-            status="issues", summary="Legend overlap",
+            status="issues",
+            summary="Legend overlap",
             issues=[MapIssue(severity="warning", description="Legend overlap")],
             layout_patch=LayoutPatch(width=12, legend_outside=True),
         ), {
-            "review_cached": False, "review_budget_exhausted": False,
+            "review_cached": False,
+            "review_budget_exhausted": False,
             "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
         }
 
     monkeypatch.setattr(tool, "_run_off_loop", render)
     monkeypatch.setattr("geoharness.tools.geo_cartography.review_with_budget", review)
     config = GeoConfig(map_review=MapReviewConfig(max_repairs=1))
-    context = ToolExecutionContext(cwd=tmp_path, metadata={
-        "geoharness_config": config, "map_review_client": object(),
-    })
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={
+            "geoharness_config": config,
+            "map_review_client": object(),
+        },
+    )
     points = gpd.GeoDataFrame(geometry=[Point(0, 0)], crs=3857)
     args = GeoCartographyInput(
-        geojson=points.to_json(), map_id="risk", output_format="png", output_path=str(image),
+        geojson=points.to_json(),
+        map_id="risk",
+        output_format="png",
+        output_path=str(image),
         renderer="matplotlib",
     )
     if cancelled:

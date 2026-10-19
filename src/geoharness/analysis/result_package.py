@@ -37,6 +37,13 @@ class FactRequest(BaseModel):
         description='源文件内实际存在、唯一且非空的实体ID字段；系统用其冻结成员集合。')
     numeric_fields: list[str] = Field(default_factory=list, max_length=64,
         description='需要复算统计的实际数值字段；缺失单独计数，类别代码不应当作连续数值求均值。')
+    carry_fields: list[str] = Field(default_factory=list, max_length=64,
+        description='可选。从同一任务已发布结果包按唯一ID继承、且本结果不得丢失或退化的字段。'
+        '用于派生几何/重采样后保留高程、人口等已有值；系统按key核对缺失数不能增加。'
+        '只在确有同一实体来源时使用，不能跨选集或跨版本猜测。')
+    carry_from: str = Field(default='', description=(
+        '可选。提供carry_fields的已发布analysis_result_package路径；'
+        '必须与当前source共享唯一key并有已登记来源，不能使用任意旧文件。'))
     group_by: list[str] = Field(default_factory=list, max_length=16,
         description='分别计算各类别数量的字段名；不改变源文件和当前结果选集。')
     predicates: list[dict] = Field(default_factory=list, max_length=64,
@@ -50,6 +57,8 @@ class FactRequest(BaseModel):
         description='需要证明最近距离正确时逐字段声明field/reference_ref/metric_crs；'
         '系统直接从真实几何独立复算每个实体，错值或空值拒绝发布。'
         '不声明时只能证明落盘统计自洽，不能宣称距离计算正确；不适用于路网/时间成本距离。')
+    field_changes: dict[str, str] = Field(default_factory=dict, max_length=64,
+        description='有意删除或重新计算既有派生字段时，填写字段名到业务原因；默认禁止同一实体的已发布字段丢失或新增空值。原因未知应询问用户，不能为通过检查编造原因。')
     method: dict = Field(min_length=1,
         description='实际方法/参数/规则/缺失政策；距离面积方法注明metric_crs。方法是声明，'
         '不因统计核对通过而获得科学认证；未知业务阈值须明确假设或询问用户。')
@@ -114,6 +123,84 @@ def _nearest_checks(source, request, resolve):
     return reports
 
 
+def _frame(path):
+    import geopandas as gpd
+    import pandas as pd
+
+    return pd.read_csv(path) if path.suffix.lower() == '.csv' else gpd.read_file(path)
+
+
+def _compare_fields(source, baseline, key, fields, exceptions):
+    current, previous = _frame(source), _frame(baseline)
+    for frame in (current, previous):
+        if key not in frame or frame[key].isna().any() or not frame[key].is_unique:
+            raise ValueError('字段连续性要求前后结果具有同一唯一非空实体键')
+    if not current[key].isin(previous[key]).all():
+        raise ValueError('字段连续性无法证明全部实体来源；请明确真实前序结果和成员集合')
+    previous = previous.set_index(key).reindex(current[key])
+    regressions = {}
+    for field in fields:
+        if field in exceptions:
+            if not exceptions[field].strip():
+                raise ValueError('field_changes中的业务原因不能为空')
+            continue
+        if field not in previous:
+            raise ValueError('前序结果没有声明的继承字段：' + field)
+        if field not in current:
+            regressions[field] = {'error': 'field_dropped'}
+        else:
+            # Compare each entity, not aggregate missing counts across selections.
+            lost = previous[field].notna().to_numpy() & current[field].isna().to_numpy()
+            if lost.any():
+                regressions[field] = {'new_missing': int(lost.sum()),
+                    'entity_ids': current.loc[lost, key].astype(str).head(5).tolist()}
+    if regressions:
+        raise ValueError('字段连续性检测到派生字段退化：' + json.dumps(regressions,
+            ensure_ascii=False) + '；保留已有值，或在field_changes说明真实的变更原因')
+    return {'source': str(baseline), 'source_inventory': _source_inventory(baseline),
+        'key': key, 'fields': sorted(fields), 'field_changes': exceptions}
+
+
+def _continuity_checks(context, source, request, producer):
+    from geoharness.data.task_context import resolve_registered_path
+    from geoharness.qgis.worker_context import WorkerContext
+    from geoharness.tools.geo_qgis import qgis_read_roots
+
+    config, cwd = context.metadata['geoharness_config'], Path(context.cwd)
+    guard = WorkerContext(cwd, cwd, qgis_read_roots(config, cwd))
+    if bool(request.carry_fields) != bool(request.carry_from):
+        raise ValueError('carry_fields与carry_from必须同时提供')
+    candidates = {}
+    if request.carry_from:
+        ref = guard.read_path(resolve_registered_path(request.carry_from, context.metadata,
+            cwd=cwd, config=config))
+        old = verify_package(ref, guard=guard)
+        if old['request']['key'] != request.key:
+            raise ValueError('carry_fields要求前后结果使用同一实体键')
+        candidates[old['facts']['source']] = set(request.carry_fields)
+    # Only follow measured producer dependencies to published fields. Never infer
+    # lineage from filenames, similar IDs or unrelated earlier task outputs.
+    document = json.loads(guard.read_path(producer['manifest']).read_text('utf-8'))
+    inputs = document.get('inputs', {})
+    actual_inputs = {str(Path(v).resolve()) for v in inputs.values() if isinstance(v, str)}
+    for reference in context.metadata.get('geo_task_record', {}).get('analysis_packages', []):
+        ref = guard.read_path(reference)
+        old = json.loads(ref.read_text('utf-8'))
+        previous = str(Path(old.get('facts', {}).get('source', '')).resolve())
+        if previous not in actual_inputs or old.get('request', {}).get('key') != request.key:
+            continue
+        old = verify_package(ref, guard=guard)
+        fields = set(old['request']['numeric_fields']) | set(old['request']['group_by'])
+        candidates.setdefault(previous, set()).update(fields)
+    reports = []
+    for baseline, fields in candidates.items():
+        path = guard.read_path(baseline)
+        if path.resolve() == source.resolve():
+            raise ValueError('不能以当前结果本身作为字段连续性基线')
+        reports.append(_compare_fields(source, path, request.key, fields, request.field_changes))
+    return reports or None
+
+
 def publish_package(context, *, source_ref: str, request: FactRequest):
     from geoharness.data.task_context import resolve_registered_path
     from geoharness.qgis.worker_context import WorkerContext
@@ -131,6 +218,7 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
         raise ValueError('结果事实目前支持单图层矢量或CSV；不能将栅格类别代码直接平均')
     if set(request.units) - set(request.numeric_fields):
         raise ValueError('units只能声明numeric_fields中已有字段的单位')
+    carry_report = _continuity_checks(context, source, request, producer)
     from geoharness.task_store import _safe
 
     if _safe(request.model_dump(mode='json'), context.metadata) != request.model_dump(mode='json'):
@@ -143,7 +231,8 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
             old = verify_package(Path(reference))
             if (Path(old['facts']['source']).resolve() == source
                     and old['request'] == request.model_dump(mode='json')):
-                return {'package_path': reference, 'status': 'persisted_values_checked',
+                return {'analysis_ref': reference, 'package_path': reference,
+                        'status': 'persisted_values_checked',
                         'manifest_path': str(Path(reference).parent / 'manifest.json'),
                         'report_path': old['companions']['markdown']['path'],
                         'facts': old['facts'], 'selection': old['selection'], 'reused': True,
@@ -162,6 +251,8 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
         numeric_fields=request.numeric_fields, group_by=request.group_by,
         predicates=request.predicates, method=request.method)
     identity = _members(source, request.key)
+    if carry_report is not None:
+        report['carry_fields'] = carry_report
     report.update(kind='analysis_result_package', request=request.model_dump(mode='json'),
                   selection=_selection(request, report['facts'], inventory, identity),
                   source_inventory=inventory,
@@ -211,7 +302,8 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
         packages.append(str(target))
         task['analysis_requirement'] = 'required'
         save_record(context.metadata, cwd=cwd)
-    return {'package_path': str(target), 'manifest_path': str(directory / 'manifest.json'),
+    return {'analysis_ref': str(target), 'package_path': str(target),
+            'manifest_path': str(directory / 'manifest.json'),
             'report_path': str(markdown), 'status': 'persisted_values_checked',
             'selection': report['selection'], 'facts': report['facts'],
             'analysis_correctness': 'unverified', 'reused': False}
@@ -246,6 +338,15 @@ def verify_package(path: Path, *, guard=None):
         raise ValueError('结果包的统计或成员与当前源文件不一致，须重建')
     if report.get('units') != request.units or report.get('method') != request.method:
         raise ValueError('结果包的单位或方法声明不一致')
+    for check in report.get('carry_fields', []):
+        baseline = Path(check['source'])
+        if guard:
+            baseline = guard.read_path(str(baseline))
+        if _source_inventory(baseline) != check['source_inventory']:
+            raise ValueError('字段连续性基线已变化，不能复用结果包')
+        if _compare_fields(source, baseline, check['key'], check['fields'],
+                check['field_changes']) != check:
+            raise ValueError('字段连续性证据与当前结果不一致')
     evidence = report.get('execution_evidence', {})
     if request.nearest_checks:
         # Reuse is bound to exact reference bytes as well as the output values.
@@ -315,6 +416,9 @@ def delivery_packages(metadata, files, project_document, resolve):
                          Path(package['companions']['markdown']['path'])]
         related_files.extend(Path(ref) for check in package.get('nearest_checks', [])
                              for ref in check['reference_inventory'])
+        related_files.extend(Path(ref) for ref in package['source_inventory'])
+        related_files.extend(Path(ref) for check in package.get('carry_fields', [])
+                             for ref in check['source_inventory'])
         for related in related_files:
             target = resolve(str(related))
             if target not in files:

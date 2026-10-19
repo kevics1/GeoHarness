@@ -9,11 +9,12 @@ Two modes:
   the agent to reason about styling before loading data.
 * **Render mode (a data source is given)** — resolves the source to a
   ``GeoDataFrame`` and renders it natively via
-  :mod:`geoharness.cartography` (QGIS → PNG/PDF, matplotlib → SVG, folium → HTML).
+  :mod:`geoharness.cartography` (matplotlib Agg → PNG/PDF/SVG; folium → HTML).
 
-Bridge rules (analysis type → symbolization) stay config-driven: adding a new
-analysis type is a YAML edit, not a code change. The native QGIS worker runs
-in its separate installed runtime; an explicit matplotlib compatibility path remains.
+Normal cartography and review never start QGIS and never write a .qgs/.qgz.
+QGIS is only used by the delivery phase to compile the already reviewed plan
+into an editable project. Bridge rules (analysis type → symbolization) stay
+config-driven: adding a new analysis type is a YAML edit, not a code change.
 """
 
 from __future__ import annotations
@@ -178,7 +179,8 @@ class GeoCartographyInput(BaseModel):
     )
     renderer: Literal["", "qgis", "matplotlib"] = Field(
         default="",
-        description='默认空使用配置；qgis原生工程，matplotlib兼容绘图。',
+        description=('默认空使用配置；matplotlib=原生制图（默认，不启动QGIS）；'
+                     'qgis=显式兼容预览，仍不得在交付前写工程。'),
     )
     map_crs: str = Field(default="",
         description='明确显示CRS，默认空按来源/配置；map_extent使用此坐标单位。')
@@ -228,8 +230,9 @@ class GeoCartographyTool(BaseTool):
     name: str = "geo_cartography"
     description: str = (
         (
-        'geo_cartography制图兼容入口：静态PNG/PDF默认从同一QGIS布局生成可编辑工程；也'
-        '保留显式matplotlib及SVG/HTML。按配置桥接规则由anal'
+        'geo_cartography：分析和审查阶段的原生制图入口。静态PNG/PDF/SVG用matplotlib，'
+        '不启动QGIS、不生成.qgs/.qgz；制图与审图通过后，最终交付才由geo_deliver生成一次可编辑工程。'
+        '按配置桥接规则由anal'
         'ysis_type选择符号；无来源只返回规划。preflight只检查数'
         '据/字段/CRS/范围/可见数，qgis_layout同时量测布局；pr'
         'oject保留真实来源打包已有地图。analysis_manifests'
@@ -820,7 +823,11 @@ class GeoCartographyTool(BaseTool):
         if preflight.is_error:
             return preflight
         renderer = args.renderer or config.cartography.static_renderer
-        native = renderer == "qgis" and desired.suffix.lower() in {".png", ".pdf"}
+        # This class is the legacy internal renderer, no longer the model-facing
+        # geo_cartography entry. An explicit qgis_layout is a compatibility
+        # request from an existing caller; ordinary/default calls stay native.
+        native = (renderer == "qgis" or args.qgis_layout is not None) and (
+            desired.suffix.lower() in {".png", ".pdf"})
         args = args.model_copy(
             update={
                 "map_crs": preflight.metadata["preflight"]["display_crs"],
@@ -856,8 +863,8 @@ class GeoCartographyTool(BaseTool):
             )
             if not same_crs:
                 return ToolResult(
-                    output="Error: Matplotlib requires the basemap CRS; use QGIS "
-                    "to reproject the backdrop to map_crs.",
+                    output="Error: Matplotlib requires the basemap CRS; reproject "
+                    "the backdrop to map_crs before rendering.",
                     is_error=True,
                 )
         if not native and args.qgis_layout is not None:
@@ -899,7 +906,10 @@ class GeoCartographyTool(BaseTool):
         except (OSError, ValueError) as exc:
             return ToolResult(output=f"Error: map task could not start: {exc}", is_error=True)
         args = args.model_copy(update={"map_id": identity})
-        if native:
+        # Ordinary cartography must not create a QGIS project before review.
+        # The legacy QGIS preview bridge stays available only under the explicit
+        # compatibility switch; normal renderer rows fall through to Agg.
+        if native and getattr(config.qgis, "allow_project_previews", False):
             from geoharness.cartography.qgis_bridge import render_qgis_map
 
             return await render_qgis_map(self, args, rule, context)
@@ -915,8 +925,16 @@ class GeoCartographyTool(BaseTool):
         if result.is_error or not result.metadata.get("output_path"):
             refund_map_render(identity, context.metadata)
             return result
+        files = []
+        for spec in specs:
+            value = spec.get('file_path') or spec.get('source_name')
+            if isinstance(value, str) and value:
+                path = Path(value)
+                path = (path if path.is_absolute() else context.cwd / path).resolve()
+                if path.is_file():
+                    files.append(path)
         checked = await self._inspect_and_repair(args, rule, outputs_dir, context, result)
-        attached = await self._attach_project(args, rule, context, checked)
+        attached = await self._freeze_native_preview(args, rule, context, checked)
         attached.metadata["preflight"] = preflight.metadata["preflight"]
         return await asyncio.to_thread(
             track_render_result,
@@ -1191,6 +1209,61 @@ class GeoCartographyTool(BaseTool):
                 **budget,
                 "repair_count": report_payload["repair_count"],
             },
+        )
+
+    async def _freeze_native_preview(
+        self,
+        args: GeoCartographyInput,
+        rule: dict[str, Any],
+        context: ToolExecutionContext,
+        result: ToolResult,
+    ) -> ToolResult:
+        # Rendering and review are separate from project compilation. The
+        # reviewed image is saved as a native-scene preview and geo_deliver
+        # compiles one editable project from the frozen sources afterwards.
+        import hashlib
+        import json
+
+        written = Path(result.metadata['output_path'])
+        source_files = []
+        for spec in self._parse_layers(args.layers):
+            value = spec.get('file_path') or spec.get('source_name')
+            if not isinstance(value, str) or not value:
+                continue
+            path = Path(value)
+            path = (path if path.is_absolute() else context.cwd / path).resolve()
+            if path.is_file():
+                source_files.append(path)
+        if not source_files and args.file_path:
+            path = Path(args.file_path)
+            path = (path if path.is_absolute() else context.cwd / path).resolve()
+            if path.is_file():
+                source_files.append(path)
+        manifest = written.parent / 'project.json'
+        document = {
+            'backend': 'matplotlib', 'project_fidelity': 'legacy_native_draft',
+            'project_file': '', 'preview': written.name,
+            'preview_sha256': hashlib.sha256(written.read_bytes()).hexdigest(),
+            'source_inventory': {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                                 for path in source_files},
+            'renderer': 'geo_cartography',
+            'creation_parameters': args.model_dump(mode='json', exclude={'action'},
+                                                  exclude_none=True),
+            'native_facts': {'page_previews': [{
+                'page_index': 0, 'path': written.name,
+                'frames': ['main_map'], 'role': 'map'}]},
+            'files': [written.name],
+        }
+        manifest.write_text(json.dumps(document, ensure_ascii=False), encoding='utf-8')
+        return ToolResult(
+            output=(result.output + '\n原生草稿已保留，未生成QGIS工程。'
+                    '此旧接口草稿缺少冻结Scene计划，不能直接编译工程；'
+                    '请使用geo_cartography的scene/scene_ref入口生成正式原生候选。'),
+            is_error=result.is_error,
+            metadata={**result.metadata, 'project_dir': str(written.parent),
+                      'project_manifest': str(manifest),
+                      'project_fidelity': 'native_scene_preview',
+                      'project_status': 'deferred_until_reviewed_delivery'},
         )
 
     async def _attach_project(

@@ -4,36 +4,35 @@
 可信 Python 分析执行入口保留；QGIS 通过独立安装的 Python 解释器运行，不向主进程
 导入 PyQGIS、Qt 或它们的 native 库。没有 QGIS 时可以禁用集成，其他工具仍可运行。
 
-## QGIS 数据流
+## 当前阶段与数据流
 
-`geo_cartography` 的默认 PNG/PDF 路径先复用已有数据解析与分类配色，将图层准备为
-本地快照，再调用独立 QGIS 工程工具。主图、可选详图、图例和说明栏使用结构化布局，
-工程保存后读回验证，图片从同一份打印布局导出。`cartography.static_renderer=matplotlib`
-可显式保留旧静态渲染，HTML/SVG继续使用原有实现。QGIS路径不可用时返回实际错误。
-
-新建图在预留成图/视觉预算前调用 `cartography/preflight.py`，核对实际字段、分类/分级、
-数值类型、有限/有效几何、CRS、指定总数，以及主图/详图中的几何相交数量。
-显式 GIS 范围为 xmin,ymin,xmax,ymax，必须声明显示 CRS；imshow 使用独立的范围顺序转换。
-必需图层不满足可见数量时拒绝，optional 空图层/界外图层保留警告；栅格检查仅覆盖范围相交。
-`geo_cartography` 可在数据副本中无损转换数值字符串，直接 QGIS 输入必须已有数值字段。
+QGIS Processing 和分析控制台仅做空间分析。模型主制图接口为 `GeoNativeMapTool`：
+Pydantic Scene 保存真实图层、单位、分类、稳定页 ID 和分析引用；Matplotlib Agg
+渲染 PNG/PDF，可额外导出 SVG/Folium HTML。制图和审图阶段不启动 QGIS。
+旧 QGIS 制图工具留在兼容实现中，模型 registry 仅注册其只读 inspect 接口。
 
 ```mermaid
 flowchart LR
-    C[geo_cartography / geo_qgis_project create] --> F[数据 preflight / 分析输出核对]
-    F --> T[QGIS 工程请求]
-    T --> R[独立任务与 JSON 请求]
-    A[geo_qgis Processing] --> R
-    R --> W[QGIS Python worker]
-    W --> P[Processing 注册表与算法]
-    W --> Q[QgsProject 与打印布局]
-    P --> O[持久数据与结果摘要]
-    Q --> O
-    O --> M[结果文件 / 日志 / manifest]
-    M --> T
-    T --> D[布局与实际图片审查]
-    D --> J[持久地图回执]
-    J --> E[geo_deliver 文件快照]
+    D[获取与审查数据] --> A[Processing / Python 空间分析]
+    A --> F[已登记分析包与实体字段检查]
+    F --> S[统一 Scene 与稳定页面]
+    S --> R[Matplotlib 原生渲染与布局测量]
+    R --> V[逐页原生图片审查]
+    V -->|确认的呈现问题| S
+    V -->|全部通过| C[冻结交付候选]
+    C --> Q[一次 QGIS 工程编译与重开验证]
+    Q --> P[原生已审图片与可编辑工程交付]
 ```
+
+`scene_render.py` 冻结字体、来源哈希、选集、图框、文字落位和逐页 PNG 身份。
+按页内容身份缓存 PNG 与矢量 PDF；名册改动不重绘无关地图页。台账仅对同一页面
+内容身份与哈希保留既有审查，生成工程不增添地图版本。原生布局测量仅覆盖已测文字
+边界和标注框，不宣称检查所有符号形状。
+
+`scene_delivery.py` 检查数据/布局/全部页面视觉及待处置问题，在地图互斥下写一次意图，
+再调用 `scene_export.py`。后者从相同计划构造真实可编辑图层、符号和布局；保存后重开，
+核对几何、属性、样式、页面、图框、文字及位置。最终图片保留原生已审 PNG/PDF，
+跨渲染器 pixel_equivalence 明确为 not_claimed。同候选可跨重启复用；未知中断状态不自动重发。
 
 `qgis/discovery.py` 按配置或安装记录定位运行时，构造只包含系统必需变量和 QGIS
 路径的子进程环境。`qgis/runner.py` 为每个调用创建唯一目录，持久化请求，启动

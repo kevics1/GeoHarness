@@ -41,7 +41,7 @@ class GeoDeliverInput(BaseModel):
     }]})
 
     map_id: str = Field(default="", description=(
-        "可选。geo_qgis_project/geo_python 出图时返回的逻辑地图 ID；"
+        "可选。geo_cartography出图时返回的逻辑地图 ID；"
         "用于选择同一张图的已登记版本及工程。不要填 operation_id、run_dir 或文件名。"
         "仅交非地图数据时可留空。"
     ))
@@ -49,7 +49,7 @@ class GeoDeliverInput(BaseModel):
         default="selected",
         description=(
         "可选，默认 selected。selected = 严格交付 primary_map/project_dir 对应的同一已登记"
-        "版本，绝不静默替换成历史候选；即使有已知问题也按草稿交付。"
+        "版本，绝不静默替换成历史候选；新原生候选须审图通过后才生成交付工程。"
         "prefer_checked为兼容值，同样保留选择；未指定图片时使用当前版本。"
         "两者都不会伪造视觉通过。"
     ))
@@ -63,16 +63,16 @@ class GeoDeliverInput(BaseModel):
         ),
     )
     project_dir: str = Field(default="", description=(
-        "可选。geo_qgis_project 成功返回的预览或工程目录；地图交付必须有真实工程，"
-        "已有登记主图时可自动恢复目录，只有草案时改用 spec_ref。"
+        "可选。geo_cartography成功返回的原生预览目录；地图交付必须有真实工程，"
+        "已有登记主图时可自动恢复目录。"
         "预览目录内含project.json；首次交付生成一次可编辑.qgz/.qgs并复用。"
         "只交 PNG/PDF 而无真实工程会被拒绝，不能把图片当等价工程。"
         "传准确返回路径，不是 exports 父目录；工程用于后续在 QGIS 中继续修复。"
         "纯粹的非地图图片/PDF附件才可显式设置 allow_report_only=true。"
     ))
     spec_ref: str = Field(default='', description=(
-        '可选，实际geo_qgis_project spec返回的qgis-spec:引用；工程尚未生成时提供此字段，'
-        '交付工具先按已保存图层/样式/布局生成真实QGIS工程和预览，再打包。'
+        '兼容旧qgis-spec:引用，仅用于已登记且审查通过的历史预览，不创建新QGIS预览。'
+        '新制图流程应传geo_cartography返回的project_dir；'
         '与project_dir二选一；不会从PNG反推或伪造工程，生成失败保留诊断。'))
     allow_report_only: bool = Field(default=False, description=(
         "可选，默认 false。仅用于明确不存在地图的可编辑性要求的数据/报告包"
@@ -146,7 +146,7 @@ class GeoDeliverTool(BaseTool):
     name = "geo_deliver"
     description = (
         '把真实产物复制到工作区exports，保留历史交付。地图必须带可编辑QGIS工程：'
-        '已有project_dir自动打包；仅有spec_ref时先按草案生成工程再交付；'
+        '已审原生project_dir在首次交付生成一次工程，之后复用；'
         '只有PNG/PDF而无工程/草案时返回missing_project，不伪造工程。'
         '主图必须匹配工程预览；分析地图须绑定已发布事实包。CSV/JSON/Markdown等纯数据包兼容。'
         '返回delivery_dir、qgis_project和质量状态；草稿也包含工程，文件存在不代表视觉通过。'
@@ -174,6 +174,59 @@ class GeoDeliverTool(BaseTool):
         def resolve(value: str) -> Path:
             path = Path(value).expanduser()
             path = path if path.is_absolute() else workspace / path
+            candidate = _source(path, roots, check_producer=False)
+            # Files inside a frozen native-scene package are authorized by the
+            # package manifest's declared membership and hashes. They were copied
+            # from the reviewed preview into a new QGIS run directory, so the
+            # generic producer manifest cannot be expected to list them.
+            if candidate.name != "project.json":
+                probe = candidate.parent
+                for _ in range(3):
+                    descriptor = probe / "project.json"
+                    if descriptor.is_file() and descriptor.stat().st_size <= 4 * 1024 * 1024:
+                        try:
+                            document = json.loads(descriptor.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            document = None
+                        document = document if isinstance(document, dict) else {}
+                        fidelity = document.get("project_fidelity") if isinstance(
+                            document, dict) else None
+                        declared = set(document.get("files", [])) if isinstance(
+                            document, dict) and isinstance(document.get("files"), list) else set()
+                        declared.update(value for value in (
+                            document.get("preview"), document.get("project_file")) if isinstance(
+                                value, str) and value)
+                        relative = candidate.relative_to(probe).as_posix()
+                        if (fidelity in {"native_scene_preview", "scene_bound"}
+                                and relative in declared):
+                            return candidate
+                    if probe.parent == probe or not probe.is_relative_to(workspace):
+                        break
+                    probe = probe.parent
+            if candidate.name == "project.json" and candidate.stat().st_size <= 4 * 1024 * 1024:
+                document = json.loads(candidate.read_text(encoding="utf-8"))
+                fidelity = document.get("project_fidelity") if isinstance(document, dict) else None
+                if fidelity in {"native_scene_preview", "scene_bound"}:
+                    # A scene manifest is authoritative only for the exact preview
+                    # registered to its ledger version. For the final scene_bound
+                    # package, the ledger must also bind the same directory.
+                    from geoharness.cartography.jobs import map_job_receipt
+
+                    preview_name = document.get("preview")
+                    if isinstance(preview_name, str) and preview_name:
+                        preview = (candidate.parent / preview_name).resolve()
+                        if preview.is_relative_to(candidate.parent) and preview.is_file():
+                            receipt = map_job_receipt(context.metadata, cwd=workspace,
+                                config=config, artifact_path=preview)
+                            packaged = receipt.get("stages", {}).get("packaged", {})
+                            same = (packaged.get("project_dir") == str(candidate.parent.resolve())
+                                    and packaged.get("project_fidelity") == fidelity)
+                            if fidelity == "scene_bound":
+                                same = same and packaged.get("status") == "passed"
+                            if same and receipt.get("artifact_registered"):
+                                return candidate
+                    if fidelity == "native_scene_preview":
+                        return candidate
             try:
                 return _source(path, roots)
             except ValueError:
@@ -186,6 +239,12 @@ class GeoDeliverTool(BaseTool):
                 from geoharness.cartography.jobs import map_job_receipt
 
                 report = json.loads(target.read_text(encoding="utf-8"))
+                # A native-scene project.json is a render manifest, not pixel
+                # review evidence. It is authorized by materialize_scene after
+                # checking the registered version, page hashes and approvals.
+                if (isinstance(report, dict)
+                        and report.get("project_fidelity") == "native_scene_preview"):
+                    return target
                 if not isinstance(report, dict) or not isinstance(report.get("image_path"), str):
                     raise ValueError("Review evidence must be an object with an image_path")
                 image = Path(report.get("image_path", ""))
@@ -284,9 +343,9 @@ class GeoDeliverTool(BaseTool):
             if map_like and not project_directory and not arguments.allow_report_only:
                 raise ValueError(
                     "missing_project: the delivery contains a map but no editable QGIS project. "
-                    "Render with geo_qgis_project build (or geo_cartography with native QGIS), "
-                    "then pass its returned project_dir, or pass an existing spec_ref to build "
-                    "the project at delivery. A PNG/PDF alone is not a complete map "
+                    "Render with geo_cartography native scene, review it, then deliver "
+                    "its project_dir; "
+                    "A PNG/PDF alone is not a complete map "
                     "deliverable and cannot be converted back into an editable project. "
                     "For a genuinely non-map evidence bundle, set allow_report_only=true."
                 )
@@ -314,6 +373,19 @@ class GeoDeliverTool(BaseTool):
                 recorded_project = json.loads(manifest_bytes.decode("utf-8"))
                 project_fidelity = (recorded_project.get("project_fidelity", "unverified")
                                     if isinstance(recorded_project, dict) else "unverified")
+                if project_fidelity == 'scene_bound':
+                    from geoharness.cartography.jobs import map_job_receipt
+                    from geoharness.cartography.review_findings import pending_findings
+
+                    approved = map_job_receipt(context.metadata, cwd=workspace, config=config,
+                        artifact_path=project_root / recorded_project['preview'])
+                    if (not approved.get('artifact_registered') or any(
+                            approved.get('stages', {}).get(k, {}).get('status') != 'passed'
+                            for k in ('data_checked', 'layout_checked',
+                                      'visual_checked', 'packaged'))
+                            or pending_findings(context.metadata, cwd=workspace,
+                                map_ids={approved.get('job_id')})):
+                        raise ValueError('delivery_not_ready: 最终工程的审查准入已失效，先核实问题')
                 if isinstance(recorded_project, dict) and recorded_project.get("backend") == "qgis":
                     project = _QgisDeliveryProject.model_validate(recorded_project)
                     project_file = project.project_file
@@ -689,8 +761,8 @@ class GeoDeliverTool(BaseTool):
                         if descriptor.stat().st_size > 4 * 1024 * 1024:
                             raise ValueError('预览清单过大；检查实际原生预览')
                         document = json.loads(descriptor.read_text(encoding='utf-8'))
-                    if document and document.get('project_fidelity') == 'preview_only':
-                        from geoharness.cartography.delivery_project import materialize_project
+                    if document and document.get('project_fidelity') in {
+                            'preview_only', 'native_scene_preview'}:
                         from geoharness.cartography.jobs import map_job_receipt
 
                         image = (root / document['preview']).resolve()
@@ -707,7 +779,14 @@ class GeoDeliverTool(BaseTool):
                                 arguments.primary_map).read_bytes()).hexdigest() != frozen.get(
                                     'image_sha256'):
                             raise ValueError('primary_map与选定预览不一致；先修正交付参数')
-                        generated = await materialize_project(context, preview_dir=str(root))
+                        if document.get('project_fidelity') == 'native_scene_preview':
+                            from geoharness.cartography.scene_delivery import materialize_scene
+
+                            generated = await materialize_scene(context, str(root))
+                        else:
+                            from geoharness.cartography.delivery_project import materialize_project
+
+                            generated = await materialize_project(context, preview_dir=str(root))
                         arguments = arguments.model_copy(update={
                             'project_dir': generated['project_dir'],
                             'map_id': generated.get('map_id', arguments.map_id)})
@@ -742,8 +821,8 @@ class GeoDeliverTool(BaseTool):
                 "failure": {"code": code, "category": code,
                             "retry_without_change": False, "field": "project_dir"},
                 "recovery": (
-                    "已有草案时传spec_ref由交付工具生成工程；或先用geo_qgis_project build，"
-                    "把返回project_dir与同一主图一起传入。"
+                    "先用geo_cartography原生制图并完成全部页面审查，"
+                    "把实际返回的project_dir与同一主图传入，交付时一次生成工程。"
                     "不要把 PNG/PDF 当作等价工程，也不要猜测 project_dir。"
                     if code == "missing_project" else
                     '先对实际已成功分析产物调用geo_task publish_analysis，'

@@ -403,10 +403,11 @@ def _package(
     )
     matched = bool(digest and preview_digest == digest == manifest.get("preview_sha256"))
     project = manifest.get("project_file")
-    preview_only = manifest.get("project_fidelity") == "preview_only"
-    # A preview-only package is complete without a .qgz. Its portable project is
-    # deliberately deferred to the first delivery, where every source/layout/page
-    # identity is rechecked before the single materialization.
+    preview_only = manifest.get("project_fidelity") in {
+        "preview_only", "native_scene_preview"}
+    # Native previews and legacy QGIS previews are complete without a .qgz or
+    # .qgs. The portable project is deliberately deferred to the first delivery,
+    # where every source/layout/page identity is checked again.
     project_exists = False
     if not preview_only:
         project_path = (root / project).resolve() if isinstance(project, str) else (
@@ -567,6 +568,25 @@ def record_map_version(
                     path = (root / name).resolve()
                     if path.is_relative_to(root) and (file_digest := _sha(path)):
                         _register(index, job_id, path, file_digest)
+        if previous is not None and not same:
+            old_pages, new_pages = _map_page_files(previous), _map_page_files(version)
+            for n, page in new_pages.items():
+                old = next(((i, p) for i, p in old_pages.items()
+                    if page.get('page_id') and page.get('content_key')
+                    and p.get('page_id') == page['page_id']
+                    and p.get('content_key') == page['content_key']
+                    and p['sha256'] == page['sha256']), None)
+                if old:
+                    review = previous.get('page_reviews', {}).get(str(old[0]), {})
+                    reference = review.get('report_reference')
+                    if (review.get('status') in {'passed', 'issues'}
+                            and review.get('image_sha256') == page['sha256']
+                            and _sha(Path(old[1]['path'])) == page['sha256']
+                            and (not isinstance(reference, dict) or _sha(Path(
+                                reference['path'])) == reference.get('sha256'))):
+                        version.setdefault('page_reviews', {})[str(n)] = {
+                            **copy.deepcopy(review), 'inherited_from_version': previous['version']}
+            _aggregate_page_reviews(version, new_pages)
         _save(directory, job, index)
         _sync_state(metadata, cwd, directory, index)
         return _receipt(job, index, artifact=image)
@@ -671,13 +691,30 @@ def record_map_materialization(
         previous = version['stages']['packaged']
         if _stale_files(previous):
             raise ValueError('冻结预览文件已变化；不能沿用原审查记录生成工程')
-        if previous.get('project_fidelity') != 'preview_only':
+        preview_fidelities = {'preview_only', 'native_scene_preview'}
+        if previous.get('project_fidelity') not in preview_fidelities:
             raise ValueError('只有尚未物化的预览可以绑定首次工程')
         original = _read(Path(previous['manifest_path']), {})
         package, manifest = _package(project_dir, cwd, version['image_sha256'], config)
         if package['status'] != 'passed':
             raise ValueError('最终工程预览与冻结图片不一致；保留原预览和工程供定位')
-        if original.get('export_binding'):
+        if original.get('project_fidelity') == 'native_scene_preview':
+            validation = manifest.get('project_validation') or {}
+            if (manifest.get('project_fidelity') != 'scene_bound'
+                    or validation.get('status') != 'passed'
+                    or validation.get('scene_plan_sha256') != original.get('scene_plan_sha256')
+                    or original.get('scene_ref') != manifest.get('scene_ref')):
+                raise ValueError('最终工程缺少同一场景计划的成功编译验证')
+            # Native scenes freeze a renderer plan, source inventory and page
+            # hashes, not a QGIS creation spec. The final project must carry the
+            # same scene plan and the same source inventory.
+            if original.get('scene_plan_sha256') != manifest.get('scene_plan_sha256'):
+                raise ValueError('最终工程与已审原生场景计划不一致；重新预览与审查')
+            if original.get('source_inventory') != manifest.get('source_inventory'):
+                raise ValueError('冻结预览来源文件在工程生成期间发生变化；不能沿用原审查')
+            if not original.get('scene_plan_sha256') or not original.get('source_inventory'):
+                raise ValueError('冻结原生预览缺少来源或场景计划，不能沿用原审查')
+        elif original.get('export_binding'):
             if original['export_binding'] != manifest.get('export_binding'):
                 raise ValueError('冻结预览的原工程或数据已变化；重新预览与审查')
         else:
@@ -696,6 +733,7 @@ def record_map_materialization(
         if (set(old_pages) != set(new_pages) or any(
                 old_pages[n]['sha256'] != new_pages[n]['sha256'] for n in old_pages)):
             raise ValueError('最终工程逐页像素与冻结预览不一致；不能复用原审查结论')
+        version['preview_package'] = copy.deepcopy(previous)
         version['stages']['packaged'] = package
         version['materialization'] = {
             'status': 'passed', 'selected_version': selected_version,
@@ -714,9 +752,9 @@ def record_map_materialization(
         return _receipt(job, index, artifact=image, selected_version=selected_version)
 
 
-def _map_page_files(version: dict) -> dict[int, dict]:
+def _map_page_files(version: dict, package=None) -> dict[int, dict]:
     """Read page membership only from the hash-recorded native project manifest."""
-    package = version.get("stages", {}).get("packaged", {})
+    package = package if package is not None else version.get("stages", {}).get("packaged", {})
     manifest_path = package.get("manifest_path")
     if not manifest_path:
         return {}
@@ -725,7 +763,7 @@ def _map_page_files(version: dict) -> dict[int, dict]:
     if not manifest_hash or _sha(Path(manifest_path)) != manifest_hash:
         return {}
     manifest = _read(Path(manifest_path), {})
-    if manifest.get("backend") != "qgis":
+    if manifest.get("backend") not in {"qgis", "matplotlib"}:
         return {}
     from geoharness.qgis.artifacts import returned_page_previews
 
@@ -745,6 +783,7 @@ def _map_page_files(version: dict) -> dict[int, dict]:
             raise ValueError("Native page preview is not a unique recorded package member")
         pages[index] = {"path": str(path), "sha256": files[str(path)],
                         "manifest_sha256": manifest_hash, "frames": frames,
+                        "page_id": entry.get('page_id'), "content_key": entry.get('content_key'),
                         "role": entry.get('role', 'map' if frames else 'unknown')}
     return pages
 
@@ -804,6 +843,8 @@ def record_map_review(
                 item.get("image_sha256") == binding.get("primary_image_sha256")), None)
             pages = _map_page_files(version) if version else {}
             page = pages.get(page_index)
+            if version and (not page or page['path'] != str(image)):
+                page = _map_page_files(version, version.get('preview_package', {})).get(page_index)
             if not page or page["path"] != str(image) or page["sha256"] != _sha(image) or \
                     page["manifest_sha256"] != binding.get("manifest_sha256"):
                 version = None
@@ -813,6 +854,10 @@ def record_map_review(
         pages = _map_page_files(version)
         if page_index != 0:
             page = pages.get(page_index)
+            if not page or page['path'] != str(image):
+                alias = _map_page_files(version, version.get('preview_package', {})).get(page_index)
+                if alias and page and alias['sha256'] == page['sha256']:
+                    page = alias
             if (not page or binding.get("version") != version.get("version") or
                     binding.get("primary_image_sha256") != version["image_sha256"] or
                     binding.get("manifest_sha256") != page["manifest_sha256"] or

@@ -49,3 +49,33 @@ async def test_declaring_one_input_does_not_authorize_hidden_business_read(tmp_p
         input_refs={'source': str(source)}, code=(
             f"reader=open\nprint(reader({str(other)!r}).read())")), context)
     assert result.is_error and '未绑定的业务输入' in result.output
+
+
+async def test_declared_alias_is_readable_in_real_child(tmp_path):
+    context, source = setup_context(tmp_path)
+    result = await GeoPythonTool().execute(GeoPythonInput(name='alias_read',
+        input_refs={'fire': str(source)}, code="p=read_vector('fire')\nprint(len(p))"), context)
+    assert not result.is_error, result.output
+    assert json.loads(result.output)['stdout'].strip() == '1'
+
+
+def test_constant_control_flow_keeps_live_else_and_skips_dead_inputs():
+    import pytest
+
+    from geoharness.execution.contracts import preflight_code
+
+    preflight_code("x = INPUTS['dead'] if False else INPUTS['live']", ['live'])
+    preflight_code("x = INPUTS['live'] if True else INPUTS['dead']", ['live'])
+    preflight_code("while False:\n x=INPUTS['dead']\nelse:\n x=INPUTS['live']", ['live'])
+    for code in ("x = None if False else INPUTS['missing']",
+                 "while False:\n pass\nelse:\n x=INPUTS['missing']"):
+        with pytest.raises(ValueError, match='missing'):
+            preflight_code(code, [])
+
+
+async def test_analysis_python_cannot_write_project_before_native_review(tmp_path):
+    context, _ = setup_context(tmp_path)
+    result = await GeoPythonTool().execute(GeoPythonInput(name='early_project',
+        code="(RUN_DIR/'early.qgs').write_text('<qgis/>')"), context)
+    assert result.is_error and 'geo_deliver' in result.output
+    assert not list(tmp_path.rglob('*.qgs'))

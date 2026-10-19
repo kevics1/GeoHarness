@@ -26,9 +26,15 @@ def test_progressive_schema_preserves_exact_field_help_without_duplicate_nested_
     import json
 
     from geoharness.qgis.specification import contract_help
+    from geoharness.tools.geo_qgis_project import GeoQgisProjectInput, GeoQgisProjectTool
 
     registry = build_geo_tool_registry(config=GeoConfig())
-    tool = registry.get('geo_qgis_project')
+    # The model-facing QGIS project tool is read-only inspect; the compiler's
+    # full progressive schema is still exercised directly, never re-exposed as
+    # a cartography entry point.
+    assert registry.get('geo_qgis_project').input_model.__name__ == 'QgisInspectInput'
+    tool = GeoQgisProjectTool()
+    assert tool.input_model is GeoQgisProjectInput
     full = tool.input_model.model_json_schema()
     wire = tool.to_api_schema()['input_schema']
     assert set(wire['properties']) == set(full['properties'])
@@ -36,5 +42,29 @@ def test_progressive_schema_preserves_exact_field_help_without_duplicate_nested_
     assert contract_help('layout')['schema']['properties']['width_mm']['description']
     assert contract_help('style')['schema']['properties']['size_mm']['description']
     cartography = registry.get('geo_cartography')
-    assert len(json.dumps(cartography.to_api_schema())) < len(json.dumps(
-        cartography.input_model.model_json_schema()))
+    # Native scene fields are part of the model-facing contract; they must not
+    # be compressed away. Keep the compactness check only for the progressive
+    # QGIS compiler schema, whose nested contracts are served by help.
+    assert set(cartography.to_api_schema()['input_schema']['properties']) == {
+        'action', 'scene', 'scene_ref', 'edits'}
+    assert len(json.dumps(full)) > len(json.dumps(wire))
+
+
+def test_native_wire_schema_contains_detailed_fields_and_no_dangling_refs():
+    from geoharness.tools.geo_native_map import GeoNativeMapTool
+
+    schema = GeoNativeMapTool().to_api_schema()['input_schema']
+    def visit(node):
+        if isinstance(node, dict):
+            if '$ref' in node:
+                target = schema
+                for part in node['$ref'].removeprefix('#/').split('/'):
+                    target = target[part]
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+    visit(schema)
+    assert schema['$defs']['Layer']['properties']['select_keys']['description']
+    assert schema['$defs']['Symbol']['properties']['width_mm']['description']

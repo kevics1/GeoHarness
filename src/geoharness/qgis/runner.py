@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from geoharness.config.settings import QgisConfig
 
 _ACTIONS = {
+    "native_scene_export",
     "doctor",
     "search",
     "help",
@@ -198,6 +199,10 @@ async def execute_qgis(
                 ]
             )
         ),
+        # Non-secret capability switches used by the isolated worker. Credentials
+        # never enter this file.
+        "settings": {"allow_console_layouts": bool(
+            getattr(settings, "allow_console_layouts", False))},
     }
     paths["request.json"].write_text(
         json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8"

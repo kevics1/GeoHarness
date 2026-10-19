@@ -38,11 +38,23 @@ def _json_safe(value: Any, depth: int = 0) -> Any:
     raise ValueError('Console results must be bounded JSON values, not native QGIS objects')
 
 
-def _validate_code(code):
+def _validate_code(code, *, allow_layouts=False):
     if not isinstance(code, str) or not code.strip() or len(code) > 200000:
         raise ValueError('Console requires a complete script of at most 200000 characters')
     tree = ast.parse(code)
     for node in ast.walk(tree):
+        # Opening a user's existing project for inspection/analysis is allowed;
+        # constructing print layouts or writing a new project is not a normal
+        # analysis-side effect and bypasses the reviewed delivery candidate.
+        if not allow_layouts:
+            if (isinstance(node, ast.Name) and node.id in {
+                    'QgsPrintLayout', 'QgsLayoutItemMap'}):
+                raise PermissionError('PyQGIS控制台用于空间分析；'
+                                      '普通制图请用geo_cartography原生计划，'
+                                      '审图通过后geo_deliver生成工程。')
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id == 'QgsLayoutExporter'):
+                raise PermissionError('分析控制台不导出QGIS布局；审查通过后用geo_deliver生成。')
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             names = ([a.name for a in node.names] if isinstance(node, ast.Import)
                      else [node.module or ''])
@@ -69,6 +81,11 @@ class ConsoleGuard:
             raise PermissionError('Console file access requires a local path')
         path = Path(os.fsdecode(value)).expanduser().resolve()
         if writing:
+            allow_layouts = ((self.context.settings or {}).get('allow_console_layouts', False)
+                if isinstance(self.context.settings, dict) else getattr(
+                    self.context.settings, 'allow_console_layouts', False))
+            if path.suffix.lower() in {'.qgs', '.qgz', '.qpt'} and not allow_layouts:
+                raise PermissionError('分析控制台不写QGIS工程；审查通过后用geo_deliver一次生成。')
             if not path.is_relative_to(self.context.run_dir):
                 raise PermissionError('Console outputs must stay inside RUN_DIR')
             relative = path.relative_to(self.context.run_dir)
@@ -196,7 +213,10 @@ class ConsoleGuard:
 def dispatch(action: str, payload: dict[str, Any], context: WorkerContext) -> dict[str, Any]:
     if action != 'console':
         raise ValueError('Unsupported console action')
-    compiled = _validate_code(payload.get('code'))
+    allow_layouts = ((context.settings or {}).get('allow_console_layouts', False)
+        if isinstance(context.settings, dict) else getattr(
+            context.settings, 'allow_console_layouts', False))
+    compiled = _validate_code(payload.get('code'), allow_layouts=bool(allow_layouts))
     state = payload.get('console_state') or {}
     if not isinstance(state, dict) or len(state) > 64:
         raise ValueError('console_state must be a bounded JSON object')

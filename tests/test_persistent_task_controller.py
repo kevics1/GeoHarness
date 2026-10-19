@@ -280,3 +280,30 @@ async def test_resume_unknown_operation_keeps_evidence_without_blind_replay(tmp_
     assert 'print(42)' in arguments['content']
     assert (await run_plan(context))['executed'] == []
     assert len(read_evidence(context.metadata, cwd=tmp_path)['operations']) == 1
+
+
+async def test_sibling_direct_calls_queue_submission_before_os_lease(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from geoharness.task_controller import execute_direct
+
+    context, _ = setup_context(tmp_path)
+    calls = []
+    class Arguments(BaseModel):
+        name: str
+    class Tool:
+        name = 'geo_python'
+        input_model = Arguments
+        def is_read_only(self, arguments):
+            return False
+        async def execute(self, arguments, context):
+            calls.append(arguments.name)
+            await asyncio.sleep(.02)
+            return ToolResult(output=json.dumps({'status': 'succeeded', 'value': arguments.name}))
+    tool = Tool()
+    context.metadata['tool_registry'] = SimpleNamespace(get=lambda name: tool)
+    results = await asyncio.gather(*[execute_direct(context, tool, Arguments(name=name))
+                                     for name in ('first', 'second')])
+    assert all(not result.is_error for result in results), [result.output for result in results]
+    assert calls == ['first', 'second']

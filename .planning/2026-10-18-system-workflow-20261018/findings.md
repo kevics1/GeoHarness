@@ -15,3 +15,12 @@
 - 物化逐页身份最初因PNG Created元数据、名单列宽XML舍入失败；关闭PNG元数据并只在内存规范化布局后真实双页图片SHA一致，未放宽审查绑定。用户工程没有GeoHarness自定义字体信息，需从真实布局标签字体绑定，不依赖info['family']。
 - 原生控制台ConsoleGuard.path调用WorkerContext.read_path时，后者读取文件头触发同一audit递归；仅在可信路径/依赖验证期间暂时停用重入检查并在finally恢复，保留原始读写限制。真实用户工程创建/导出/交付专项已复现修复。
 - F阶段收尾补测真实双页流程时，跨会话以同一spec_ref交付会绕过内存render cache并重复生成工程（1项真实失败，43.73秒）；已增加预览创建契约与首次物化记录中的spec身份，并在生成前查询当前版本的持久关联。仅同一草案、同一版本和完整文件绑定可以复用，不扫描或切换历史候选，复验中。
+- G轮最新森林火灾改：会话144b38e6451c，任务6ed3a200-ac52-4783-a3c8-2e8ff9860fa7，1204.219秒；模型74次774.162秒，工具时间并集402.905秒，89次可见调用20错。geo_qgis_project37次含18 help/14 build/5 spec，10错；Python25次8错；图片15次13 issues/2 passed无缓存，无服务超时。native 11次=7成功预览+2冲突拒绝+2交付工程，并非14套qgz。
+- G轮真实问题：已声明input_refs的fire别名仍被read_vector判未登记；AST对if False分支INPUTS['ev']硬报缺输入；同一模型批次Python与publish_analysis因submit_plan在异步锁外先取OS锁而自相冲突。字段/库API猜测、headers字典/labels必填/patch动词错误、帮助分页返回结构多形态仍有问题。
+- G轮事实与审查：metric_fix_4543脚本从原pts重建，仅当原pts含elev_m才复制，否则np.nan，导致旧抽样4缺失变最终234缺失；事实包未纳入elev_m也未声明nearest_checks。独立重算最终234条蔓延/避难距离及避难名称0错，未证明其他全部科学结论。最终页脚标EPSG:32648而Python主要结果EPSG:4543，来源被混合展示。
+- G轮页级断链：v6与后续仅改名册版本主图/detail PNG的SHA相同，record_map_version新建版本却不迁移未变页审查；最终只名册passed、全册unverified。27问题状态为22 needs_recheck/5 open，无confirmed/dismissed/fix_verified；15份repair_progress全not_established，虽均有bbox仍没识别反复同类问题。模型猜书房不能是学校属于数据语义疑点，不是像素可证缺陷。最后交付缺准入硬门槛，issues/unverified仍生成工程。
+- G轮新增直接台账证据：v7创建于15:55:40，主图被设为旧roster_page_3.png且无package，发生在geo_map_review读取该页，不是新渲染。首次交付迁移package到最终目录后，原预览次级页定位失效触发单图登记。审图不能创建版本，需持久稳定页归属，不能只按当前包路径猜。
+
+- G3收尾自查新增：页面layers声明顺序被原生绘图的全局图层遍历覆盖，而工程按页面顺序导出，存在实质跨渲染器不一致；已改为显式逐层zorder。VRT的底层TIFF变化未进入页缓存/控制器指纹，已将实际依赖SHA纳入每层库存，并添加真实像素/文件变更回归。全量快照1680项1668通过/12失败，旧兼容用例需经过绑定审查才能物化；不得为了迁就旧测试允许未审查生成。独立审查此次仍未获得有效报告，不计通过。
+
+- 最终原生登记恢复回归先失败：渲染落盘后record_map_version抛错，下一次render缓存返回reused而永不补登记；已根据实际artifact_registered决定是否补登记，复用图片且只产生一个版本。原12失败当前wheel精确复验12通过，收尾集成40通过，最终wheel21通过。实际安装133模块/34资源零差异；geoh实际版本命令为version而非手册所述--version。

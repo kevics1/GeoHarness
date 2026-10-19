@@ -55,7 +55,7 @@ class GeoMapReviewInput(BaseModel):
         description="Compatibility only: this tool is always read-only.",
     )
     all_pages: bool = Field(default=False, description=(
-        '默认false；true一次检查已验证QGIS工程的全部页面，逐页返回结论。'))
+        '默认false；true一次检查已登记原生制图清单的全部页面，逐页返回结论；不需要QGIS工程。'))
 
     @model_validator(mode="after")
     def validate_review_controller(self):
@@ -113,6 +113,12 @@ def _verified_render_evidence(
     recorded_versions = recorded_versions if isinstance(recorded_versions, list) else []
     matching = _matching_version(receipt, path) if recorded_versions else None
     versions = ([matching] if matching else []) + list(reversed(recorded_versions))
+    # Materialization relocates the same reviewed pages. Keep the hash-bound
+    # preview package as a read-only alias instead of inventing a render version.
+    versions = [candidate for version in versions if isinstance(version, dict)
+        for candidate in ([version, {**version, 'stages': {**version.get('stages', {}),
+            'packaged': version['preview_package']}}] if version.get('preview_package')
+            else [version])]
     for version in versions:
         if not isinstance(version, dict):
             continue
@@ -193,6 +199,7 @@ def _verified_render_evidence(
                     "primary_image_sha256": primary_digest,
                     "manifest_sha256": hashlib.sha256(raw).hexdigest(),
                     "source_bindings_sha256": hashlib.sha256(json.dumps(
+                        manifest.get("source_inventory") or
                         (manifest.get("creation_spec") or {}).get("source_bindings", []),
                         sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
                 },
@@ -254,6 +261,13 @@ class GeoMapReviewTool(BaseTool):
         first = await self._review_one(single, context)
         if first.is_error or first.metadata.get("receipt_status") == "unregistered":
             return first
+        first_body, _ = json.JSONDecoder().raw_decode(first.output.lstrip())
+        if first_body.get('diagnostics', {}).get('failure_stage'):
+            # A service outage affects the batch, not the pixels. Preserve the
+            # first exact failure without walking other pages through cooldown.
+            first.metadata['completed_page_count'] = 1
+            first.metadata['batch_status'] = 'unverified'
+            return first
         config = context.metadata["geoharness_config"]
         image = Path(first.metadata["image_path"]).resolve()
         identity = first.metadata["map_id"]
@@ -262,9 +276,10 @@ class GeoMapReviewTool(BaseTool):
         verified = _verified_render_evidence(image, hashlib.sha256(image.read_bytes()).hexdigest(),
                                               receipt, [context.cwd.resolve()])
         proof = verified.get("backend_proof", {})
-        if verified.get("backend") != "qgis" or not proof.get("manifest_path"):
+        if verified.get("backend") not in {"qgis", "matplotlib"} or not proof.get(
+                "manifest_path"):
             return ToolResult(
-                output=first.output + "\nBatch unavailable: no verified QGIS package.",
+                output=first.output + "\nBatch unavailable: no verified map package.",
                 is_error=True, metadata=first.metadata)
         root = Path(proof["manifest_path"]).parent
         pages = returned_page_previews(verified.get("render_metadata", {}))
@@ -280,7 +295,8 @@ class GeoMapReviewTool(BaseTool):
             # Recheck each page against packaged file hashes before sending any pixels.
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             bound = _verified_render_evidence(path, digest, receipt, [context.cwd.resolve()])
-            if not path.is_relative_to(root) or bound.get("backend") != "qgis":
+            if not path.is_relative_to(root) or bound.get("backend") not in {
+                    "qgis", "matplotlib"}:
                 return ToolResult(output="Batch stopped: a packaged page changed or is unbound.",
                     is_error=True, metadata={"map_id": identity, "render_executed": False,
                                             "completed_page_count": len(results)})
@@ -288,6 +304,11 @@ class GeoMapReviewTool(BaseTool):
                 "file_path": str(path), "map_id": identity}), context)
             results.append(result)
             if result.is_error:
+                return result
+            body, _ = json.JSONDecoder().raw_decode(result.output.lstrip())
+            if body.get('diagnostics', {}).get('failure_stage'):
+                result.metadata['completed_page_count'] = len(results)
+                result.metadata['batch_status'] = 'unverified'
                 return result
         summary = []
         for result in results:
@@ -380,11 +401,7 @@ class GeoMapReviewTool(BaseTool):
                 output="Error: an existing PNG/JPEG/WebP map image is required.", is_error=True
             )
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        from geoharness.cartography.tracking import (
-            bind_map_job,
-            receipt_summary,
-            track_render_result,
-        )
+        from geoharness.cartography.tracking import bind_map_job, receipt_summary
 
         try:
             identity = bind_map_job(context, arguments.map_id, path)
@@ -399,17 +416,12 @@ class GeoMapReviewTool(BaseTool):
                 artifact_path=path,
             )
             page_evidence = _verified_render_evidence(path, digest, existing, roots)
-            if not any(version.get("image_sha256") == digest
-                       for version in existing.get("versions", [])) and not page_evidence.get(
-                           "review_page_index"):
-                registered = await asyncio.to_thread(
-                    track_render_result,
-                    ToolResult(output="Existing map retained", metadata={"output_path": str(path)}),
-                    context,
-                    identity,
-                )
-                if registered.is_error:
-                    return registered
+            # Reviews observe registered renders. Never manufacture a map
+            # version from a bare image; that was the source of pseudo-versions
+            # whose "main map" was actually a roster preview.
+            registered = bool(page_evidence.get("review_binding")) or any(
+                version.get("image_sha256") == digest
+                for version in existing.get("versions", []) if isinstance(version, dict))
         except (OSError, ValueError) as exc:
             return await self._review_without_ledger(arguments, context, path, str(exc))
         evidence = dict(arguments.evidence)
@@ -437,17 +449,22 @@ class GeoMapReviewTool(BaseTool):
             evidence.get('previous_visual_reviews', []),
             {**result.model_dump(), 'image_sha256': digest,
              'page_index': verified.get('review_page_index', 0)})
-        from geoharness.cartography.review_findings import observe_findings
+        if registered:
+            from geoharness.cartography.review_findings import observe_findings
 
-        result.diagnostics['finding_registry'] = observe_findings(context.metadata,
-            cwd=context.cwd, map_id=identity, page_index=verified.get('review_page_index', 0),
-            image_sha256=digest, pixel_sha256=budget.get('pixel_sha256', ''),
-            review=result.model_dump())
+            result.diagnostics['finding_registry'] = observe_findings(context.metadata,
+                cwd=context.cwd, map_id=identity, page_index=verified.get('review_page_index', 0),
+                image_sha256=digest, pixel_sha256=budget.get('pixel_sha256', ''),
+                review=result.model_dump())
         # Cached conclusions predate newer layouts too; page-zero pixels cannot accept page one.
         page_index = verified.get("review_page_index", 0)
         unreviewed = [page for page in _unreviewed_pages(verified.get("render_metadata") or {})
                       if page not in verified.get("reviewed_page_indices", [])]
         current_binding = verified.get("review_binding")
+        if current_binding and result.diagnostics.get('failure_stage'):
+            # Failed service attempts still belong to a concrete page/version.
+            # Recording unverified evidence grants no visual approval.
+            result.diagnostics['review_binding'] = dict(current_binding)
         if budget.get("review_cached") and current_binding:
             if (result.status in {'passed', 'issues'}
                     and not result.diagnostics.get('failure_stage')):
@@ -493,6 +510,23 @@ class GeoMapReviewTool(BaseTool):
                 "backend": verified["backend"],
             },
         )
+        if not registered:
+            # The report is retained for inspection, but an unregistered image
+            # cannot acquire a ledger version or authorize formal delivery.
+            payload = public_payload(result.model_dump())
+            budget["visual_review_status"] = result.status
+            return ToolResult(
+                output=(json.dumps(review_execution_payload(payload), ensure_ascii=False,
+                                   indent=2)
+                        + "\nReport: " + str(report)
+                        + "\nMap receipt: unregistered; this image is not bound to a "
+                          "rendered ledger version and cannot be used for formal delivery."),
+                metadata={"image_path": str(path), "review_path": str(report),
+                          "review_status": result.status, "quality_status": "draft",
+                          "backend": verified['backend'],
+                          "registration_status": "unregistered", "render_executed": False,
+                          **budget},
+            )
         from geoharness.cartography.jobs import record_map_review
 
         try:
@@ -562,6 +596,8 @@ class GeoMapReviewTool(BaseTool):
                 "review_path": str(report),
                 "image_path": str(path),
                 "image_sha256": digest,
+                "finding_registry": result.diagnostics.get("finding_registry", {}),
+                "issues": [issue.model_dump() for issue in result.issues],
                 "review_checks": context.metadata.get('map_workflow_state', {}).get(
                     'review_checks', {}).get(identity, []),
                 "map_id": identity,

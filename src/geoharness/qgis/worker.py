@@ -44,6 +44,7 @@ def main() -> int:
         Path(request["run_dir"]),
         [Path(value) for value in request["read_roots"]],
     )
+    context.settings = request.get("settings") or {}
     # Windows job containment must be attached before native provider code executes.
     deadline = time.monotonic() + 30
     while not (context.run_dir / ".start").is_file():
@@ -67,7 +68,9 @@ def main() -> int:
                         fonts.addApplicationFont(str(font))
         app.initQgis()
         action, payload = request["action"], request["payload"]
-        if action.startswith("project_"):
+        if action == 'native_scene_export':
+            from geoharness.qgis.scene_export import dispatch
+        elif action.startswith("project_"):
             from geoharness.qgis.project_worker import dispatch
         elif action == "console":
             from geoharness.qgis.console import dispatch

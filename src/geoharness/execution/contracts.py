@@ -32,7 +32,7 @@ def preflight_code(code: str, input_aliases=None) -> list[dict]:
     tree = ast.parse(code)
     compile(tree, "analysis.py", "exec")
     if input_aliases is not None:
-        for node in ast.walk(tree):
+        for node in _reachable_ast(tree):
             if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
                     and node.value.id == 'INPUTS' and isinstance(node.slice, ast.Constant)
                     and isinstance(node.slice.value, str)
@@ -63,6 +63,34 @@ def preflight_code(code: str, input_aliases=None) -> list[dict]:
                                           "use an installed implementation before execution")
             checks.append({"check": "import_available", "module": name})
     return checks
+
+
+def _reachable_ast(tree):
+    """Prune only literal branches; preserve the live expression and while-else."""
+    def walk(node):
+        if isinstance(node, (ast.If, ast.While, ast.IfExp)):
+            test = node.test
+            if isinstance(test, ast.Constant) and (
+                    not isinstance(node, ast.While) or not test.value):
+                branches = node.body if test.value else node.orelse
+                if isinstance(branches, list):
+                    for child in branches:
+                        yield from walk(child)
+                elif isinstance(branches, ast.AST):
+                    yield from walk(branches)
+                return
+        yield node
+        for field, value in ast.iter_fields(node):
+            if field in {'body', 'orelse', 'finalbody'} and isinstance(value, list):
+                for child in value:
+                    yield from walk(child)
+            elif isinstance(value, ast.AST):
+                yield from walk(value)
+            elif isinstance(value, list):
+                for child in value:
+                    if isinstance(child, ast.AST):
+                        yield from walk(child)
+    yield from walk(tree)
 
 
 def validate_input(path: Any, requirement: dict) -> dict:

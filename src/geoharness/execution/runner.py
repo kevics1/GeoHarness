@@ -346,6 +346,8 @@ def _install_guards(spec: dict[str, Any], tracker: Any = None) -> None:
         if "://" in text or text.startswith(("/vsi", "\\\\")):
             raise PermissionError("Network, GDAL virtual and UNC paths are unavailable")
         path = Path(text).resolve()
+        if writing and path.suffix.lower() in {'.qgs', '.qgz', '.qpt'}:
+            raise PermissionError('分析Python不写QGIS工程；原生制图审查通过后由geo_deliver生成。')
         if path.is_relative_to(run_dir):
             if writing and path in {
                 run_dir / "analysis.py",
@@ -812,6 +814,8 @@ def _data_helpers(references: dict[str, Any], tracker: Any = None) -> dict[str, 
                                record.get("output_label"), path.name, path.stem}
                     if value in aliases:
                         matches.append(record)
+        matches = [record for index, record in enumerate(matches)
+                   if record not in matches[:index]]
         if not matches:
             _artifact_contracts().lookup_reference(value, records)
         if len(matches) != 1:
@@ -932,6 +936,15 @@ def _child_main() -> None:
             raise ValueError(f'Unbound input requirement: {alias}')
         input_checks[alias] = contracts.validate_input(spec['input_artifacts'][alias], requirement)
     data_refs = spec.get("data_refs", {})
+    helper_refs = dict(data_refs)
+    for alias, locator in spec.get('input_artifacts', {}).items():
+        # A declared alias is a real input identity in both INPUTS and helpers.
+        # Preserve known schema/provenance where available; never fuzzy-match.
+        target = Path(locator).resolve()
+        record = next((dict(item) for item in data_refs.values()
+            if isinstance(item, dict) and item.get('path')
+            and Path(item['path']).resolve() == target), {'path': str(target)})
+        helper_refs[alias] = record
 
     def confirmed_score(frame, *, key, components=None, missing_policy=None, classification=None):
         policy = spec.get('approved_score_policy')
@@ -977,7 +990,7 @@ def _child_main() -> None:
         "fit_frame_extent": contracts.fit_frame_extent,
         "describe_input": contracts.describe_input,
         "write_analysis_report": contracts.write_analysis_report,
-        **_data_helpers(data_refs, tracker),
+        **_data_helpers(helper_refs, tracker),
     }
     exec(code, namespace)
     result_name = spec.get('result_variable', 'CONSOLE_RESULT')

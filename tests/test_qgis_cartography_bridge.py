@@ -17,7 +17,8 @@ from geoharness.tools.geo_cartography import GeoCartographyInput, GeoCartography
 
 @pytest.mark.parametrize("deny_review", [False, True])
 async def test_bridge_readonly_review_preserves_package_and_external_edits(
-    tmp_path, deny_review,
+    tmp_path,
+    deny_review,
 ):
     from openharness.api.client import ApiMessageCompleteEvent
     from openharness.api.usage import UsageSnapshot
@@ -25,14 +26,15 @@ async def test_bridge_readonly_review_preserves_package_and_external_edits(
 
     from geoharness.runtime import _build_permission_checker
 
-    config = GeoConfig()
+    config = GeoConfig(qgis=GeoConfig().qgis.model_copy(update={"allow_project_previews": True}))
     try:
         discover_qgis(config.qgis, cwd=tmp_path)
     except (ValueError, OSError):
         pytest.skip("QGIS runtime unavailable")
     source = tmp_path / "areas.geojson"
-    gpd.GeoDataFrame({"risk": ["High", "Low"]},
-        geometry=[box(100, 25, 101, 26), box(101, 25, 102, 26)], crs=4326).to_file(source)
+    gpd.GeoDataFrame(
+        {"risk": ["High", "Low"]}, geometry=[box(100, 25, 101, 26), box(101, 25, 102, 26)], crs=4326
+    ).to_file(source)
 
     class ReviewClient:
         calls = 0
@@ -41,41 +43,89 @@ async def test_bridge_readonly_review_preserves_package_and_external_edits(
             self.calls += 1
             if self.calls == 1:
                 (tmp_path / "exports/map.png").write_bytes(b"user-edited-preview")
-                roi = next(json.loads(block.text) for block in request.messages[0].content
-                           if getattr(block, "type", "") == "text"
-                           and block.text.startswith('{"roi_ref": "legend"'))
-                payload = {"status": "issues", "summary": "测试图例字号不足", "issues": [{
-                    "severity": "warning", "issue_code": "legend_mismatch",
-                    "description": "测试图例字号不足", "frame_id": "legend",
-                    "roi_ref": roi["roi_ref"], "bbox": [.1, .1, .9, .9]}]}
-            yield ApiMessageCompleteEvent(message=ConversationMessage(role="assistant", content=[
-                ToolUseBlock(id=f"review-{self.calls}", name="record_map_review", input=payload)]),
-                usage=UsageSnapshot(), stop_reason="tool_calls")
+                roi = next(
+                    json.loads(block.text)
+                    for block in request.messages[0].content
+                    if getattr(block, "type", "") == "text"
+                    and block.text.startswith('{"roi_ref": "legend"')
+                )
+                payload = {
+                    "status": "issues",
+                    "summary": "测试图例字号不足",
+                    "issues": [
+                        {
+                            "severity": "warning",
+                            "issue_code": "legend_mismatch",
+                            "description": "测试图例字号不足",
+                            "frame_id": "legend",
+                            "roi_ref": roi["roi_ref"],
+                            "bbox": [0.1, 0.1, 0.9, 0.9],
+                        }
+                    ],
+                }
+            yield ApiMessageCompleteEvent(
+                message=ConversationMessage(
+                    role="assistant",
+                    content=[
+                        ToolUseBlock(
+                            id=f"review-{self.calls}", name="record_map_review", input=payload
+                        )
+                    ],
+                ),
+                usage=UsageSnapshot(),
+                stop_reason="tool_calls",
+            )
 
     client = ReviewClient()
     checker = _build_permission_checker(config)
     if deny_review:
         checker._settings.denied_tools.append("geo_map_review")
-    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config,
-        "map_review_client": client, "geoharness_permission_checker": checker})
-    rendered = await GeoCartographyTool().execute(GeoCartographyInput(
-        title="工程配对测试", map_crs="EPSG:4326", output_path="exports/map.png",
-        project_output_dir="exports/editable", layers=json.dumps([{
-            "file_path": str(source), "field_name": "risk", "categories": [
-                {"value": "High", "label": "高", "color": "#ff0000"},
-                {"value": "Low", "label": "低", "color": "#00ff00"}]}])), context)
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={
+            "geoharness_config": config,
+            "map_review_client": client,
+            "geoharness_permission_checker": checker,
+        },
+    )
+    rendered = await GeoCartographyTool().execute(
+        GeoCartographyInput(
+            renderer="qgis",
+            title="工程配对测试",
+            map_crs="EPSG:4326",
+            output_path="exports/map.png",
+            project_output_dir="exports/editable",
+            layers=json.dumps(
+                [
+                    {
+                        "file_path": str(source),
+                        "field_name": "risk",
+                        "categories": [
+                            {"value": "High", "label": "高", "color": "#ff0000"},
+                            {"value": "Low", "label": "低", "color": "#00ff00"},
+                        ],
+                    }
+                ]
+            ),
+        ),
+        context,
+    )
     assert not rendered.is_error, rendered.output
     metadata = rendered.metadata
     assert client.calls == (0 if deny_review else 1)
     assert "repair_count" not in metadata
     assert metadata["review_status"] == ("unverified" if deny_review else "issues"), (
         Path(metadata["review_path"]).read_text(encoding="utf-8")
-        if metadata.get("review_path") else rendered.output)
+        if metadata.get("review_path")
+        else rendered.output
+    )
     package = Path(metadata["project_dir"])
     assert package.is_relative_to(tmp_path / "exports")
     manifest = json.loads((package / "project.json").read_text(encoding="utf-8"))
-    assert hashlib.sha256(Path(metadata["primary_map"]).read_bytes()).hexdigest() == (
-        manifest["preview_sha256"])
+    assert (
+        hashlib.sha256(Path(metadata["primary_map"]).read_bytes()).hexdigest()
+        == (manifest["preview_sha256"])
+    )
     assert len(metadata["map_receipt"]["versions"]) == 1
     if not deny_review:
         assert manifest["layout"]["effective_parameters"]["legend_font_size_pt"] != 12
@@ -83,8 +133,8 @@ async def test_bridge_readonly_review_preserves_package_and_external_edits(
         assert Path(metadata["primary_map"]) != tmp_path / "exports/map.png"
 
 
-def test_default_static_renderer_is_qgis():
-    assert GeoConfig().cartography.static_renderer == "qgis"
+def test_default_static_renderer_is_native_matplotlib():
+    assert GeoConfig().cartography.static_renderer == "matplotlib"
 
 
 def test_bridge_preserves_optional_empty_source_indices(tmp_path):
@@ -94,11 +144,20 @@ def test_bridge_preserves_optional_empty_source_indices(tmp_path):
     gpd.GeoDataFrame(geometry=[], crs=3857).to_file(source)
     subject = tmp_path / "subject.geojson"
     gpd.GeoDataFrame(geometry=[box(10, 10, 20, 20)], crs=3857).to_file(subject)
-    args = GeoCartographyInput(layers=json.dumps([
-        {"file_path": str(source), "required": False, "color": "#0000ff"},
-        {"file_path": str(subject), "color": "#ff0000"}]),
-        layout=GeoConfig().map_review.layout)
-    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    args = GeoCartographyInput(
+        renderer="qgis",
+        layers=json.dumps(
+            [
+                {"file_path": str(source), "required": False, "color": "#0000ff"},
+                {"file_path": str(subject), "color": "#ff0000"},
+            ]
+        ),
+        layout=GeoConfig().map_review.layout,
+    )
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={"geoharness_config": GeoConfig(qgis=QgisConfig(allow_project_previews=True))},
+    )
     result = prepare_layers(args, {}, context, tmp_path)
     assert len(result) == 2
     assert result[0]["expected_feature_count"] == 0
@@ -106,7 +165,10 @@ def test_bridge_preserves_optional_empty_source_indices(tmp_path):
 
 
 async def test_bridge_retains_focused_extent_policy_and_complete_native_plan(tmp_path):
-    config = GeoConfig(map_review=MapReviewConfig(enabled=False))
+    config = GeoConfig(
+        map_review=MapReviewConfig(enabled=False),
+        qgis=GeoConfig().qgis.model_copy(update={"allow_project_previews": True}),
+    )
     try:
         discover_qgis(config.qgis, cwd=tmp_path)
     except (ValueError, OSError):
@@ -115,17 +177,27 @@ async def test_bridge_retains_focused_extent_policy_and_complete_native_plan(tmp
     for path, shape in zip(paths, [box(-1000, -1000, 1000, 1000), box(10, 10, 20, 20)]):
         gpd.GeoDataFrame(geometry=[shape], crs=3857).to_file(path)
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
-    common = {"map_crs": "EPSG:3857", "output_path": "exports/focus.png",
-              "layers": json.dumps([{"file_path": str(paths[0]), "required": False},
-                                    {"file_path": str(paths[1]), "color": "#ff0000"}]),
-              "qgis_layout": {"main_frame": {"focus_layers": [1]}}}
+    common = {
+        "map_crs": "EPSG:3857",
+        "output_path": "exports/focus.png",
+        "layers": json.dumps(
+            [
+                {"file_path": str(paths[0]), "required": False},
+                {"file_path": str(paths[1]), "color": "#ff0000"},
+            ]
+        ),
+        "qgis_layout": {"main_frame": {"focus_layers": [1]}},
+    }
     checked = await GeoCartographyTool().execute(
-        GeoCartographyInput(action="preflight", **common), context)
+        GeoCartographyInput(renderer="qgis", action="preflight", **common), context
+    )
     assert not checked.is_error, checked.output
     plan = checked.metadata["preflight"]["layout_plan"]
     assert plan["frames"]["main_map"]["focus_bbox"] == [10, 10, 20, 20]
     assert checked.metadata["preflight"]["frame_checks"]["valid"] is True
-    created = await GeoCartographyTool().execute(GeoCartographyInput(**common), context)
+    created = await GeoCartographyTool().execute(
+        GeoCartographyInput(renderer="qgis", **common), context
+    )
     assert not created.is_error, created.output
     actual = created.metadata["preflight"]["layout_plan"]
     assert actual["frames"]["main_map"]["focus_layers"] == [1]
@@ -133,10 +205,11 @@ async def test_bridge_retains_focused_extent_policy_and_complete_native_plan(tmp
 
 
 async def test_disabled_native_renderer_returns_actionable_error(tmp_path):
-    config = GeoConfig(qgis=QgisConfig(enabled=False))
+    config = GeoConfig(qgis=QgisConfig(enabled=False, allow_project_previews=True))
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
     result = await GeoCartographyTool().execute(
         GeoCartographyInput(
+            renderer="qgis",
             geojson=gpd.GeoDataFrame(geometry=[box(1, 1, 2, 2)], crs=4326).to_json(),
             output_path="exports/map.png",
             project_output_dir="exports/editable",
@@ -148,7 +221,10 @@ async def test_disabled_native_renderer_returns_actionable_error(tmp_path):
 
 
 async def test_native_map_preview_matches_portable_project(tmp_path):
-    config = GeoConfig(map_review=MapReviewConfig(enabled=False))
+    config = GeoConfig(
+        map_review=MapReviewConfig(enabled=False),
+        qgis=GeoConfig().qgis.model_copy(update={"allow_project_previews": True}),
+    )
     try:
         discover_qgis(config.qgis, cwd=tmp_path)
     except (ValueError, OSError):
@@ -162,6 +238,7 @@ async def test_native_map_preview_matches_portable_project(tmp_path):
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
     result = await GeoCartographyTool().execute(
         GeoCartographyInput(
+            renderer="qgis",
             title="风险分析图",
             output_path="exports/map.png",
             project_output_dir="exports/editable",
@@ -193,9 +270,9 @@ async def test_native_map_preview_matches_portable_project(tmp_path):
     assert project == tmp_path / "exports/editable"
     assert Path(metadata["output_path"]).read_bytes().startswith(b"\x89PNG")
     manifest = json.loads((project / "project.json").read_text(encoding="utf-8"))
-    assert not metadata.get('project_file')
-    assert not list(tmp_path.rglob('*.qgz'))
-    assert manifest['project_fidelity'] == 'preview_only'
+    assert not metadata.get("project_file")
+    assert not list(tmp_path.rglob("*.qgz"))
+    assert manifest["project_fidelity"] == "preview_only"
     assert Path(metadata["output_path"]).parent == tmp_path / "exports"
     assert (
         hashlib.sha256(Path(metadata["output_path"]).read_bytes()).hexdigest()
@@ -208,18 +285,21 @@ async def test_native_map_preview_matches_portable_project(tmp_path):
     assert source.is_file()
     from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
 
-    delivered = await GeoDeliverTool().execute(GeoDeliverInput(
-        project_dir=str(project)), context)
-    assert not delivered.is_error, delivered.output
-    assert Path(delivered.metadata['qgis_project']).is_file()
+    delivered = await GeoDeliverTool().execute(GeoDeliverInput(project_dir=str(project)), context)
+    assert delivered.is_error and "delivery_not_ready" in delivered.output
+    assert not list(tmp_path.rglob("*.qgz"))
 
 
 async def test_corrupt_source_is_a_tool_error_before_render(tmp_path):
     source = tmp_path / "corrupt.geojson"
     source.write_text("bad GeoJSON", encoding="utf-8")
-    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={"geoharness_config": GeoConfig(qgis=QgisConfig(allow_project_previews=True))},
+    )
     result = await GeoCartographyTool().execute(
         GeoCartographyInput(
+            renderer="qgis",
             file_path=str(source),
             output_format="png",
         ),
@@ -232,10 +312,11 @@ async def test_corrupt_source_is_a_tool_error_before_render(tmp_path):
 async def test_invalid_qgis_output_directory_is_a_tool_error(tmp_path):
     occupied = tmp_path / "occupied"
     occupied.write_text("keep", encoding="utf-8")
-    config = GeoConfig(qgis=QgisConfig(outputs_dir=str(occupied)))
+    config = GeoConfig(qgis=QgisConfig(outputs_dir=str(occupied), allow_project_previews=True))
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
     result = await GeoCartographyTool().execute(
         GeoCartographyInput(
+            renderer="qgis",
             geojson=gpd.GeoDataFrame(geometry=[box(1, 1, 2, 2)], crs=4326).to_json(),
             output_format="png",
         ),
@@ -249,7 +330,9 @@ def test_legacy_explicit_layout_is_translated():
     from geoharness.cartography.qgis_bridge import native_layout
     from geoharness.config.settings import MapLayout
 
-    args = GeoCartographyInput(layout=MapLayout(width=12, height=9, title_font_size=20))
+    args = GeoCartographyInput(
+        renderer="qgis", layout=MapLayout(width=12, height=9, title_font_size=20)
+    )
     layout = native_layout(args)
     assert layout.width_mm == pytest.approx(304.8)
     assert layout.height_mm == pytest.approx(228.6)
@@ -259,12 +342,14 @@ def test_legacy_explicit_layout_is_translated():
 def test_explicit_legend_font_reaches_native_layout_with_separate_footer_font():
     from geoharness.cartography.qgis_bridge import native_layout
 
-    args = GeoCartographyInput(layout={"legend_font_size": 7},
-                              qgis_layout={"body_font_size_pt": 9})
+    args = GeoCartographyInput(
+        renderer="qgis", layout={"legend_font_size": 7}, qgis_layout={"body_font_size_pt": 9}
+    )
     assert native_layout(args).legend_font_size_pt == 7
     assert native_layout(args).body_font_size_pt == 9
-    explicit = args.model_copy(update={"qgis_layout": args.qgis_layout.model_copy(
-        update={"legend_font_size_pt": 8})})
+    explicit = args.model_copy(
+        update={"qgis_layout": args.qgis_layout.model_copy(update={"legend_font_size_pt": 8})}
+    )
     assert native_layout(explicit).legend_font_size_pt == 8
 
 
@@ -281,12 +366,16 @@ async def test_cancelled_source_preparation_preserves_cancellation(tmp_path, mon
         raise RuntimeError("writer failed after cancellation")
 
     monkeypatch.setattr("geoharness.cartography.qgis_bridge.prepare_layers", preparing)
-    context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
+    context = ToolExecutionContext(
+        cwd=tmp_path,
+        metadata={"geoharness_config": GeoConfig(qgis=QgisConfig(allow_project_previews=True))},
+    )
     task = asyncio.create_task(
         GeoCartographyTool().execute(
             GeoCartographyInput(
+                renderer="qgis",
                 geojson='{"type":"FeatureCollection","features":[{"type":"Feature",'
-                        '"properties":{},"geometry":{"type":"Point","coordinates":[1,1]}}]}',
+                '"properties":{},"geometry":{"type":"Point","coordinates":[1,1]}}]}',
                 output_format="png",
             ),
             context,

@@ -757,6 +757,36 @@ def load_analysis_facts(
         seen.add(path)
         raw = reader.read(path, _MANIFEST_BYTES)
         manifest = _json(raw)
+        # A result package has a producer manifest.json (files/paths only) and a
+        # sibling facts.json/report.json carrying the actual package document.
+        # Treat the producer record as an exact, contained alias instead of making
+        # the model guess which path is the "real" manifest.
+        if (manifest.get('producer') == 'geo_result_package'
+                and not manifest.get('kind')):
+            candidates = []
+            for entry in manifest.get('files') or []:
+                if not isinstance(entry, dict) or not isinstance(entry.get('path'), str):
+                    continue
+                candidate = reader.path(entry['path'])
+                if (candidate.parent == path.parent and candidate.is_file()
+                        and candidate.suffix.lower() == '.json'
+                        and candidate.stat().st_size <= _MANIFEST_BYTES):
+                    try:
+                        document = _json(reader.read(candidate, _MANIFEST_BYTES))
+                    except ValueError:
+                        continue
+                    if document.get('kind') == 'analysis_result_package':
+                        if entry.get('sha256') and hashlib.sha256(
+                                candidate.read_bytes()).hexdigest() != entry['sha256']:
+                            raise ValueError('Result package document changed after publication.')
+                        candidates.append(candidate)
+            if len(candidates) != 1:
+                raise ValueError(
+                    'Analysis result package manifest must reference exactly one facts/report '
+                    'document with kind=analysis_result_package.')
+            path = candidates[0]
+            raw = reader.read(path, _MANIFEST_BYTES)
+            manifest = _json(raw)
         if manifest.get('kind') == 'analysis_result_package':
             analyses.append(_package_facts(manifest, path, raw, reader,
                                            mapped_sources, display_name))

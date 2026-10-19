@@ -20,7 +20,8 @@ from geoharness.data.artifacts import assert_usable_artifact, sha256_file
 from geoharness.task_store import connect, execution_lock, task_directory
 
 _TOOLS = Literal['geo_qgis', 'geo_python', 'geo_analysis', 'geo_accessibility',
-                 'geo_qgis_project', 'geo_map_review', 'geo_deliver', 'geo_task']
+                 'geo_cartography', 'geo_qgis_project', 'geo_map_review', 'geo_deliver',
+                 'geo_task']
 
 
 class TaskNode(BaseModel):
@@ -41,7 +42,7 @@ def execution_gate(context, tool, arguments, *, node_id=None):
     managed_score = tool.name == 'geo_task' and arguments.action in {'score', 'publish_analysis'}
     if node_id or (not managed_score and tool.name not in {
             'geo_python', 'geo_qgis', 'geo_analysis', 'geo_accessibility',
-            'geo_qgis_project', 'geo_deliver'}) or tool.is_read_only(arguments):
+            'geo_cartography', 'geo_qgis_project', 'geo_deliver'}) or tool.is_read_only(arguments):
         return None
     directory = task_directory(context.metadata, cwd=Path(context.cwd))
     if directory is None or not (directory / 'task.sqlite3').is_file():
@@ -80,6 +81,7 @@ def _environment(node, context):
         'geo_python': ('qgis',) if node.arguments.get('backend') == 'qgis' else ('execution',),
         'geo_analysis': ('analysis', 'data'),
         'geo_accessibility': ('analysis', 'data'),
+        'geo_cartography': ('cartography', 'data'),
         'geo_qgis_project': ('qgis', 'cartography'),
         'geo_map_review': ('map_review', 'model', 'base_url', 'api_key'),
         'geo_deliver': ('delivery', 'cartography', 'qgis'),
@@ -227,6 +229,26 @@ def _inventory(arguments, context):
                     inventory.pop(key)
 
     walk(arguments)
+    if arguments.get('scene_ref') or arguments.get('scene'):
+        from geoharness.cartography.scene import Scene, load_scene
+        from geoharness.cartography.scene_render import _font
+
+        scene = (load_scene(arguments['scene_ref'], context) if arguments.get('scene_ref')
+                 else Scene.model_validate(arguments['scene']))
+        walk(scene.model_dump(mode='json'), '/scene')
+        for layer in scene.layers:
+            if layer.kind == 'raster':
+                import rasterio
+
+                from geoharness.data.task_context import resolve_registered_path
+
+                path = resolve_registered_path(layer.source_ref, context.metadata,
+                    cwd=context.cwd, config=context.metadata['geoharness_config'])
+                with rasterio.open(path) as source:
+                    for index, dependency in enumerate(source.files):
+                        walk(dependency, f'/scene_raster/{layer.id}/{index}')
+        _, font = _font(scene)
+        walk(str(font), '/scene_font')
     if arguments.get('spec_ref'):
         from geoharness.qgis.specification import load_spec
 
@@ -381,8 +403,12 @@ async def execute_direct(context, tool, arguments):
     identity = 'auto_' + tool.name + '_' + _hash(values)[:16]
     node = TaskNode(id=identity, tool=tool.name, arguments=values)
     try:
-        submit_plan(context, [node])
-        state = await run_plan(context, node_id=identity)
+        # Sibling tool calls from one assistant batch are legal sequential work.
+        # Serialize them with an asyncio lock, not a synchronous wait inside the
+        # event loop; submit_plan and run_plan must share that critical section.
+        async with _in_process_task_lock(context):
+            submit_plan(context, [node])
+            state = await run_plan(context, node_id=identity, _lock_held=True)
         selected = next(item for item in state['nodes'] if item['id'] == identity)
         if selected['status'] == 'interrupted' or not selected['operation_id']:
             raise ValueError(selected.get('error') or '节点尚未完成，先查看inspect/arguments证据')
@@ -418,193 +444,202 @@ def _resolve(value, rows, directory, context):
     return value
 
 
-async def run_plan(context, *, node_id=''):
-    """Run a deterministic ready chain; stop on a real failure or pending decision."""
+def _in_process_task_lock(context):
     directory = _directory(context)
     locks = context.metadata.setdefault('_geo_task_locks', {})
-    lock = locks.setdefault(str(directory), asyncio.Lock())
-    async with lock:
-        with execution_lock(directory):
-            from geoharness.performance import MeasuredTool
-            from geoharness.runtime import _build_permission_checker
-            from geoharness.tools import build_geo_tool_registry
+    return locks.setdefault(str(directory), asyncio.Lock())
 
-            registry = context.metadata.get('tool_registry')
-            if registry is None:
-                registry = build_geo_tool_registry(config=context.metadata['geoharness_config'])
-            from geoharness.performance import MeasuredRegistry
+async def run_plan(context, *, node_id='', _lock_held=False):
+    """Run a deterministic ready chain; stop on a real failure or pending decision."""
+    directory = _directory(context)
+    if _lock_held:
+        return await _run_plan_locked(context, directory=directory, node_id=node_id)
+    async with _in_process_task_lock(context):
+        return await _run_plan_locked(context, directory=directory, node_id=node_id)
 
-            if isinstance(registry, MeasuredRegistry):
-                registry = registry.registry
-            checker = context.metadata.get('geoharness_permission_checker') or (
-                _build_permission_checker(context.metadata['geoharness_config']))
-            completed = []
-            reused = [n['id'] for n in plan_status(context)['nodes'] if n['status'] == 'succeeded']
-            while True:
-                state = plan_status(context)
-                statuses = {item['id']: item['status'] for item in state['nodes']}
-                if node_id and node_id not in statuses:
-                    raise ValueError('Unknown node_id')
-                if node_id and statuses[node_id] == 'succeeded':
-                    break
-                ready = [item['id'] for item in state['nodes']
-                         if item['status'] in {'ready', 'stale', 'failed', 'interrupted'}]
-                if node_id:
-                    ready = [n for n in ready if n == node_id]
-                if not ready or context.metadata.get('geo_clarification', {}).get('pending'):
-                    break
-                with connect(directory) as db:
-                    rows = {r['id']: dict(r) for r in db.execute('SELECT * FROM nodes')}
-                selected = next((n for n in ready if all(statuses[d] == 'succeeded' for d in
-                    TaskNode.model_validate_json(rows[n]['definition']).depends_on)), None)
-                if selected is None:
-                    break
-                row = rows[selected]
-                if (row['status'] == 'interrupted'
-                        and 'process_outcome_unknown' in (row['error'] or '')):
-                    break  # Inspect the saved request; revise the plan deliberately.
-                node = TaskNode.model_validate_json(row['definition'])
-                deps = {d: rows[d]['fingerprint'] for d in node.depends_on}
-                environment = _environment(node, context)
-                try:
-                    arguments = _resolve(node.arguments, rows, directory, context)
-                    inventory = _inventory(arguments, context)
-                    fingerprint = _hash([node.model_dump(mode='json'), environment,
-                                         inventory, deps])
-                    if (row['status'] in {'failed', 'interrupted'}
-                            and row['fingerprint'] == fingerprint):
-                        # No blind retry: change implementation/input/plan first.
-                        break
-                    tool = registry.get(node.tool)
-                    if tool is None:
-                        raise ValueError(f'{node.tool}当前未启用')
-                    parsed = tool.input_model.model_validate(arguments)
-                except (ValueError, KeyError, IndexError, TypeError, OSError) as exc:
-                    from openharness.tools.base import ToolResult
+async def _run_plan_locked(context, *, directory, node_id=''):
+    with execution_lock(directory):
+        from geoharness.performance import MeasuredTool
+        from geoharness.runtime import _build_permission_checker
+        from geoharness.tools import build_geo_tool_registry
 
-                    from geoharness.task_store import begin_operation, finish_operation
+        registry = context.metadata.get('tool_registry')
+        if registry is None:
+            registry = build_geo_tool_registry(config=context.metadata['geoharness_config'])
+        from geoharness.performance import MeasuredRegistry
 
-                    fingerprint = _hash([node.model_dump(mode='json'), environment,
-                                         'precondition', deps])
-                    if row['status'] == 'failed' and row['fingerprint'] == fingerprint:
-                        break
-                    with connect(directory) as db:
-                        db.execute("UPDATE nodes SET status='running',fingerprint=?,"
-                                   "dependencies=? WHERE id=?", (
-                            fingerprint, json.dumps({'nodes': deps, 'inputs': {},
-                                                     'environment': environment}), selected))
-                    handle = begin_operation(context.metadata, cwd=context.cwd, tool=node.tool,
-                                             arguments=node.arguments, node_id=selected)
-                    evidence = finish_operation(handle, context.metadata,
-                        result=ToolResult(output=str(exc), is_error=True),
-                        error=type(exc).__name__)
-                    with connect(directory) as db:
-                        db.execute("UPDATE nodes SET status='failed',operation_id=?,error=? "
-                                   'WHERE id=?',
-                                   (evidence['operation_id'], str(exc)[:1000], selected))
-                    break
-                from openharness.engine.query import (
-                    _extract_permission_command,
-                    _resolve_permission_file_path,
-                )
-                from openharness.hooks import HookEvent
-
-                if context.hook_executor:
-                    hooks = await context.hook_executor.execute(HookEvent.PRE_TOOL_USE, {
-                        'tool_name': node.tool, 'tool_input': arguments,
-                        'event': HookEvent.PRE_TOOL_USE.value})
-                    if hooks.blocked:
-                        raise ValueError(hooks.reason or f'PRE_TOOL_USE blocked {node.tool}')
-                decision = checker.evaluate(node.tool, is_read_only=tool.is_read_only(parsed),
-                    file_path=_resolve_permission_file_path(context.cwd, arguments, parsed),
-                    command=_extract_permission_command(arguments, parsed))
-                if not decision.allowed or decision.requires_confirmation:
-                    raise ValueError(f'当前权限未授权计划节点{selected}的{node.tool}调用')
-                with connect(directory) as db:
-                    changed = db.execute("UPDATE nodes SET status='running',fingerprint=?,"
-                        "dependencies=?,error=NULL WHERE id=? AND status!='running'", (
-                            fingerprint, json.dumps({'nodes': deps, 'inputs': inventory,
-                                                     'environment': environment}),
-                            selected)).rowcount
-                    if changed != 1:
-                        raise ValueError('节点已经运行；请读取证据，不能并发重发')
-                try:
-                    result = await MeasuredTool(tool, context.metadata, node_id=selected).execute(
-                        parsed, context)
-                    packet = {**result.metadata}
-                    try:
-                        raw, _ = json.JSONDecoder().raw_decode(result.output.lstrip())
-                        if isinstance(raw, dict):
-                            packet.update(raw)
-                    except (ValueError, TypeError):
-                        pass
-                    artifacts = _artifacts(packet)
-                    # The immutable execution evidence makes read-only nodes reusable.
-                    if result.metadata.get('evidence_path'):
-                        artifacts[result.metadata['evidence_path']] = (
-                            result.metadata['evidence_sha256'])
-                    incomplete_review = (node.tool == 'geo_map_review' and
-                        (packet.get('status') == 'unverified' or
-                         packet.get('visual_review_status') == 'unverified' or
-                         packet.get('review_status') == 'unverified'))
-                    status = 'failed' if result.is_error or incomplete_review else 'succeeded'
-                    if _inventory(arguments, context) != inventory:
-                        status = 'failed'
-                        error = '执行期间输入发生变化，结果保留但不得复用'
-                    else:
-                        error = ('视觉审查未完成；保留原图与证据，按服务恢复说明继续。'
-                                 if incomplete_review else
-                                 result.output[:1000] if result.is_error else None)
-                    with connect(directory) as db:
-                        db.execute('UPDATE nodes SET status=?,operation_id=?,artifacts=?,'
-                                   'dependencies=?,error=? WHERE id=?',
-                                   (status, result.metadata.get('operation_id'),
-                            json.dumps(artifacts), json.dumps({'nodes': deps, 'inputs': inventory,
-                                                               'environment': environment}),
-                            error, selected))
-                    if context.hook_executor:
-                        await context.hook_executor.execute(HookEvent.POST_TOOL_USE, {
-                            'tool_name': node.tool, 'tool_input': arguments,
-                            'tool_output': result.output, 'tool_is_error': result.is_error,
-                            'event': HookEvent.POST_TOOL_USE.value})
-                    if status != 'succeeded':
-                        break
-                    completed.append(selected)
-                except BaseException as exc:
-                    with connect(directory) as db:
-                        db.execute('UPDATE nodes SET status=?,error=? WHERE id=?', (
-                            'interrupted' if isinstance(exc, asyncio.CancelledError) else 'failed',
-                            type(exc).__name__, selected))
-                    raise
-                if node_id:
-                    break
+        if isinstance(registry, MeasuredRegistry):
+            registry = registry.registry
+        checker = context.metadata.get('geoharness_permission_checker') or (
+            _build_permission_checker(context.metadata['geoharness_config']))
+        completed = []
+        reused = [n['id'] for n in plan_status(context)['nodes'] if n['status'] == 'succeeded']
+        while True:
             state = plan_status(context)
+            statuses = {item['id']: item['status'] for item in state['nodes']}
+            if node_id and node_id not in statuses:
+                raise ValueError('Unknown node_id')
+            if node_id and statuses[node_id] == 'succeeded':
+                break
+            ready = [item['id'] for item in state['nodes']
+                     if item['status'] in {'ready', 'stale', 'failed', 'interrupted'}]
+            if node_id:
+                ready = [n for n in ready if n == node_id]
+            if not ready or context.metadata.get('geo_clarification', {}).get('pending'):
+                break
             with connect(directory) as db:
                 rows = {r['id']: dict(r) for r in db.execute('SELECT * FROM nodes')}
-            for item in state['nodes']:
-                if item['status'] in {'succeeded', 'failed'} and item['operation_id']:
-                    item['evidence_call'] = {'action': 'evidence',
-                                             'operation_id': item['operation_id']}
-                    if item['status'] == 'succeeded' and (not node_id or item['id'] == node_id):
-                        item['result'] = _visible_result(_load_result(rows[item['id']], context),
-                            limit=context.metadata['geoharness_config'].agent.context_result_max_chars)
-            chosen = next((item for item in reversed(state['nodes']) if item.get('result')
-                           and (not node_id or item['id'] == node_id)), None)
-            # The last/target business result must survive model-context trimming
-            # even when a multi-node status listing is long.
-            front = {'result_node': chosen['id'], 'result': chosen['result']} if chosen else {}
-            return {**front, **state, 'executed': completed, 'reused_nodes': reused,
-                    'reused': not completed and bool(reused),
-                    'next_action': ('执行已完成；直接使用nodes[].result的业务结果和产物引用。'
-                                    if state['complete'] else
-                                    '只修正失败节点或补齐前置条件；成功结果已保留，无需重做。')}
+            selected = next((n for n in ready if all(statuses[d] == 'succeeded' for d in
+                TaskNode.model_validate_json(rows[n]['definition']).depends_on)), None)
+            if selected is None:
+                break
+            row = rows[selected]
+            if (row['status'] == 'interrupted'
+                    and 'process_outcome_unknown' in (row['error'] or '')):
+                break  # Inspect the saved request; revise the plan deliberately.
+            node = TaskNode.model_validate_json(row['definition'])
+            deps = {d: rows[d]['fingerprint'] for d in node.depends_on}
+            environment = _environment(node, context)
+            try:
+                arguments = _resolve(node.arguments, rows, directory, context)
+                inventory = _inventory(arguments, context)
+                fingerprint = _hash([node.model_dump(mode='json'), environment,
+                                     inventory, deps])
+                if (row['status'] in {'failed', 'interrupted'}
+                        and row['fingerprint'] == fingerprint):
+                    # No blind retry: change implementation/input/plan first.
+                    break
+                tool = registry.get(node.tool)
+                if tool is None:
+                    raise ValueError(f'{node.tool}当前未启用')
+                parsed = tool.input_model.model_validate(arguments)
+            except (ValueError, KeyError, IndexError, TypeError, OSError) as exc:
+                from openharness.tools.base import ToolResult
+
+                from geoharness.task_store import begin_operation, finish_operation
+
+                fingerprint = _hash([node.model_dump(mode='json'), environment,
+                                     'precondition', deps])
+                if row['status'] == 'failed' and row['fingerprint'] == fingerprint:
+                    break
+                with connect(directory) as db:
+                    db.execute("UPDATE nodes SET status='running',fingerprint=?,"
+                               "dependencies=? WHERE id=?", (
+                        fingerprint, json.dumps({'nodes': deps, 'inputs': {},
+                                                 'environment': environment}), selected))
+                handle = begin_operation(context.metadata, cwd=context.cwd, tool=node.tool,
+                                         arguments=node.arguments, node_id=selected)
+                evidence = finish_operation(handle, context.metadata,
+                    result=ToolResult(output=str(exc), is_error=True),
+                    error=type(exc).__name__)
+                with connect(directory) as db:
+                    db.execute("UPDATE nodes SET status='failed',operation_id=?,error=? "
+                               'WHERE id=?',
+                               (evidence['operation_id'], str(exc)[:1000], selected))
+                break
+            from openharness.engine.query import (
+                _extract_permission_command,
+                _resolve_permission_file_path,
+            )
+            from openharness.hooks import HookEvent
+
+            if context.hook_executor:
+                hooks = await context.hook_executor.execute(HookEvent.PRE_TOOL_USE, {
+                    'tool_name': node.tool, 'tool_input': arguments,
+                    'event': HookEvent.PRE_TOOL_USE.value})
+                if hooks.blocked:
+                    raise ValueError(hooks.reason or f'PRE_TOOL_USE blocked {node.tool}')
+            decision = checker.evaluate(node.tool, is_read_only=tool.is_read_only(parsed),
+                file_path=_resolve_permission_file_path(context.cwd, arguments, parsed),
+                command=_extract_permission_command(arguments, parsed))
+            if not decision.allowed or decision.requires_confirmation:
+                raise ValueError(f'当前权限未授权计划节点{selected}的{node.tool}调用')
+            with connect(directory) as db:
+                changed = db.execute("UPDATE nodes SET status='running',fingerprint=?,"
+                    "dependencies=?,error=NULL WHERE id=? AND status!='running'", (
+                        fingerprint, json.dumps({'nodes': deps, 'inputs': inventory,
+                                                 'environment': environment}),
+                        selected)).rowcount
+                if changed != 1:
+                    raise ValueError('节点已经运行；请读取证据，不能并发重发')
+            try:
+                result = await MeasuredTool(tool, context.metadata, node_id=selected).execute(
+                    parsed, context)
+                packet = {**result.metadata}
+                try:
+                    raw, _ = json.JSONDecoder().raw_decode(result.output.lstrip())
+                    if isinstance(raw, dict):
+                        packet.update(raw)
+                except (ValueError, TypeError):
+                    pass
+                artifacts = _artifacts(packet)
+                # The immutable execution evidence makes read-only nodes reusable.
+                if result.metadata.get('evidence_path'):
+                    artifacts[result.metadata['evidence_path']] = (
+                        result.metadata['evidence_sha256'])
+                incomplete_review = (node.tool == 'geo_map_review' and
+                    (packet.get('status') == 'unverified' or
+                     packet.get('visual_review_status') == 'unverified' or
+                     packet.get('review_status') == 'unverified'))
+                status = 'failed' if result.is_error or incomplete_review else 'succeeded'
+                if _inventory(arguments, context) != inventory:
+                    status = 'failed'
+                    error = '执行期间输入发生变化，结果保留但不得复用'
+                else:
+                    error = ('视觉审查未完成；保留原图与证据，按服务恢复说明继续。'
+                             if incomplete_review else
+                             result.output[:1000] if result.is_error else None)
+                with connect(directory) as db:
+                    db.execute('UPDATE nodes SET status=?,operation_id=?,artifacts=?,'
+                               'dependencies=?,error=? WHERE id=?',
+                               (status, result.metadata.get('operation_id'),
+                        json.dumps(artifacts), json.dumps({'nodes': deps, 'inputs': inventory,
+                                                           'environment': environment}),
+                        error, selected))
+                if context.hook_executor:
+                    await context.hook_executor.execute(HookEvent.POST_TOOL_USE, {
+                        'tool_name': node.tool, 'tool_input': arguments,
+                        'tool_output': result.output, 'tool_is_error': result.is_error,
+                        'event': HookEvent.POST_TOOL_USE.value})
+                if status != 'succeeded':
+                    break
+                completed.append(selected)
+            except BaseException as exc:
+                with connect(directory) as db:
+                    db.execute('UPDATE nodes SET status=?,error=? WHERE id=?', (
+                        'interrupted' if isinstance(exc, asyncio.CancelledError) else 'failed',
+                        type(exc).__name__, selected))
+                raise
+            if node_id:
+                break
+        state = plan_status(context)
+        with connect(directory) as db:
+            rows = {r['id']: dict(r) for r in db.execute('SELECT * FROM nodes')}
+        for item in state['nodes']:
+            if item['status'] in {'succeeded', 'failed'} and item['operation_id']:
+                item['evidence_call'] = {'action': 'evidence',
+                                         'operation_id': item['operation_id']}
+                if item['status'] == 'succeeded' and (not node_id or item['id'] == node_id):
+                    item['result'] = _visible_result(_load_result(rows[item['id']], context),
+                        limit=context.metadata['geoharness_config'].agent.context_result_max_chars)
+        chosen = next((item for item in reversed(state['nodes']) if item.get('result')
+                       and (not node_id or item['id'] == node_id)), None)
+        # The last/target business result must survive model-context trimming
+        # even when a multi-node status listing is long.
+        front = {'result_node': chosen['id'], 'result': chosen['result']} if chosen else {}
+        return {**front, **state, 'executed': completed, 'reused_nodes': reused,
+                'reused': not completed and bool(reused),
+                'next_action': ('执行已完成；直接使用nodes[].result的业务结果和产物引用。'
+                                if state['complete'] else
+                                '只修正失败节点或补齐前置条件；成功结果已保留，无需重做。')}
 
 
 def _visible_result(result, *, limit):
     """Business results precede provenance; oversized values remain in evidence."""
     fields = ('status', 'result', 'files', 'outputs', 'paths', 'map_id', 'project_dir',
               'project_file', 'qgis_project', 'project_manifest', 'preview_path',
-              'report_path', 'manifest_path', 'summary_path', 'analysis_status',
+              'report_path', 'analysis_ref', 'package_path', 'manifest_path', 'summary_path',
+              'scene_ref', 'analysis_status',
               'analysis_correctness', 'facts', 'policy_ref', 'stdout', 'stderr')
     visible, omitted = {}, []
     metadata = result.get('_metadata', {})

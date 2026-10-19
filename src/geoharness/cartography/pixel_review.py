@@ -15,6 +15,9 @@ class PixelIssue(BaseModel):
     severity: Literal["error", "warning", "info"]
     description: str = Field(min_length=1, max_length=400)
     location: str = Field(default="", max_length=160)
+    evidence_kind: Literal['pixel', 'semantic', 'suggestion'] = Field(default='pixel',
+        description='pixel=图片可证缺陷；semantic=需核实数据含义；suggestion=表达偏好。'
+        '后两者不能作为已证图片错误，未知内容说明限制。')
     issue_code: Literal[
         "label_overlap", "symbol_overlap", "label_missing", "layer_occlusion",
         "extent_whitespace", "footer_density", "legend_mismatch", "other",
@@ -51,7 +54,7 @@ def page_scope(evidence: dict[str, Any]) -> dict:
         'page_previews', [])
     for page in previews:
         if isinstance(page, dict) and page.get('page_index') == page_index:
-            if page.get('role') in {'map', 'locator', 'roster', 'mixed'}:
+            if page.get('role') in {'map', 'detail', 'locator', 'roster', 'mixed'}:
                 role = page['role']
             # Legacy metadata with an empty, explicitly declared frame list and a
             # matching roster preview is enough evidence; page number alone is not.
@@ -90,6 +93,9 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
         "返回status、简短summary、issues及limitations。明确问题写具体位置及issue_code；"
         "能可靠定位时填写frame_id、roi_ref及该ROI内归一化bbox，不能定位可留空。"
         "正常留白与风格偏好不单独判为错误。不能仅凭像素声称两点同址或数据重复。"
+        "evidence_kind=pixel仅用于可见缺陷；名称不像某类场所属于semantic，不能猜字段错位；"
+        "表头和数值重复写单位等纯格式偏好属于suggestion，除非确实误导单位含义。"
+        "总览图不要求逐点数清全部背景对象，重点详图才检查编号归属；"
         "无法判断的部分写入limitations，不把疑点当成确定缺陷；"
         "关键内容无法检查时为unverified，有error/warning时为issues，"
         "只有完成当前页检查且无error/warning时为passed。"

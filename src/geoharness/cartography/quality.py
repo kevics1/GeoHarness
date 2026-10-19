@@ -146,7 +146,7 @@ class MapIssue(BaseModel):
     feature_ids: list[Annotated[int, Field(strict=True)]] = Field(
         default_factory=list, max_length=512,
         description="Exact native feature IDs for label placement assertions; never display ranks.")
-    evidence_kind: Literal["pixel", "native", "semantic"] = "pixel"
+    evidence_kind: Literal["pixel", "native", "semantic", "suggestion"] = "pixel"
     native_assertion: Literal["none", "legend_node_absent", "focus_off_center",
                               "label_not_placed"] = "none"
     issue_code: Literal[
@@ -169,6 +169,23 @@ class MapReview(BaseModel):
 
 class _IncompleteReview(Exception):
     """A known provider completion condition with a safe diagnostic."""
+
+
+def distinguish_pixel_findings(result):
+    """Preserve source questions/preferences without certifying them as pixel defects."""
+    observations = []
+    for issue in result.issues:
+        if issue.evidence_kind in {'semantic', 'suggestion'} and issue.severity != 'info':
+            observations.append(issue.model_dump())
+            issue.severity = 'info'
+    if observations:
+        result.diagnostics['nonvisual_observations'] = observations
+        result.diagnostics['nonvisual_notice'] = (
+            '这些是数据含义待核实项或表达建议，未认证为像素错误；'
+            '主模型须核对来源，未知且影响业务时询问用户。')
+        if result.status == 'issues' and not any(i.severity in {'warning', 'error'}
+                                                for i in result.issues):
+            result.status = 'passed'
 
 
 def resolve_issue_roi(issue: MapIssue, rois: list[dict]) -> dict:
@@ -970,6 +987,8 @@ async def review_map(
         diagnostics["outcome"] = "completed"
         result.diagnostics = diagnostics
         diagnostics["raw_review_status"] = result.status
+        if pixel_only:
+            distinguish_pixel_findings(result)
         actionable = any(issue.severity in {"error", "warning"} for issue in result.issues)
         if (backend != "matplotlib" or not actionable) and (
             result.layout_patch.model_dump(exclude_none=True)

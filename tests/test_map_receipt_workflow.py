@@ -53,6 +53,7 @@ class PassingReviewer:
 
 async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
     config = GeoConfig(
+        qgis=GeoConfig().qgis.model_copy(update={"allow_project_previews": True}),
         analysis=AnalysisConfig(metric_crs="EPSG:32648"),
         map_review=MapReviewConfig(max_repairs=0),
     )
@@ -85,6 +86,7 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
     assert not analysis.is_error, analysis.output
     mapped = await GeoCartographyTool().execute(
         GeoCartographyInput(
+            renderer="qgis",
             title="影响分析验证",
             map_id="initial",
             map_crs="EPSG:32647",
@@ -178,7 +180,8 @@ async def test_real_qgis_analysis_footer_receipt_delivery_and_restart(tmp_path):
 
 
 def _verified_package(tmp_path):
-    config = GeoConfig()
+    config = GeoConfig(qgis=GeoConfig().qgis.model_copy(
+        update={'allow_project_previews': True}))
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
     image = tmp_path / "map.png"
     Image.new("RGB", (24, 24), "white").save(image)

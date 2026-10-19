@@ -14,6 +14,14 @@ from geoharness.tools.geo_analysis import GeoAnalysisInput, GeoAnalysisTool
 from geoharness.tools.geo_qgis_project import GeoQgisProjectInput, GeoQgisProjectTool
 
 
+def _compiler_context(context):
+    """Internal delivery compiler runs after review; tests open that explicit path."""
+    from dataclasses import replace
+    config = context.metadata["geoharness_config"]
+    context.metadata["geoharness_config"] = replace(
+        config, qgis=config.qgis.model_copy(update={"allow_project_previews": True}))
+    return context
+
 async def _analysis(tmp_path):
     config = GeoConfig(qgis=QgisConfig(enabled=False),
                        analysis=AnalysisConfig(metric_crs="EPSG:3857"))
@@ -36,7 +44,8 @@ async def test_exact_native_locator_infers_evidence_and_preserves_derivation(tmp
     context, record, _ = await _analysis(tmp_path)
     assert record["analysis_manifest"] == record["manifest"]
     result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(action="preflight", layers=[{
-        "file_path": record[locator], "derivation": {"feature_indices": [0]}}]), context)
+        "file_path": record[locator], "derivation": {"feature_indices": [0]}}]),
+        _compiler_context(context))
     assert not result.is_error, result.output
     report = result.metadata["preflight"]
     assert report["analysis_manifests"] == [record["manifest"]]
@@ -48,7 +57,8 @@ async def test_exact_native_locator_infers_evidence_and_preserves_derivation(tmp
 async def test_original_path_is_not_replaced_or_bound_to_unmapped_analysis(tmp_path):
     context, record, source = await _analysis(tmp_path)
     result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(action="preflight",
-        analysis_manifests=[record["manifest"]], layers=[{"file_path": str(source)}]), context)
+        analysis_manifests=[record["manifest"]], layers=[{"file_path": str(source)}]),
+        _compiler_context(context))
     assert result.is_error and "analysis_output_not_mapped" in result.output
     assert result.metadata["diagnostics"]["mapped_layers"][0]["file_path"] == str(source)
 
@@ -90,6 +100,6 @@ async def test_python_result_stays_unverified_not_native(tmp_path):
     assert record["producer"] == "geo_python" and "analysis_manifest" not in record
     context.metadata["_data_refs_snapshot"] = refs
     result = await GeoQgisProjectTool().execute(GeoQgisProjectInput(action="preflight",
-        layers=[{"file_path": record["ref"]}]), context)
+        layers=[{"file_path": record["ref"]}]), _compiler_context(context))
     assert not result.is_error, result.output
     assert result.metadata["preflight"]["analysis_evidence_status"] == "not_provided"

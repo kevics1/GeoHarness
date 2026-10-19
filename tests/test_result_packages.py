@@ -214,3 +214,44 @@ def test_delivered_selection_and_units_cannot_be_asserted_without_rechecking(tmp
     report['units']['population'] = '户'
     copied[1].write_text(json.dumps(report), encoding='utf-8')
     assert _attached_analysis(delivery)[0]['status'] == 'unverified'
+
+
+def test_measured_dependency_automatically_blocks_published_field_regression(tmp_path):
+    context, source, _ = produced(tmp_path)
+    first = publish_package(context, source_ref=str(source), request=request())
+    assert first['analysis_ref'] == first['package_path']
+    directory = tmp_path / 'second'
+    directory.mkdir()
+    target = directory / 'rows.csv'
+    frame = pd.read_csv(source).iloc[[1, 142]].copy()
+    frame['population'] = float('nan')
+    frame.to_csv(target, index=False)
+    (directory / 'manifest.json').write_text(json.dumps({
+        'producer': 'geo_python', 'run_dir': str(directory), 'exit_code': 0,
+        'status': 'succeeded', 'inputs': {'previous': str(source)},
+        'files': [{'path': str(target), 'sha256': sha256_file(target)}]}), 'utf-8')
+    with pytest.raises(ValueError, match='字段退化|字段连续性'):
+        publish_package(context, source_ref=str(target), request=request('真实子集'))
+    declared = request('真实子集').model_copy(update={
+        'field_changes': {'population': '用户要求将旧人口数据置空，待新调查补充'}})
+    result = publish_package(context, source_ref=str(target), request=declared)
+    assert verify_package(Path(result['package_path']))['carry_fields']
+
+
+def test_explicit_carry_cannot_compare_global_missing_counts_across_subsets(tmp_path):
+    context, source, _ = produced(tmp_path)
+    first = publish_package(context, source_ref=str(source), request=request())
+    target = source.parent / 'subset.csv'
+    frame = pd.read_csv(source).iloc[[0, 1]].copy()
+    frame['population'] = float('nan')
+    frame.to_csv(target, index=False)
+    manifest = source.parent / 'manifest.json'
+    doc = json.loads(manifest.read_text('utf-8'))
+    next(f for f in doc['files'] if f['path'] == str(target))['sha256'] = sha256_file(target)
+    manifest.write_text(json.dumps(doc), 'utf-8')
+    # Republishing a producer manifest changes provenance, so refresh the first
+    # package before binding the subset. This is a new fixture producer version.
+    first = publish_package(context, source_ref=str(source), request=request())
+    with pytest.raises(ValueError, match='字段退化|字段连续性'):
+        publish_package(context, source_ref=str(target), request=request().model_copy(update={
+            'carry_fields': ['population'], 'carry_from': first['analysis_ref']}))
