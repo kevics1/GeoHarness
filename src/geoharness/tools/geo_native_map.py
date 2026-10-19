@@ -125,10 +125,15 @@ class GeoNativeMapTool(BaseTool):
                         'Layer.key': '唯一非空实体字段；select_keys/标注时必须提供。',
                         'Layer.select_keys': '按key选择对象；null保留全部，空数组为空集。',
                         'Layer.label_field': '真实字段；只避让文字，不移动几何。',
+                        'Layer.show_in_legend': '重复强调或辅助编号层可设false；仍绘制对象。',
                         'Layer.symbol.categories': '按真实分类值声明label/color；未声明值会拒绝。',
                         'Page.layers': '从底到顶的Layer.id；不填使用全部。',
                         'Page.extent': 'xmin,ymin,xmax,ymax；与focus_layers二选一。',
-                        'Page.table': '名册定义layer/fields/headers/sort_by；自动续页不截断。'},
+                        'Page.table': '名册定义layer/fields/headers/sort_by；自动续页不截断。',
+                        'Page.coverage': '声明layer/drawn_layers/可选keys；系统按实体键、几何、'
+                            '当前范围核对覆盖承诺，避免标题35处却只画12处。',
+                        'Page.footer': '分页行号/总数自动生成；模板支持{row_start}/{row_end}/'
+                            '{total_rows}/{page_number}/{page_count}，不要复制手写行号。'},
                     'common_errors': [
                         '页面引用了不存在的Layer.id或table.layer。',
                         'extent与focus_layers同时提供；二者必须二选一。',
@@ -136,7 +141,7 @@ class GeoNativeMapTool(BaseTool):
                         '把纸张英寸当mm，或把QGIS符号面积当Matplotlib点数。',
                         '重复传完整scene而不是scene_ref+edits，导致页面文件漂移。'],
                     'workflow': '数据审查→分析/结果验证→geo_cartography render→'
-                        '处理layout确定缺陷→geo_map_review(all_pages=true)→全部通过且问题'
+                        '处理layout确定缺陷→geo_map_review(all_pages=true，自动沿用未变页)→全部通过且问题'
                         '处置后geo_deliver一次生成可编辑工程。',
                     'no_qgis': '普通制图、修图、预览、审图阶段不要调用geo_qgis_project。',
                 }, ensure_ascii=False))

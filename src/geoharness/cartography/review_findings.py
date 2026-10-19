@@ -153,3 +153,72 @@ def pending_findings(metadata, *, cwd, map_ids):
             'last_image_sha256': item.get('last_image_sha256'),
         })
     return pending
+
+
+def pending_page_targets(metadata, *, cwd, map_id, page_index):
+    directory = task_directory(metadata, cwd=Path(cwd))
+    if directory is None:
+        return []
+    with connect(directory) as db:
+        findings = _load(db)
+    return [dict(item) for item in findings.values()
+            if item['map_id'] == map_id and item['page_index'] == page_index
+            and item['state'] not in {'dismissed', 'fix_verified'}]
+
+
+def apply_targeted_assessments(metadata, *, cwd, map_id, page_index, image_path,
+                               image_sha256, pixel_sha256, review, targets, report_path):
+    """Close only explicit, new-pixel findings after the report is committed."""
+    from geoharness.cartography.workflow import _pixel_digest
+
+    directory = task_directory(metadata, cwd=Path(cwd))
+    diagnostics = review.get('diagnostics') or {}
+    binding = diagnostics.get('review_binding') or {}
+    if (directory is None or not diagnostics.get('finding_assessments')
+            or review.get('status') not in {'passed', 'issues'}
+            or diagnostics.get('failure_stage') or not pixel_sha256
+            or binding.get('map_id') != map_id or binding.get('page_index') != page_index
+            or binding.get('image_sha256') != image_sha256):
+        return {'resolved': [], 'reason': 'incomplete_review'}
+    path, report_path = Path(image_path), Path(report_path)
+    if (hashlib.sha256(path.read_bytes()).hexdigest() != image_sha256
+            or _pixel_digest(path) != pixel_sha256):
+        raise ValueError('定向复核图片在登记后已变化')
+    saved = json.loads(report_path.read_text('utf-8'))
+    if (saved.get('image_sha256') != image_sha256
+            or saved.get('pixel_sha256') != pixel_sha256
+            or saved.get('diagnostics', {}).get('finding_assessments') !=
+            diagnostics.get('finding_assessments')):
+        raise ValueError('定向复核必须来自已登记的原始报告')
+    by_id = {item['issue_id']: item for item in targets}
+    assessments = diagnostics.get('finding_assessments', [])
+    ids = [item.get('issue_id') for item in assessments]
+    if len(ids) != len(set(ids)) or set(ids) - set(by_id):
+        return {'resolved': [], 'reason': 'ambiguous_or_unknown_target'}
+    resolved = []
+    with connect(directory) as db:
+        findings = _load(db)
+        for assessment in assessments:
+            target = by_id[assessment['issue_id']]
+            current = findings.get(target['issue_id'])
+            if (not current or current['map_id'] != map_id
+                    or current['page_index'] != page_index
+                    or current['state'] in {'dismissed', 'fix_verified'}
+                    or assessment.get('state') != 'resolved'
+                    or not str(assessment.get('reason') or '').strip()
+                    or image_sha256 in target.get('seen_images', [])
+                    or not target.get('seen_pixels')
+                    or pixel_sha256 in target['seen_pixels']
+                    or any(_same_concern(target['issue'], issue)
+                           for issue in review.get('issues', [])
+                           if issue.get('severity') in {'warning', 'error'})):
+                continue
+            current['state'] = 'fix_verified'
+            current['dispositions'].append({'state': 'fix_verified',
+                'reason': assessment['reason'], 'report_path': str(report_path),
+                'report_sha256': hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                'image_sha256': image_sha256, 'pixel_sha256': pixel_sha256,
+                'evidence_kind': 'committed_targeted_pixel_review'})
+            resolved.append(target['issue_id'])
+        _save(db, findings)
+    return {'resolved': resolved, 'assessed_count': len(assessments)}

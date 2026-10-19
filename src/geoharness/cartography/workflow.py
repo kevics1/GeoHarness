@@ -329,22 +329,8 @@ async def review_with_budget(
         )
 
 
-async def _review_once(
-    path: Path,
-    *,
-    state: dict[str, Any],
-    metadata: dict[str, Any],
-    digest: str,
-    pixel_digest: str,
-    config: GeoConfig,
-    task: str,
-    evidence: dict[str, Any],
-    map_id: str,
-    client: Any,
-    retry_invalid_response: bool,
-    retry_service_failure: bool,
-    pixel_only: bool,
-) -> tuple[MapReview, dict[str, Any]]:
+def review_fingerprint(config, evidence, *, task, pixel_only):
+    """One acceptance/configuration identity shared by cache and page scheduling."""
     settings = config.map_review
     native_evidence = evidence.get('render_metadata', {})
     expected_evidence = {key: value for key, value in evidence.items() if key not in {
@@ -389,6 +375,27 @@ async def _review_once(
             default=str,
         ).encode()
     ).hexdigest()
+    return fingerprint, evidence
+
+
+async def _review_once(
+    path: Path,
+    *,
+    state: dict[str, Any],
+    metadata: dict[str, Any],
+    digest: str,
+    pixel_digest: str,
+    config: GeoConfig,
+    task: str,
+    evidence: dict[str, Any],
+    map_id: str,
+    client: Any,
+    retry_invalid_response: bool,
+    retry_service_failure: bool,
+    pixel_only: bool,
+) -> tuple[MapReview, dict[str, Any]]:
+    settings = config.map_review
+    fingerprint, evidence = review_fingerprint(config, evidence, task=task, pixel_only=pixel_only)
     flags = {
         "image_sha256": digest,
         "pixel_sha256": pixel_digest,
@@ -561,6 +568,7 @@ async def _review_once(
         state["service_recovery"].pop(service_key, None)
     # Successful reviews stay cached; transient outages expire without rerendering.
     result.diagnostics["review_contract_version"] = REVIEW_CONTRACT_VERSION
+    result.diagnostics['review_fingerprint'] = fingerprint
     flags["request_sent"] = result.diagnostics.get("request_sent", True)
     flags["review_failure_stage"] = result.diagnostics.get("failure_stage", "")
     flags.update(facts(result, cached=False))

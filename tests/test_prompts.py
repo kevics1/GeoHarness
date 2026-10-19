@@ -97,7 +97,8 @@ class TestBuildGeoSystemPrompt:
     ) -> None:
         prompt = build_geo_system_prompt(tmp_path, default_config)
         assert "调用前注意事项" in prompt
-        assert "build(spec_ref" in prompt
+        assert "scene_ref" in prompt and "page_checks" in prompt
+        assert "build(spec_ref" not in prompt
         assert "rasterio" in prompt and "mask_raster" in prompt
 
     def test_returns_non_empty_string(

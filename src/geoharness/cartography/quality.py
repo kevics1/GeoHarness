@@ -970,7 +970,10 @@ async def review_map(
             from geoharness.cartography.pixel_review import PixelReview
 
             pixels = PixelReview.model_validate(payload)
-            result, ignored = MapReview.model_validate(pixels.model_dump()), []
+            result, ignored = MapReview.model_validate(pixels.model_dump(
+                exclude={'finding_assessments'})), []
+            diagnostics['finding_assessments'] = [
+                item.model_dump() for item in pixels.finding_assessments]
             from geoharness.cartography.pixel_review import page_scope
 
             diagnostics['page_role'] = page_scope(evidence)['page_role']

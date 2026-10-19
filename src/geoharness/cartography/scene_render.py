@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 from pathlib import Path
 from uuid import uuid4
@@ -116,7 +117,7 @@ def _sources(scene, context):
         packed.update(crs=str(original.crs), feature_count=len(frame),
             source_feature_count=len(original), data_sha256=digest(layer_inventory))
         layers.append(packed)
-        mapped.append({'file_path': str(path), 'gdf': frame,
+        mapped.append({'file_path': str(path), 'gdf': frame, 'source_layer': source.source_layer,
             **({'derivation': derivation} if derivation else {})})
     refs = list(dict.fromkeys([*scene.analysis_refs, *infer_packages(context.metadata, mapped),
         *infer_analysis_manifests(mapped, cwd=context.cwd, read_roots=roots)]))
@@ -168,11 +169,26 @@ def _rgba(color, opacity=1):
     return r, g, b, a * opacity
 
 
-def _page_text(fig, text, x, y, size, font, scene, resolved, *, width=None):
+def _page_text(fig, text, x, y, size, font, scene, resolved, *, width=None, wrap=False):
     if not text:
         return
     artist = fig.text(x / scene.width_mm, 1 - y / scene.height_mm, text,
         fontsize=size, fontfamily=font, ha='left', va='top')
+    if wrap and width:
+        lines = []
+        for paragraph in text.split('\n'):
+            line = ''
+            for char in paragraph:
+                artist.set_text(line + char)
+                measured = artist.get_window_extent(fig.canvas.get_renderer()).width
+                if line and measured * 25.4 / scene.dpi > width:
+                    lines.append(line)
+                    line = char
+                else:
+                    line += char
+            lines.append(line)
+        text = '\n'.join(lines)
+        artist.set_text(text)
     bbox = artist.get_window_extent(fig.canvas.get_renderer())
     scale = 25.4 / scene.dpi
     box = [bbox.x0 * scale, scene.height_mm - bbox.y1 * scale,
@@ -182,6 +198,62 @@ def _page_text(fig, text, x, y, size, font, scene, resolved, *, width=None):
     if box[0] < 0 or box[1] < 0 or box[0] + box[2] > scene.width_mm or (
             box[1] + box[3] > scene.height_mm) or width and box[2] > width:
         resolved['problems'].append({'code': 'text_overflow', 'text': text[:100], 'bbox_mm': box})
+
+
+def _coverage(page, frames, layers, extent, resolved):
+    """Check declared entity coverage; never infer semantic counts from title prose."""
+    from shapely.geometry import box
+
+    declared = {layer['id']: layer for layer in layers}
+    records = []
+    visible_layers = page.layers or list(declared)
+    claims = re.findall(r'(\d+)\s*(?:处|个|项|条|座|所)', page.title or '')
+    if page.role == 'detail' and claims and not page.coverage:
+        resolved['problems'].append({'code': 'subject_coverage_contract_missing',
+            'next_action': '详图标题有对象数量承诺，请明确coverage；不从多个图层猜数量'})
+    for rule in page.coverage:
+        source = declared[rule.layer]
+        key = source['key']
+        if not key or rule.layer not in frames:
+            raise ValueError('coverage.layer必须是有唯一key的矢量图层')
+        expected = frames[rule.layer]
+        if rule.keys is not None:
+            if set(rule.keys) - set(expected[key]):
+                raise ValueError('coverage.keys包含不存在的实体')
+            expected = expected[expected[key].isin(rule.keys)]
+        missing = []
+        for _, entity in expected.iterrows():
+            drawn = False
+            for name in rule.drawn_layers:
+                if name not in visible_layers or name not in frames or not declared[name]['key']:
+                    continue
+                candidates = frames[name]
+                matches = candidates[candidates[declared[name]['key']] == entity[key]]
+                if any(geometry.equals(entity.geometry) and geometry.intersects(box(*extent))
+                       for geometry in matches.geometry):
+                    drawn = True
+                    break
+            if not drawn:
+                missing.append(str(entity[key]))
+        record = {'layer': rule.layer, 'expected_count': len(expected),
+                  'drawn_count': len(expected) - len(missing), 'missing_keys': missing}
+        records.append(record)
+        if missing:
+            resolved['problems'].append({'code': 'subject_coverage_missing', **record,
+                'next_action': '补齐承诺的真实对象或明确更改本页覆盖范围，不能仅改标题掩盖缺失'})
+    resolved['coverage'] = records
+    if len(records) == 1 and len(claims) == 1 and int(claims[0]) != records[0]['expected_count']:
+        resolved['problems'].append({'code': 'title_count_mismatch',
+            'claimed': int(claims[0]), 'expected_count': records[0]['expected_count'],
+            'next_action': '用{subject_count}绑定明确覆盖对象，或核实真实业务范围；不猜标题语义'})
+    return records
+
+
+def _page_words(text, values):
+    try:
+        return text.format_map(values)
+    except (KeyError, ValueError) as exc:
+        raise ValueError('页面模板含未知字段或格式；只使用工具Schema说明的模板字段') from exc
 
 
 def _draw_map(fig, page, frames, layers, scene, font, resolved):
@@ -244,7 +316,7 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
         frame.plot(**kwargs)
         legend = symbol['categories'] or [{'label': layer['name'] or layer['id'],
                                            'color': symbol['color']}]
-        for entry in legend:
+        for entry in legend if layer.get('show_in_legend', True) else []:
             legend_items.append({'label': entry['label'], 'color': entry['color'],
                 'kind': 'point' if 'Point' in kind else 'line' if 'Line' in kind else 'polygon',
                 'symbol': symbol})
@@ -259,7 +331,10 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
         'rect_mm': [actual.x0 * scene.width_mm, (1 - actual.y1) * scene.height_mm,
                     actual.width * scene.width_mm, actual.height * scene.height_mm]}
     resolved['legend_items'] = []
-    for i, entry in enumerate(legend_items):
+    unique = {}
+    for entry in legend_items:
+        unique.setdefault(digest(entry), entry)
+    for i, entry in enumerate(unique.values()):
         x, y = scene.width_mm - 55, 26 + i * 6
         if y > scene.height_mm - 23:
             resolved['problems'].append({'code': 'legend_overflow'})
@@ -286,7 +361,21 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
         fig.add_artist(artist)
     # Freeze positions after collision avoidance. Exporter uses these layout labels,
     # not a second engine's automatic label placement.
-    occupied = []
+    from matplotlib.transforms import Bbox
+    from shapely.geometry import LineString
+
+    occupied, leaders, obstacles = [], [], []
+    for source in ordered_layers:
+        if source['kind'] != 'vector' or source['id'] not in frames:
+            continue
+        radius = (source['symbol']['size_mm'] + source['symbol']['width_mm']) * scene.dpi / 50.8
+        for shape in frames[source['id']].geometry:
+            points = list(shape.geoms) if shape.geom_type == 'MultiPoint' else [shape]
+            for point in points:
+                if point.geom_type == 'Point':
+                    x, y = ax.transData.transform((point.x, point.y))
+                    obstacles.append((Bbox.from_extents(x-radius, y-radius, x+radius, y+radius),
+                                      (x, y)))
     for layer in ordered_layers:
         if not layer['label_field'] or layer['id'] not in frames:
             continue
@@ -297,16 +386,33 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
                 continue
             text = str(row[layer['label_field']])
             chosen = None
-            for dx, dy in [(4, 4), (4, -12), (-12, 4), (-12, -12),
-                           (12, 10), (-20, 10), (12, -20), (-20, -20)]:
+            anchor = ax.transData.transform((point.x, point.y))
+            radius = max(5, layer['symbol']['size_mm'] * 72 / 50.8 + 3)
+            offsets = [(r * dx, r * dy) for r in (radius, radius+8, radius+16, radius+28)
+                       for dx, dy in [(1, 1), (1, -1), (-1, 1), (-1, -1),
+                                      (1, 0), (0, 1), (-1, 0), (0, -1)]]
+            for dx, dy in offsets:
                 item = ax.annotate(text, (point.x, point.y), xytext=(dx, dy),
                     textcoords='offset points', fontsize=layer['label_size_pt'],
                     fontfamily=font, ha='left', va='bottom', zorder=len(ordered_layers) + 2,
                     bbox={'facecolor': 'white', 'edgecolor': 'none', 'alpha': .8, 'pad': .2})
                 b = item.get_window_extent(fig.canvas.get_renderer()).expanded(1.12, 1.15)
-                if ax.bbox.contains(b.x0, b.y0) and ax.bbox.contains(b.x1, b.y1) and not any(
-                        b.overlaps(previous) for previous in occupied):
-                    chosen = (item, b)
+                end = (min(max(anchor[0], b.x0), b.x1),
+                       min(max(anchor[1], b.y0), b.y1))
+                leader = LineString([anchor, end])
+                from matplotlib.path import Path as DrawPath
+
+                route = DrawPath([anchor, end])
+                obstructed = (any(b.overlaps(previous) for previous in occupied)
+                    or any(b.overlaps(obstacle) for obstacle, _ in obstacles)
+                    or any(route.intersects_bbox(previous, filled=True) for previous in occupied)
+                    or any(route.intersects_bbox(obstacle, filled=True)
+                           for obstacle, center in obstacles
+                           if math.dist(anchor, center) > 1)
+                    or any(leader.crosses(old) or leader.overlaps(old) for old in leaders))
+                if (ax.bbox.contains(b.x0, b.y0) and ax.bbox.contains(b.x1, b.y1)
+                        and not obstructed):
+                    chosen = (item, b, leader, end)
                     break
                 item.remove()
             if chosen is None:
@@ -314,8 +420,16 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
                     'entity_key': str(row[layer['key']]), 'text': text,
                     'next_action': '拆分局部详图或扩大图框，保留真实坐标'})
                 continue
-            item, b = chosen
+            item, b, leader, end = chosen
             occupied.append(b)
+            leaders.append(leader)
+            scale = 25.4 / scene.dpi
+            segment = {'points_mm': [[anchor[0]*scale, scene.height_mm-anchor[1]*scale],
+                [end[0]*scale, scene.height_mm-end[1]*scale]], 'width_mm': .15}
+            resolved.setdefault('lines', []).append(segment)
+            fig.add_artist(Line2D([anchor[0]/fig.bbox.width, end[0]/fig.bbox.width],
+                [anchor[1]/fig.bbox.height, end[1]/fig.bbox.height], transform=fig.transFigure,
+                color='#555555', linewidth=.15 * 72/25.4, zorder=len(ordered_layers)+1))
             anchor = ax.transData.transform((point.x, point.y))
             scale = 25.4 / scene.dpi
             label = {'text': text, 'layer': layer['id'], 'entity_key': str(row[layer['key']]),
@@ -338,7 +452,8 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
     length = max(v * magnitude for v in (1, 2, 5) if v * magnitude <= target)
     width = length / metres * resolved['frame']['rect_mm'][2]
     x, y = 9, scene.height_mm - 18
-    resolved['lines'] = [{'points_mm': [[x, y], [x + width, y]], 'width_mm': .6}]
+    resolved.setdefault('lines', []).append(
+        {'points_mm': [[x, y], [x + width, y]], 'width_mm': .6})
     fig.add_artist(Line2D([x / scene.width_mm, (x + width) / scene.width_mm],
         [1 - y / scene.height_mm] * 2, transform=fig.transFigure, color='black',
         linewidth=.6 * 72 / 25.4))
@@ -408,6 +523,8 @@ def _render(scene, scene_ref, context):
                     filename = 'preview.png' if index == 0 else f'page-{index + 1}.png'
                     selected_ids = ([page.table.layer] if page.table else page.layers or
                                     [layer['id'] for layer in layers])
+                    selected_ids = set(selected_ids) | set(page.focus_layers) | {
+                        name for rule in page.coverage for name in [rule.layer, *rule.drawn_layers]}
                     selected_layers = [layer for layer in layers if layer['id'] in selected_ids]
                     page_key = digest({'page': page.model_dump(mode='json'), 'chunk': chunk,
                         'layers': selected_layers, 'sources': {k: v for k, v in inventory.items()
@@ -446,8 +563,19 @@ def _render(scene, scene_ref, context):
                     try:
                         resolved = {'page_id': identity, 'page_index': index, 'role': page.role,
                             'texts': [], 'problems': [], 'frame': None, 'table': None}
-                        _page_text(fig, page.title or scene.title, 9, 8, 13, font, scene,
-                                   resolved, width=scene.width_mm - 18)
+                        template_values = {}
+                        if table is not None:
+                            start = chunk * page.table.rows_per_page
+                            template_values.update(row_start=start + 1 if len(table) else 0,
+                                row_end=min(start + page.table.rows_per_page, len(table)),
+                                total_rows=len(table), page_number=chunk + 1, page_count=chunks)
+                        else:
+                            records = _coverage(page, frames, layers, _bounds(page, frames, scene),
+                                                resolved)
+                            if len(records) == 1:
+                                template_values['subject_count'] = records[0]['expected_count']
+                        _page_text(fig, _page_words(page.title or scene.title, template_values),
+                                   9, 8, 13, font, scene, resolved, width=scene.width_mm - 18)
                         if table is not None:
                             import pandas as pd
 
@@ -479,11 +607,29 @@ def _render(scene, scene_ref, context):
                                 'row_start': start, 'row_count': len(rows), 'total': len(table),
                                 'rect_mm': [9, 25, scene.width_mm - 18, len(all_rows) * h]}
                         else:
-                            extents.append(_draw_map(fig, page, frames, layers, scene,
-                                                     font, resolved))
-                        footer = page.footer
+                            frame = _draw_map(fig, page, frames, layers, scene, font, resolved)
+                            extents.append(frame)
+                            # A map page may make an explicit count claim in its title.
+                            # Check it against the actual filtered layer selection, so a
+                            # mismatch is fixed before any image review request.
+                        footer = _page_words(page.footer, template_values)
+                        if table is not None:
+                            claim = re.search(r'本页(?:第)?\s*(\d+)\s*[—–\-~至]\s*(\d+)\s*行',
+                                              footer)
+                            if claim and list(map(int, claim.groups())) != [
+                                    template_values['row_start'], template_values['row_end']]:
+                                resolved['problems'].append({
+                                    'code': 'pagination_footer_mismatch',
+                                    'claimed_rows': list(map(int, claim.groups())),
+                                    'actual_rows': [template_values['row_start'],
+                                                    template_values['row_end']],
+                                    'next_action': '删除手写本页行号，使用自动分页文字或模板字段'})
+                            footer = (f"本页第{template_values['row_start']}—"
+                                f"{template_values['row_end']}行，"
+                                f"共{template_values['total_rows']}行；第{chunk + 1}/{chunks}页。"
+                                + ('  ' + footer if footer else ''))
                         _page_text(fig, footer, 65, scene.height_mm - 14, 7, font, scene,
-                                   resolved, width=scene.width_mm - 74)
+                                   resolved, width=scene.width_mm - 74, wrap=True)
                         fig.savefig(folder / filename, dpi=scene.dpi,
                                     metadata={'Software': 'GeoHarness native scene'})
                         cache.mkdir(parents=True, exist_ok=True)
@@ -561,7 +707,8 @@ def _render(scene, scene_ref, context):
             'native_facts': {'page_previews': previews}, 'quality_status': 'draft',
             'layout': {'pages': len(previews), 'bounds_check': {'checked': True,
                 'valid': not problems, 'problems': problems,
-                'scope': 'measured_text_bounds_and_label_boxes; not_all_symbol_shapes'}},
+                'scope': 'measured_text_bounds_labels_point_symbols_leaders_declared_coverage; '
+                         'not_all_symbol_shapes_or_business_semantics'}},
             'file_hashes': {name: _sha(folder / name) for name in files},
             'files': [*files, 'project.json']}
         manifest_path.write_text(json.dumps(doc, ensure_ascii=False), 'utf-8')

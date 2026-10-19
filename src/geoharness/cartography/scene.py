@@ -52,6 +52,8 @@ class Layer(Contract):
         description='按key选择实际对象；null保留全部，空数组为空选集，不移动几何。')
     label_field: str = Field(default='', description='标注字段；文字可避让，真实点位不移动。')
     label_size_pt: float = Field(default=8, ge=5, le=30, description='标注字号，pt。')
+    show_in_legend: bool = Field(default=True,
+        description='是否进入专题图例；重复强调层、辅助编号层可设false，不改变实际绘制。')
     symbol: Symbol = Field(default_factory=Symbol, description='统一原生及最终工程符号。')
 
 
@@ -66,9 +68,17 @@ class Table(Contract):
         description='每页行数；自动续页保留全部对象，不截断。')
 
 
+class Coverage(Contract):
+    layer: str = Field(description='应覆盖对象的真实图层ID；必须声明唯一key。')
+    drawn_layers: list[str] = Field(min_length=1,
+        description='本页实际承载这些对象的图层ID；逐实体键与真实几何核对。')
+    keys: list[str | int | float] | None = Field(default=None,
+        description='应覆盖的实体键；省略为layer的全部实际对象，不能按标题猜。')
+
+
 class Page(Contract):
     id: str = Field(min_length=1, max_length=80, description='稳定页面ID，改其他页不变。')
-    title: str = Field(default='', description='页面标题，默认使用制图总标题。')
+    title: str = Field(default='', description='页面标题；支持{subject_count}，需唯一coverage。')
     role: Literal['map', 'detail', 'roster'] = Field(default='map', description='页面验收职责。')
     layers: list[str] = Field(default_factory=list, description='由底到顶的图层ID；不填使用全部。')
     extent: list[float] | None = Field(default=None, min_length=4, max_length=4,
@@ -76,7 +86,10 @@ class Page(Contract):
     focus_layers: list[str] = Field(default_factory=list,
         description='范围拟合目标；默认当前页图层。')
     table: Table | None = Field(default=None, description='名册定义；有表格时该页只绘表。')
-    footer: str = Field(default='', description='已确认的来源/限制文字，不代替事实包。')
+    coverage: list[Coverage] = Field(default_factory=list, max_length=16,
+        description='可选逐实体覆盖承诺；系统核对指定对象确在本页范围内且真实绘出，不能用少量样本冒充全集。')
+    footer: str = Field(default='', description='来源/限制文字；分页支持{row_start}/{row_end}/'
+        '{total_rows}/{page_number}/{page_count}，由系统按当前页展开。')
 
 
 class Scene(Contract):
@@ -107,10 +120,15 @@ class Scene(Contract):
         if not self.pages:
             raise ValueError('至少需要一个页面')
         for page in self.pages:
+            if (page.role == 'roster') != bool(page.table):
+                raise ValueError('名册页role=roster与table必须同时声明，避免审查职责错配')
+            if page.table and page.coverage:
+                raise ValueError('coverage用于地图页；名册完整分页由系统核验')
             if page.table and (set(page.table.decimals) - set(page.table.fields) or any(
                     type(n) is not int or not 0 <= n <= 8 for n in page.table.decimals.values())):
                 raise ValueError('table.decimals仅接受fields内字段到0–8位小数的映射')
             refs = [*page.layers, *page.focus_layers, *([page.table.layer] if page.table else [])]
+            refs += [v for rule in page.coverage for v in [rule.layer, *rule.drawn_layers]]
             if set(refs) - set(keys):
                 raise ValueError('页面引用未知图层ID：' + str(set(refs) - set(keys)))
             if page.extent and (page.extent[0] >= page.extent[2]

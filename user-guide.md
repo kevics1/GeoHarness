@@ -19,15 +19,35 @@ PNG 和多页 PDF 始终生成，可附加 SVG/HTML；静态审图不认证 HTML
 
 先处理返回的 `layout.bounds_check.problems`，再用
 `geo_map_review(file_path=preview_path, all_pages=true)`。工具只读取真实图片和登记问题。
-只改名单时，未变页面按内容身份、图片哈希和原审查证据继承 passed/issues；
-改变的页面仍须审查。语义疑问和美化建议保留为诊断，不能冒充像素缺陷；
+`all_pages=true` 表示核对全册，不是全部重发：未变页面按职责、验收要求、审查配置、
+图片与报告哈希复用已有 passed/issues；改变的页面仍须审查。重复 issues 会保留，
+不会随机再抽一份结论。已登记地图的 `task/checks` 兼容作备注，不改变验收身份。
+确有新要求时用 `page_checks={"真实page_id":["要求"]}`；省略沿用，空列表清除该页自定义
+要求，重启后保留。未知 page_id 会在发送请求前拒绝，只让明确改变要求的页面失效。
+总览、详图、名册分别承担各自职责，不再把全册目标广播给单张图片。
+语义疑问和美化建议保留为诊断，不能冒充像素缺陷；
 服务失败保留 unverified。未登记图片的独立审查不制造地图版本。
+修改后的页面在同一次请求中携带本页待核验 `issue_id`，视觉响应的
+`finding_assessments` 逐项回答 `resolved/persists/unassessable`。只有新像素、明确解决依据、
+无同一缺陷再次出现且报告成功登记时，才自动记 `fix_verified`；遗漏或无法判断继续保留。
+
+名册默认自动显示本页实际行号、总行数和页码；`footer` 可用
+`{row_start}/{row_end}/{total_rows}/{page_number}/{page_count}` 模板并自动换行。
+详图可用 `coverage=[{layer,drawn_layers,keys}]` 声明承诺覆盖对象，按真实实体键、几何和
+当前范围核对；单个覆盖约束支持标题 `{subject_count}`。它不从自由文字猜测业务数量。
+详图标题包含“35处”等明确数量承诺时，必须声明对应 `coverage`；缺少约束或唯一数量与
+唯一覆盖对象数不符会返回布局问题。系统不会猜测多个图层分别代表哪批业务对象。
+重复强调层可设 `show_in_legend=false`；原生标签同时避让文字、点符号和已有引线，
+放不下时返回布局问题，保留真实点位供拆分详图。该检查不覆盖所有复杂符号形状或业务语义。
 
 分析包统一使用 `analysis_ref`（兼容 `package_path`）给制图；`report_path` 是给人看的
 Markdown，不能当 JSON。对于生产者实际读取过、同一任务已发布的前序结果，发布时自动
 按实体 ID 检查已发布数值/分类字段是否丢失或新增空值；子集按其真实成员比较。
 也可显式使用 `carry_from/carry_fields`。有意删除或重算字段须在 `field_changes`
 说明真实业务原因；这一机制不认证任意 Python 算法的科学正确性。
+多层 GeoPackage 通过 `publish_analysis` 的事实请求 `source_layer` 指定真实图层，
+制图层也使用同名 `source_layer`；统计和成员绑定到该层，避免为发布反复拆文件。
+最近距离复核的多层参照文件使用 `reference_layer`。不能用同文件另一图层替代已绑定选集。
 
 `geo_deliver(project_dir=返回的原生目录)` 在数据、实测布局和全部页面审查通过且没有待处置
 问题时才冻结当前候选，首次生成可编辑 QGIS 图层和布局。生成后重开验证数据几何、属性、

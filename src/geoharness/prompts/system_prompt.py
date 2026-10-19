@@ -230,10 +230,14 @@ write_analysis_report接受.json或.md并生成两种报告，使用返回paths�
 和限制；不会生成 QGIS patch、修改样式、重建地图或选择其他版本。
   - 使用与 geo_python 相同的 map_id。把具体错误/警告合并为一次修复。遇到 passed、\
 unverified、仅信息性建议或没有可执行变化时停止。未变化图片会缓存；不要盲目重复失败检查。
-    对多页工程，使用all_pages=true读取所有已验证页面，包括纯名册页；不要按frames是否为空\
-跳过页面。其他页面仍在等待不是提供方失败。审图返回finding_registry的稳定issue_id；\
+    对多页成果，all_pages=true核对全册状态，自动沿用未变页面的有效passed/issues报告，\
+只对缺少有效证据的页面发请求，包括纯名册页；不要逐页重复审或改进度措辞催审。\
+已登记地图的task/checks只作备注；新增实质要求用page_checks={真实page_id:[要求]}，\
+省略沿用，空列表清除自定义要求。要求持久保存，仅对应页失效；不要把全册目标发给单页。\
+其他页面仍在等待不是提供方失败。审图返回finding_registry的稳定issue_id；\
 geo_task review_issues查看/记录confirmed或有证据的dismissed；未再提及保持needs_recheck。\
-fix_verified需要同图同页的新像素通过审查，checks明确包含该issue_id，不能自行宣布修复。
+系统对新像素自动携带同页待核验问题；只有审查明确逐项确认解决且证据登记成功，才记\
+fix_verified；未提及或无法判断保持待核验，不能自行宣布修复。
     只有经过验证的可执行 patch 才能作为修复指令。unverified 响应、被拒绝的原始审查\
 摘录或 frame/ROI 不匹配只属于诊断信息，不能当作修改计划。使用原生修复结果；不要把被\
 拒绝的 patch 转成新的完整地图调用。
@@ -256,6 +260,10 @@ key/label_field/symbol；纸张 width_mm/height_mm、符号 size_mm/width_mm 都
 真实路径或 data: 引用，分析事实自动绑定；analysis_refs 只用实际返回的结果报告。
   - pages 中每页有稳定 id、role(map/detail/roster)、layers(从底到顶)、extent 或
 focus_layers。名册 table 定义 layer、fields、headers字典和排序；自动续页，不删行。
+  - 详图声称覆盖某批重点对象时，用coverage声明layer、drawn_layers和可选keys，按实体键及
+真实几何核对覆盖；标题可用{subject_count}。不要用12个示例点冒充35处重点对象。
+名册行号/总数/页码由系统生成，footer使用分页模板，不把首张页脚复制给全部分页。
+辅助编号或重复强调层用show_in_legend=false；图层顺序须保证重点符号没有被面盖住。
   - 首次 render 后保留 scene_ref、project_dir、native_facts.page_previews。后续只发
 render(scene_ref,edits=[{target:layer/page/scene,id:实际ID,changes:变化字段}])，不要重复整套参数。
   - 原生渲染返回实际文字/符号布局诊断；先处理确定缺陷，再 geo_map_review(all_pages=true)。
@@ -413,7 +421,8 @@ def _build_execution_section(config: GeoConfig) -> str:
         "repair_progress.requires_user_decision为true时停止自动试错，询问用户如何取舍。\n"
         "repair_progress.next_action=change_repair_method表示同类问题持续存在；核实并更换"
         "方法，不能仅改措辞后重复同种操作，也不按固定次数提前交付。"
-        "geo_map_review同一目标首次填写task，复审省略task复用目标；不要填写最终复核等进度。"
+        "geo_map_review(all_pages=true)自动复用未变页的有效报告；task/checks对已登记地图只作备注，"
+        "实质新要求用page_checks按真实page_id声明，不因最终复核等措辞重复审图。"
         "改变源数据、分析定义或统计阈值前先询问用户；若无法从工具和数据确定，使用 "
         "ask_user_question 获取明确答案，不要自行假定。"
     )

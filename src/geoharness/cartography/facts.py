@@ -660,7 +660,7 @@ def _footer(analyses: list[dict]) -> str:
 
 
 def _package_facts(manifest, path, raw, reader, mapped_sources, display_name):
-    from geoharness.analysis.result_package import verify_package
+    from geoharness.analysis.result_package import same_source_view, verify_package
 
     package = verify_package(path, guard=reader.guard)
     facts = package['facts']
@@ -669,11 +669,14 @@ def _package_facts(manifest, path, raw, reader, mapped_sources, display_name):
     for index, item in enumerate(mapped_sources):
         if not item.get('file_path') or reader.path(item['file_path']) != source:
             continue
+        source_layer = package['request'].get('source_layer', '')
+        if not same_source_view(source, source_layer, item.get('source_layer', '')):
+            continue
         if facts.get('crs') is None:
             raise ValueError('表格事实不能直接用作空间图层的几何证据')
         import geopandas as gpd
 
-        frame = gpd.read_file(source)
+        frame = gpd.read_file(source, **({'layer': source_layer} if source_layer else {}))
         expected = frame
         if item.get('derivation') is not None:
             from geoharness.cartography.derivation import MapDerivation, derive_frame

@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-CONTRACT_VERSION = 11
+CONTRACT_VERSION = 12
 
 def _bounded(value: Any, depth: int = 0) -> Any:
     if depth > 5:
@@ -41,12 +41,27 @@ def page_contract(evidence: dict[str, Any], *, task: str = "") -> dict[str, Any]
     layout = metadata.get("layout") or {}
     regions = (layout.get("page_regions") or {}).get(str(page),
         layout.get("regions") if page == 0 else None)
+    # These requirements belong to the page duty, not to the model's prose.
+    # A roster and an overview must never receive the same acceptance question
+    # merely because both were passed through all_pages=true.
+    duty_checks = {
+        "map": ["visible_extent", "legend_matches_drawn_content", "readable_labels",
+                "no_occlusion", "no_clipping"],
+        "detail": ["visible_extent", "legend_matches_drawn_content", "readable_labels",
+                   "no_occlusion", "no_clipping", "detail_subjects_visible"],
+        "roster": ["table_headers_visible", "cells_readable", "no_text_collision",
+                   "no_cell_clipping", "pagination_footer_consistent"],
+        "locator": ["visible_extent", "readable_labels", "no_clipping"],
+        "mixed": ["readable_labels", "no_clipping", "legend_matches_drawn_content"],
+        "unknown": ["readable_labels", "no_clipping"],
+    }.get(scope.get("page_role", "unknown"), ["readable_labels", "no_clipping"])
     return {
         "contract_version": CONTRACT_VERSION,
         "page_index": page,
         "page_role": scope.get("page_role", "unknown"),
         "frames": page_frames,
         "regions": _bounded(regions),
+        "duty_checks": duty_checks,
         "detail_placement": (layout.get("page") or {}).get("detail_placement"),
         "analysis_status": ((metadata.get("analysis") or {}).get("status")
                             if isinstance(metadata.get("analysis"), dict) else None),
@@ -60,9 +75,55 @@ def page_contract(evidence: dict[str, Any], *, task: str = "") -> dict[str, Any]
             for item in ((metadata.get("analysis") or {}).get("analyses") or [])
             if isinstance(item, dict)),
         "backend": evidence.get("backend", "matplotlib"),
-        "checks": sorted(set(evidence.get("review_checks") or [])),
+        # Free prose is not an acceptance rule. Explicit checks are normalized
+        # to stable, page-relevant IDs before they can become review identity.
+        "checks": normalized_checks(evidence.get("review_checks") or [], scope.get(
+            "page_role", "unknown")),
+        "page_acceptance_requirements": sorted(set(
+            evidence.get("page_acceptance_requirements") or [])),
         "task_scope": task.strip()[:240],
     }
+
+def normalized_checks(checks: Any, page_role: str = "unknown") -> list[str]:
+    """Convert known intent to stable IDs; keep unknown requirements explicit.
+
+    Progress prose such as "final check" must not invalidate a conclusion. A
+    genuinely new requirement that cannot be mapped remains part of the
+    contract, because silently dropping it would weaken review acceptance.
+    """
+    if not isinstance(checks, (list, tuple)):
+        return []
+    aliases = {
+        "label_overlap": {"label_overlap", "标签重叠", "编号重叠", "文字重叠", "标注重叠"},
+        "label_readability": {"label_readability", "文字可读", "编号可读", "标签可读",
+                              "字体太小", "字太小"},
+        "symbol_overlap": {"symbol_overlap", "符号重叠", "点重叠", "点位重叠"},
+        "layer_occlusion": {"layer_occlusion", "图层遮挡", "压盖", "被面盖住"},
+        "legend_consistency": {"legend_consistency", "图例一致", "图例对应", "图例不符"},
+        "extent_whitespace": {"extent_whitespace", "范围留白", "大片空白", "过多空白"},
+        "pagination": {"pagination", "分页", "页脚", "行号", "页码"},
+        "table_readability": {"table_readability", "表格可读", "表头", "单元格"},
+        "clipping": {"clipping", "裁切", "截断", "溢出"},
+    }
+    ignored = {"最终复核", "再检查一次", "再审一次", "确认修复", "再次审查",
+               "final check", "final review", "recheck", "再确认一次"}
+    result = set()
+    for item in checks[:16]:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in ignored or text in ignored:
+            continue
+        matched = {key for key, words in aliases.items()
+                   if any(word.lower() in lowered for word in words)}
+        if matched:
+            result.update(matched)
+        else:
+            result.add(text[:160])
+    return sorted(result)
 
 def stable_contract(evidence: dict[str, Any]) -> dict[str, Any]:
     """Review inputs only; package provenance and print order are separate bindings.

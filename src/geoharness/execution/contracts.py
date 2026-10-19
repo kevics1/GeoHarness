@@ -613,7 +613,7 @@ def artifact_metadata(path: Path, *, succeeded: bool) -> dict:
 
 def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
                    metric_crs=None, group_by=(), include_median: bool = False,
-                   stratify_by=()) -> dict:
+                   stratify_by=(), source_layer: str = '') -> dict:
     """Recompute bounded statistics from a persisted table/vector, with its fingerprint.
 
     Predicates are {name, field, op, value}; missing values never count as matches.
@@ -627,13 +627,18 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
 
     path = Path(path)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    frame = pd.read_csv(path) if path.suffix.lower() == '.csv' else gpd.read_file(path)
+    if path.suffix.lower() == '.csv' and source_layer:
+        raise ValueError('CSV不能指定source_layer')
+    frame = pd.read_csv(path) if path.suffix.lower() == '.csv' else gpd.read_file(
+        path, **({'layer': source_layer} if source_layer else {}))
     if key not in frame or frame[key].isna().any() or not frame[key].is_unique:
         raise ValueError('Facts require an existing unique non-null source key')
     result = {'scope': 'recomputed_persisted_values; scientific_method_unverified',
               'source': str(path), 'sha256': digest, 'key': key, 'row_count': len(frame),
               'crs': str(frame.crs) if getattr(frame, 'crs', None) else None,
               'numeric': {}, 'counts': {}, 'groups': {}}
+    if source_layer:
+        result['source_layer'] = source_layer
     if stratify_by:
         if len(set(stratify_by)) != len(stratify_by) or any(f not in frame for f in stratify_by):
             raise ValueError('Stratification requires distinct existing fields')
@@ -706,7 +711,7 @@ def _report_paths(path):
 
 def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=(),
                           group_by=(), predicates=(), method: dict, claims=(),
-                          stratify_by=()) -> dict:
+                          stratify_by=(), source_layer: str = '') -> dict:
     """从落盘结果生成同源JSON/中文Markdown；方法为声明，任意报告文本不受认证。"""
     path, markdown_path = _report_paths(path)
     source_path = Path(source).resolve()
@@ -714,7 +719,7 @@ def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=()
         raise ValueError('Report must not overwrite its source')
     facts = artifact_facts(source, key=key, numeric_fields=numeric_fields,
                            group_by=group_by, predicates=predicates, include_median=True,
-                           stratify_by=stratify_by)
+                           stratify_by=stratify_by, source_layer=source_layer)
     checked = check_claims(facts, list(claims)) if claims else None
     if checked and checked['status'] != 'passed':
         raise ValueError('Declared analysis claims disagree with persisted facts: '

@@ -50,3 +50,7 @@ G2 design_complete / implementation_not_started：完整方案已保存diagnosti
 G3 implementation_in_progress（用户已明确启动）：统一非QGIS制图计划/原生渲染与最终工程编译；审图准入、稳定页面/增量审查；输入别名/不可达预检/同任务调度；分析字段连续性；中文接口与文档；原生多页真实链及wheel/安装验收。主代理负责渲染和交付，独立子任务仅修改输入调度与分析契约，不修改配置或业务数据。
 
 G3 engineering_checked / business_acceptance_pending：统一Scene与非QGIS渲染/增量修图/页面审查绑定、一次最终可编辑工程、字段连续性和中文工具接口已实施并安装；最终wheel21项、收尾40项、原失败12项精确复验、安装后23项、133模块+34资源一致性及CLI17工具通过。真实视觉服务HTTP503；业务质量/耗时和独立审查不作通过声明。细节见diagnostics/2026-10-19-native-workflow-review-and-plan.md。
+
+H轮 implementation_in_progress（2026-10-19 用户已授权）：森林火灾改1审图放大修复。H1稳定逐页验收合同/只送受影响页面，真实4页首次4次、只改2页则新增2次，换进度措辞0次；H2定向问题复核与有证据处置；H3分页文字/覆盖约束/原生排版改进；H4多层GPKG与分析视图身份；H5集成、独立审查、wheel/安装/CLI。诊断见diagnostics/2026-10-19-review-amplification-audit.md。保持high和用户配置、不修改业务输入与既有.env.example，不设时间/调用硬上限。
+
+H轮 engineering_checked / business_acceptance_pending：H1–H4已实施并安装，H5工程集成完成、有效独立审查仍未完成。首轮wheel74项和安装14项通过；数量承诺补强后最终wheel14项、实际安装9项通过，134模块+34技能资源零差异，CLI17工具通过。配置SHA/high保持，制图与审图不启动QGIS、交付一次生成工程的真实链通过。模拟客户端请求数验证不替代真实视觉质量或完整业务速度验收；任意跨页文字/复杂符号检测、锁冲突全来源、未知中断显式恢复仍有边界，不称全局业务已收敛。

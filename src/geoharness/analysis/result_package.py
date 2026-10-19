@@ -24,7 +24,9 @@ class NearestCheck(BaseModel):
         description='当前源文件内需要逐实体独立复核的最近距离字段，单位米。')
     reference_ref: str = Field(min_length=1,
         description='实际用于距离计算的参照矢量文件路径或data:引用；必须是同一时次/选集。'
-        '多图层GPKG先明确另存单图层，不猜测图层或按文件名寻找。')
+        '多图层GPKG须同时声明reference_layer，不猜测图层或按文件名寻找。')
+    reference_layer: str = Field(default='', max_length=256,
+        description='参照源内的真实图层名；多层GPKG必填，单层可省略。')
     metric_crs: str = Field(min_length=1,
         description='实际计算所用的米制投影，例如EPSG:32648；不可用经纬度或仅重贴CRS。')
     absolute_tolerance: float = Field(default=0.11, ge=0, le=10, allow_inf_nan=False,
@@ -33,6 +35,8 @@ class NearestCheck(BaseModel):
 
 class FactRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
+    source_layer: str = Field(default='', max_length=256,
+        description='源文件内的真实图层名；多图层GPKG必填。事实、成员与制图引用均绑定此层。')
     key: str = Field(min_length=1, max_length=256,
         description='源文件内实际存在、唯一且非空的实体ID字段；系统用其冻结成员集合。')
     numeric_fields: list[str] = Field(default_factory=list, max_length=64,
@@ -64,11 +68,8 @@ class FactRequest(BaseModel):
         '不因统计核对通过而获得科学认证；未知业务阈值须明确假设或询问用户。')
 
 
-def _members(source, key):
-    import geopandas as gpd
-    import pandas as pd
-
-    frame = pd.read_csv(source) if source.suffix.lower() == '.csv' else gpd.read_file(source)
+def _members(source, key, source_layer=''):
+    frame = _frame(source, source_layer)
     if key not in frame or frame[key].isna().any() or not frame[key].is_unique:
         raise ValueError('结果包要求唯一非空的真实实体主键')
     values = sorted(json.dumps(value.item() if hasattr(value, 'item') else value,
@@ -76,12 +77,15 @@ def _members(source, key):
     return hashlib.sha256(json.dumps([key, values], ensure_ascii=False).encode()).hexdigest()
 
 
-def _source_inventory(source):
+def _source_inventory(source, source_layer=''):
     if source.suffix.lower() == '.gpkg':
         import pyogrio
 
-        if len(pyogrio.list_layers(source)) != 1:
-            raise ValueError('结果包要求单图层GPKG；请先将目标图层另存为独立结果')
+        names = list(pyogrio.list_layers(source)[:, 0])
+        if (len(names) != 1 and not source_layer or source_layer and source_layer not in names):
+            raise ValueError('多图层GPKG须指定真实source_layer；可用：' + ', '.join(names))
+    elif source.suffix.lower() == '.csv' and source_layer:
+        raise ValueError('CSV不能指定source_layer')
     paths = [source]
     if source.suffix.lower() == '.shp':
         paths.extend(source.with_suffix(suffix) for suffix in ('.dbf', '.shx', '.prj', '.cpg')
@@ -89,9 +93,22 @@ def _source_inventory(source):
     return {str(path): sha256_file(path) for path in paths}
 
 
+def same_source_view(source, left='', right=''):
+    """Only a verified single-layer file permits an omitted layer name."""
+    if source.suffix.lower() != '.gpkg':
+        return left == right
+    import pyogrio
+
+    names = list(pyogrio.list_layers(source)[:, 0])
+    if len(names) == 1:
+        return left in {'', names[0]} and right in {'', names[0]}
+    return bool(left and left == right and left in names)
+
+
 def _selection(request, facts, inventory, member_digest):
     identity = hashlib.sha256(json.dumps(
-        [request.key, sorted(inventory.items()), member_digest], ensure_ascii=False).encode()
+        [request.key, sorted(inventory.items()), member_digest,
+         *([request.source_layer] if request.source_layer else [])], ensure_ascii=False).encode()
     ).hexdigest()
     return {'id': 'selection:' + identity, 'key': request.key,
             'member_sha256': member_digest, 'row_count': facts['row_count'],
@@ -99,7 +116,6 @@ def _selection(request, facts, inventory, member_digest):
 
 
 def _nearest_checks(source, request, resolve):
-    import geopandas as gpd
 
     from geoharness.execution.nearest import verify_nearest_distances
 
@@ -111,11 +127,12 @@ def _nearest_checks(source, request, resolve):
             raise ValueError('最近距离复核字段必须列入numeric_fields并声明单位m')
         reference = Path(resolve(check.reference_ref))
         assert_usable_artifact(reference)
-        before = _source_inventory(reference)
-        report = verify_nearest_distances(gpd.read_file(source), gpd.read_file(reference),
+        before = _source_inventory(reference, check.reference_layer)
+        report = verify_nearest_distances(_frame(source, request.source_layer),
+            _frame(reference, check.reference_layer),
             key=request.key, field=check.field, metric_crs=check.metric_crs,
             absolute_tolerance=check.absolute_tolerance)
-        if before != _source_inventory(reference):
+        if before != _source_inventory(reference, check.reference_layer):
             raise ValueError('距离复核期间参照数据发生变化')
         if report['status'] != 'passed':
             raise ValueError('nearest_distance_mismatch: ' + json.dumps(report, ensure_ascii=False))
@@ -123,15 +140,16 @@ def _nearest_checks(source, request, resolve):
     return reports
 
 
-def _frame(path):
+def _frame(path, source_layer=''):
     import geopandas as gpd
     import pandas as pd
 
-    return pd.read_csv(path) if path.suffix.lower() == '.csv' else gpd.read_file(path)
+    return pd.read_csv(path) if path.suffix.lower() == '.csv' else gpd.read_file(
+        path, **({'layer': source_layer} if source_layer else {}))
 
 
-def _compare_fields(source, baseline, key, fields, exceptions):
-    current, previous = _frame(source), _frame(baseline)
+def _compare_fields(source, baseline, key, fields, exceptions, source_layer='', baseline_layer=''):
+    current, previous = _frame(source, source_layer), _frame(baseline, baseline_layer)
     for frame in (current, previous):
         if key not in frame or frame[key].isna().any() or not frame[key].is_unique:
             raise ValueError('字段连续性要求前后结果具有同一唯一非空实体键')
@@ -157,8 +175,11 @@ def _compare_fields(source, baseline, key, fields, exceptions):
     if regressions:
         raise ValueError('字段连续性检测到派生字段退化：' + json.dumps(regressions,
             ensure_ascii=False) + '；保留已有值，或在field_changes说明真实的变更原因')
-    return {'source': str(baseline), 'source_inventory': _source_inventory(baseline),
-        'key': key, 'fields': sorted(fields), 'field_changes': exceptions}
+    return {'source': str(baseline),
+        'source_inventory': _source_inventory(baseline, baseline_layer),
+        'key': key, 'fields': sorted(fields), 'field_changes': exceptions,
+        **({'source_layer': source_layer, 'baseline_layer': baseline_layer}
+           if source_layer or baseline_layer else {})}
 
 
 def _continuity_checks(context, source, request, producer):
@@ -177,7 +198,8 @@ def _continuity_checks(context, source, request, producer):
         old = verify_package(ref, guard=guard)
         if old['request']['key'] != request.key:
             raise ValueError('carry_fields要求前后结果使用同一实体键')
-        candidates[old['facts']['source']] = set(request.carry_fields)
+        candidates[(old['facts']['source'], old['request'].get('source_layer', ''))] = set(
+            request.carry_fields)
     # Only follow measured producer dependencies to published fields. Never infer
     # lineage from filenames, similar IDs or unrelated earlier task outputs.
     document = json.loads(guard.read_path(producer['manifest']).read_text('utf-8'))
@@ -191,13 +213,15 @@ def _continuity_checks(context, source, request, producer):
             continue
         old = verify_package(ref, guard=guard)
         fields = set(old['request']['numeric_fields']) | set(old['request']['group_by'])
-        candidates.setdefault(previous, set()).update(fields)
+        candidates.setdefault((previous, old['request'].get('source_layer', '')), set()).update(
+            fields)
     reports = []
-    for baseline, fields in candidates.items():
+    for (baseline, baseline_layer), fields in candidates.items():
         path = guard.read_path(baseline)
-        if path.resolve() == source.resolve():
+        if path.resolve() == source.resolve() and baseline_layer == request.source_layer:
             raise ValueError('不能以当前结果本身作为字段连续性基线')
-        reports.append(_compare_fields(source, path, request.key, fields, request.field_changes))
+        reports.append(_compare_fields(source, path, request.key, fields, request.field_changes,
+            request.source_layer, baseline_layer))
     return reports or None
 
 
@@ -215,15 +239,16 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
     if not producer:
         raise ValueError('分析结果包需要已登记成功的分析产物；原始文件请先执行分析或显式复制结果')
     if source.suffix.lower() not in {'.csv', '.geojson', '.gpkg', '.shp', '.json'}:
-        raise ValueError('结果事实目前支持单图层矢量或CSV；不能将栅格类别代码直接平均')
+        raise ValueError('结果事实支持矢量指定图层或CSV；不能将栅格类别代码直接平均')
     if set(request.units) - set(request.numeric_fields):
         raise ValueError('units只能声明numeric_fields中已有字段的单位')
+    _source_inventory(source, request.source_layer)
     carry_report = _continuity_checks(context, source, request, producer)
     from geoharness.task_store import _safe
 
     if _safe(request.model_dump(mode='json'), context.metadata) != request.model_dump(mode='json'):
         raise ValueError('结果包声明包含凭证，请移除敏感内容')
-    inventory = _source_inventory(source)
+    inventory = _source_inventory(source, request.source_layer)
     task = context.metadata.get('geo_task_record')
     # Reuse an identical package, including issues/unknown method status.
     for reference in context.metadata.get('geo_task_record', {}).get('analysis_packages', []):
@@ -249,8 +274,8 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
     target = directory / 'facts.json'
     report = write_analysis_report(target, source=source, key=request.key,
         numeric_fields=request.numeric_fields, group_by=request.group_by,
-        predicates=request.predicates, method=request.method)
-    identity = _members(source, request.key)
+        predicates=request.predicates, method=request.method, source_layer=request.source_layer)
+    identity = _members(source, request.key, request.source_layer)
     if carry_report is not None:
         report['carry_fields'] = carry_report
     report.update(kind='analysis_result_package', request=request.model_dump(mode='json'),
@@ -278,7 +303,7 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
         execution_evidence['nearest_distance_status'] = 'independently_recomputed'
         execution_evidence['nearest_fields'] = [item.field for item in request.nearest_checks]
     report['execution_evidence'] = execution_evidence
-    if inventory != _source_inventory(source):
+    if inventory != _source_inventory(source, request.source_layer):
         raise ValueError('发布期间源数据发生变化，不能提交当前结果包')
     # Keep the visible report exactly aligned with the published package.
     markdown = directory / 'facts.md'
@@ -327,14 +352,14 @@ def verify_package(path: Path, *, guard=None):
     actual_producer = assert_usable_artifact(source)
     if actual_producer != report.get('producer'):
         raise ValueError('结果包的生产者来源发生变化')
-    inventory = _source_inventory(source)
+    inventory = _source_inventory(source, request.source_layer)
     if inventory != report.get('source_inventory'):
         raise ValueError('结果包源数据或伴随文件已经变化')
     actual = artifact_facts(source, key=request.key, numeric_fields=request.numeric_fields,
                             group_by=request.group_by, predicates=request.predicates,
-                            include_median=True)
+                            include_median=True, source_layer=request.source_layer)
     if (actual != report['facts'] or report['selection'] != _selection(
-            request, actual, inventory, _members(source, request.key))):
+            request, actual, inventory, _members(source, request.key, request.source_layer))):
         raise ValueError('结果包的统计或成员与当前源文件不一致，须重建')
     if report.get('units') != request.units or report.get('method') != request.method:
         raise ValueError('结果包的单位或方法声明不一致')
@@ -342,10 +367,12 @@ def verify_package(path: Path, *, guard=None):
         baseline = Path(check['source'])
         if guard:
             baseline = guard.read_path(str(baseline))
-        if _source_inventory(baseline) != check['source_inventory']:
+        if _source_inventory(baseline, check.get('baseline_layer', '')) != check[
+                'source_inventory']:
             raise ValueError('字段连续性基线已变化，不能复用结果包')
         if _compare_fields(source, baseline, check['key'], check['fields'],
-                check['field_changes']) != check:
+                check['field_changes'], check.get('source_layer', ''),
+                check.get('baseline_layer', '')) != check:
             raise ValueError('字段连续性证据与当前结果不一致')
     evidence = report.get('execution_evidence', {})
     if request.nearest_checks:
@@ -373,6 +400,8 @@ def infer_packages(metadata, mapped_sources):
     sources = {str(Path(item.get('file_path', item) if isinstance(item, dict) else item).resolve())
                for item in mapped_sources if item and (
                    not isinstance(item, dict) or item.get('file_path'))}
+    views = {(str(Path(item['file_path']).resolve()), item.get('source_layer', ''))
+             for item in mapped_sources if isinstance(item, dict) and item.get('file_path')}
     result = []
     for reference in metadata.get('geo_task_record', {}).get('analysis_packages', []):
         path = Path(reference)
@@ -384,6 +413,10 @@ def infer_packages(metadata, mapped_sources):
         except (OSError, ValueError, KeyError, TypeError):
             continue
         if related_source not in sources:
+            continue
+        layer = locator.get('request', {}).get('source_layer', '')
+        if not any(candidate == related_source and same_source_view(Path(candidate), layer, view)
+                   for candidate, view in views) and layer:
             continue
         verify_package(path)
         result.append(reference)

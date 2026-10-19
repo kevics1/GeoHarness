@@ -1069,6 +1069,34 @@ def map_mutation_state(metadata, *, cwd, config, map_id) -> dict:
                 "mutation": copy.deepcopy(job.get("mutation") or {})}
 
 
+def page_review_requirements(metadata, *, cwd, config, map_id, updates=None):
+    """Persist acceptance requirements and invalidate only pages they change."""
+    with _LOCK:
+        directory = _directory(cwd, config)
+        job, index = _job(directory, map_id), _index(directory)
+        current = copy.deepcopy(job.get('page_review_requirements', {}))
+        updates = updates or {}
+        changed = {key for key, value in updates.items()
+                   if current.get(key, []) != value}
+        current.update(updates)
+        if changed:
+            job['page_review_requirements'] = current
+            for version in job.get('versions', []):
+                pages = _map_page_files(version)
+                for n, page in pages.items():
+                    if (page.get('page_id') or str(n)) in changed:
+                        stage = version.get('page_reviews', {}).get(str(n))
+                        if stage:
+                            stage['status'] = 'stale'
+                            stage.pop('page_contract', None)
+                        if n == 0:
+                            version['stages'].setdefault('visual_checked', {})['status'] = 'stale'
+                _aggregate_page_reviews(version, pages)
+            _save(directory, job, index)
+            _sync_state(metadata, cwd, directory, index)
+        return current
+
+
 def record_map_draft(map_id, metadata, *, cwd, config, spec_ref) -> None:
     if not re.fullmatch(r"qgis-spec:[0-9a-f]{64}", spec_ref):
         raise ValueError("Editable draft requires an actual qgis-spec reference")
