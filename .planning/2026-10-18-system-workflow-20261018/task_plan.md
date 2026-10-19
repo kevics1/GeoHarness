@@ -54,3 +54,7 @@ G3 engineering_checked / business_acceptance_pending：统一Scene与非QGIS渲�
 H轮 implementation_in_progress（2026-10-19 用户已授权）：森林火灾改1审图放大修复。H1稳定逐页验收合同/只送受影响页面，真实4页首次4次、只改2页则新增2次，换进度措辞0次；H2定向问题复核与有证据处置；H3分页文字/覆盖约束/原生排版改进；H4多层GPKG与分析视图身份；H5集成、独立审查、wheel/安装/CLI。诊断见diagnostics/2026-10-19-review-amplification-audit.md。保持high和用户配置、不修改业务输入与既有.env.example，不设时间/调用硬上限。
 
 H轮 engineering_checked / business_acceptance_pending：H1–H4已实施并安装，H5工程集成完成、有效独立审查仍未完成。首轮wheel74项和安装14项通过；数量承诺补强后最终wheel14项、实际安装9项通过，134模块+34技能资源零差异，CLI17工具通过。配置SHA/high保持，制图与审图不启动QGIS、交付一次生成工程的真实链通过。模拟客户端请求数验证不替代真实视觉质量或完整业务速度验收；任意跨页文字/复杂符号检测、锁冲突全来源、未知中断显式恢复仍有边界，不称全局业务已收敛。
+
+I轮 implementation_in_progress（2026-10-20用户授权）：以最新57分33秒会话为基线。I1目标节点依赖与同轮文件校验；I2纸面布局编译、真实区域合同；I3稳定页ID问题/区域迁移与退役；I4验收要求与修复备注分离、观察与裁决；I5真实链、回归、独立审查、wheel/安装/CLI。主模型high及视觉/用户配置保持，不设时间或调用硬上限。
+
+I轮 engineering_checked / business_acceptance_pending：I1–I4实现并安装；I5工程链及发布检查完成，有效独立审查仍缺失。扩大源码141项、集成wheel24项、最终wheel14项、实际安装9项通过，计数重叠不合计；135模块+34资源零差异，CLI17工具通过。受控实际视觉三页通过、重建任务后零请求复用真实三份报告；此前总览warning原报告保留，不能称视觉模型零误判。真实完整high主模型业务对话耗时仍待新会话验收，20分钟不是硬预算。详见diagnostics/2026-10-20-review-system-repair-validation.md。

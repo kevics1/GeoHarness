@@ -112,12 +112,12 @@ def _references(value):
             yield from _references(item)
 
 
-def submit_plan(context, nodes: list[TaskNode], *, replace=False):
+def submit_plan(context, nodes: list[TaskNode], *, replace=False, _return_status=True):
     with execution_lock(_directory(context)):
-        return _submit_plan(context, nodes, replace=replace)
+        return _submit_plan(context, nodes, replace=replace, _return_status=_return_status)
 
 
-def _submit_plan(context, nodes: list[TaskNode], *, replace=False):
+def _submit_plan(context, nodes: list[TaskNode], *, replace=False, _return_status=True):
     """Upsert by default; deleting omitted nodes requires explicit replacement."""
     directory = _directory(context)
     if not nodes or len(nodes) > 64:
@@ -185,7 +185,9 @@ def _submit_plan(context, nodes: list[TaskNode], *, replace=False):
     from geoharness.task_store import save_record
 
     save_record(context.metadata, cwd=context.cwd)
-    return plan_status(context)
+    return (plan_status(context) if _return_status else
+            {'task_id': context.metadata['geo_task_record']['task_id'],
+             'updated_nodes': sorted(changed)})
 
 
 def _inventory(arguments, context):
@@ -308,21 +310,42 @@ def _artifacts(result):
     return files
 
 
-def _valid_artifacts(files):
+def _valid_artifacts(files, *, digests=None):
+    """Share digests only within this validation pass, never across executions."""
+    digests = {} if digests is None else digests
     try:
-        return bool(files) and all(Path(path).is_file() and sha256_file(Path(path)) == digest
-                                   for path, digest in files.items())
+        for path, expected in files.items():
+            canonical = Path(path).resolve()
+            if not canonical.is_file():
+                return False
+            if canonical not in digests:
+                digests[canonical] = sha256_file(canonical)
+            if digests[canonical] != expected:
+                return False
+        return bool(files)
     except OSError:
         return False
 
 
-def plan_status(context):
+def plan_status(context, *, node_id=''):
     directory = _directory(context)
     with connect(directory) as db:
         rows = {row['id']: dict(row) for row in db.execute('SELECT * FROM nodes ORDER BY rowid')}
+    if node_id:
+        selected = set()
+        def include(identity):
+            if identity not in rows:
+                raise ValueError('Unknown node_id')
+            if identity not in selected:
+                selected.add(identity)
+                for dep in TaskNode.model_validate_json(rows[identity]['definition']).depends_on:
+                    include(dep)
+        include(node_id)
+        rows = {identity: row for identity, row in rows.items() if identity in selected}
     summaries = []
     valid = set()
     checked = set()
+    digests = {}
 
     def check(identity):
         if identity in checked:
@@ -331,7 +354,7 @@ def plan_status(context):
         row = rows[identity]
         node = TaskNode.model_validate_json(row['definition'])
         if (row['status'] == 'succeeded' and all(check(dep) for dep in node.depends_on)
-                and _valid_artifacts(json.loads(row['artifacts'] or '{}'))):
+                and _valid_artifacts(json.loads(row['artifacts'] or '{}'), digests=digests)):
             try:
                 dependencies = json.loads(row['dependencies'] or '{}')
                 environment = _environment(node, context)
@@ -339,7 +362,7 @@ def plan_status(context):
                     return False
                 captured = dependencies.get('inputs', {})
                 if captured and not _valid_artifacts({v['path']: v['sha256']
-                                                      for v in captured.values()}):
+                                                      for v in captured.values()}, digests=digests):
                     return False
                 expected = _hash([node.model_dump(mode='json'), environment, captured,
                                   {d: rows[d]['fingerprint'] for d in node.depends_on}])
@@ -364,6 +387,7 @@ def plan_status(context):
     return {'task_id': context.metadata['geo_task_record']['task_id'], 'nodes': summaries,
             'ready': [n['id'] for n in summaries if n['status'] == 'ready'],
             'complete': bool(rows) and len(valid) == len(rows),
+            'validation_scope': 'target_and_dependencies' if node_id else 'full_plan',
             'quality': 'execution_dependencies_only; consult_map_ledger_and_analysis_packages'}
 
 
@@ -407,7 +431,7 @@ async def execute_direct(context, tool, arguments):
         # Serialize them with an asyncio lock, not a synchronous wait inside the
         # event loop; submit_plan and run_plan must share that critical section.
         async with _in_process_task_lock(context):
-            submit_plan(context, [node])
+            submit_plan(context, [node], _return_status=False)
             state = await run_plan(context, node_id=identity, _lock_held=True)
         selected = next(item for item in state['nodes'] if item['id'] == identity)
         if selected['status'] == 'interrupted' or not selected['operation_id']:
@@ -473,9 +497,10 @@ async def _run_plan_locked(context, *, directory, node_id=''):
         checker = context.metadata.get('geoharness_permission_checker') or (
             _build_permission_checker(context.metadata['geoharness_config']))
         completed = []
-        reused = [n['id'] for n in plan_status(context)['nodes'] if n['status'] == 'succeeded']
+        reused = [n['id'] for n in plan_status(context, node_id=node_id)['nodes']
+                  if n['status'] == 'succeeded']
         while True:
-            state = plan_status(context)
+            state = plan_status(context, node_id=node_id)
             statuses = {item['id']: item['status'] for item in state['nodes']}
             if node_id and node_id not in statuses:
                 raise ValueError('Unknown node_id')
@@ -612,7 +637,7 @@ async def _run_plan_locked(context, *, directory, node_id=''):
                 raise
             if node_id:
                 break
-        state = plan_status(context)
+        state = plan_status(context, node_id=node_id)
         with connect(directory) as db:
             rows = {r['id']: dict(r) for r in db.execute('SELECT * FROM nodes')}
         for item in state['nodes']:

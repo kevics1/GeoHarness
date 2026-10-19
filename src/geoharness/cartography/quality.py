@@ -132,6 +132,11 @@ class MapIssue(BaseModel):
         description='Optional explanation of severity; descriptive, never a repair instruction.')
     description: str
     location: str = ""
+    reading_impact: Literal['unspecified', 'none', 'unreadable', 'ambiguous', 'hidden',
+                            'clipped', 'misleading', 'uncertain'] = 'unspecified'
+    affected_content: str = Field(default='', max_length=160)
+    assessment_scope: Literal['current_page', 'other_page', 'data_semantics', 'preference'] = (
+        'current_page')
     issue_id: str = Field(default="", max_length=80)
     frame_id: str = Field(default="", max_length=80)
     roi_ref: str = Field(default="", max_length=100)
@@ -174,8 +179,14 @@ class _IncompleteReview(Exception):
 def distinguish_pixel_findings(result):
     """Preserve source questions/preferences without certifying them as pixel defects."""
     observations = []
+    uncertain = []
     for issue in result.issues:
-        if issue.evidence_kind in {'semantic', 'suggestion'} and issue.severity != 'info':
+        outside = issue.assessment_scope != 'current_page'
+        no_impact = issue.reading_impact == 'none'
+        if issue.reading_impact == 'uncertain' and not outside:
+            uncertain.append(issue.model_dump())
+        if (issue.evidence_kind in {'semantic', 'suggestion'} or outside or no_impact
+                or issue.reading_impact == 'uncertain') and issue.severity != 'info':
             observations.append(issue.model_dump())
             issue.severity = 'info'
     if observations:
@@ -185,7 +196,12 @@ def distinguish_pixel_findings(result):
             '主模型须核对来源，未知且影响业务时询问用户。')
         if result.status == 'issues' and not any(i.severity in {'warning', 'error'}
                                                 for i in result.issues):
-            result.status = 'passed'
+            result.status = 'unverified' if uncertain else 'passed'
+    if uncertain:
+        if result.status == 'passed':
+            result.status = 'unverified'
+        result.diagnostics['uncertain_pixel_observations'] = uncertain
+        result.limitations.append('存在无法确证的关键像素观察；保持unverified，不以猜测升级为通过。')
 
 
 def resolve_issue_roi(issue: MapIssue, rois: list[dict]) -> dict:
@@ -549,7 +565,7 @@ def _review_images(path: Path, evidence: dict[str, Any], settings: Any) -> tuple
             regions.pop(name, None)
     if page_legend is not None:
         regions["legend"] = page_legend
-    if metadata.get("creation_spec_available") is False:
+    if metadata.get("creation_spec_available") is False and not native_frames:
         regions.pop("footer", None)  # Legacy custom-property regions may describe an older layout.
     page = layout.get("effective_parameters") or layout.get("creation_parameters") or {}
     if page_index == 0 and page.get("detail_placement") == "page":
@@ -569,7 +585,10 @@ def _review_images(path: Path, evidence: dict[str, Any], settings: Any) -> tuple
                 and isinstance(page_height, (int, float)) and page_height > 0):
             return blocks, catalog
         candidates = []
-        for name in ("main_map", "detail_map", "legend", "footer"):
+        names = list(dict.fromkeys([*native_frames, 'main_map', 'detail_map',
+                                    'table', 'legend', 'footer']))
+        boxes_seen = set()
+        for name in names:
             rect = regions.get(name)
             if not (isinstance(rect, list) and len(rect) == 4
                     and all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect)):
@@ -580,7 +599,9 @@ def _review_images(path: Path, evidence: dict[str, Any], settings: Any) -> tuple
                    min(width, math.ceil((x + w) * width / page_width)),
                    min(height, math.ceil((y + h) * height / page_height))]
             if box[0] < box[2] and box[1] < box[3]:
-                candidates.append((name, box))
+                if tuple(box) not in boxes_seen:
+                    candidates.append((name, box))
+                    boxes_seen.add(tuple(box))
         used = 0
         for position, (name, box) in enumerate(candidates):
             if used >= max_rois:
@@ -1041,7 +1062,8 @@ async def review_map(
         supplied = evidence.get("review_binding") or {}
         diagnostics["review_binding"] = {
             **{key: supplied[key] for key in ("map_id", "version", "manifest_sha256",
-                "source_bindings_sha256", "page_index", "primary_image_sha256") if key in supplied},
+                  "source_bindings_sha256", "page_index", "page_id", "primary_image_sha256")
+               if key in supplied},
             "image_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
         if result.status == "unverified":

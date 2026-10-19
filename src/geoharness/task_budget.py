@@ -26,7 +26,7 @@ def budget_context(metadata, config):
     if not status:
         return ""
     return ("\n任务耗时观测（不是截止时间或调用额度）：" + json.dumps(status) + "。"
-            "优先复用有效结果，把核实后的相关修复合并到一次build(spec_ref, edits)。"
+            "优先复用有效结果，把核实后的相关修复合并到一次render(scene_ref, edits)。"
             "按变化审查页面，完成时核对全部页面；图片审查只报告问题、不重建。"
             "不因超过时间目标而提前结束、降低质量或强制交付草稿。"
             "准确说明未解决项，不能把未验证标为通过。\n")

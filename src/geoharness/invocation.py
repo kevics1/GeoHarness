@@ -27,6 +27,8 @@ NATIVE_CARTOGRAPHY_CAUTIONS = (
     "整套 scene。渲染返回 layout.problems 与 page_previews，先修确定缺陷再审图。",
     "geo_map_review(all_pages=true) 只读取实际页面像素并登记审查；不改图。"
     "全部必要页面通过且没有待处置问题后，geo_deliver 才生成一次可编辑工程。",
+    "Page.layout自动编译图框/图例；label_offsets_mm与locator_pages处理文字/引线/范围框，"
+    "不需要Python测图或复制辅助业务数据。验收职责写purpose/review_requirements，修复进度写repair_notes。",
 )
 
 QGIS_CAUTIONS = (

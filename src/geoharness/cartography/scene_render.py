@@ -102,6 +102,9 @@ def _sources(scene, context):
                 if original.iloc[i][source.key] in source.select_keys]}
         if source.label_field and not source.key:
             raise ValueError('标注必须声明唯一实体key以绑定文字和真实对象')
+        if (source.label_offsets_mm and set(source.label_offsets_mm)
+                - set(frame[source.key].map(str))):
+            raise ValueError('label_offsets_mm引用不存在的实体key：' + source.id)
         if source.symbol.categories:
             if not source.symbol.field:
                 raise ValueError('categories必须声明真实field')
@@ -256,20 +259,51 @@ def _page_words(text, values):
         raise ValueError('页面模板含未知字段或格式；只使用工具Schema说明的模板字段') from exc
 
 
+def _compiled_page_layout(fig, page, frames, layers, scene, font):
+    from matplotlib.font_manager import FontProperties
+
+    from geoharness.cartography.scene_layout import compile_layout
+
+    ids = page.layers or [item['id'] for item in layers]
+    ordered_layers = [next(layer for layer in layers if layer['id'] == key) for key in ids]
+    legend_items = []
+    for layer in ordered_layers:
+        if layer['kind'] != 'vector' or not len(frames[layer['id']]):
+            continue
+        kind, symbol = frames[layer['id']].geometry.geom_type.iloc[0], layer['symbol']
+        for entry in (symbol['categories'] or [{'label': layer['name'] or layer['id'],
+                'color': symbol['color']}]) if layer.get('show_in_legend', True) else []:
+            legend_items.append({'label': entry['label'], 'color': entry['color'],
+                'kind': 'point' if 'Point' in kind else 'line' if 'Line' in kind else 'polygon',
+                'symbol': symbol})
+    legend_items = list({digest(entry): entry for entry in legend_items}.values())
+    for number, _ in enumerate(page.locator_pages, 1):
+        legend_items.append({'label': '局部详图范围' + (str(number)
+            if len(page.locator_pages) > 1 else ''), 'color': '#222222', 'kind': 'line',
+            'symbol': {'width_mm': .3, 'opacity': 1, 'outline': '#222222'}})
+    prop = FontProperties(family=font, size=8)
+    def measure(label):
+        return fig.canvas.get_renderer().get_text_width_height_descent(label, prop, False)[0] * (
+            25.4 / scene.dpi)
+
+    layout = compile_layout(scene, page, _bounds(page, frames, scene),
+                            [entry['label'] for entry in legend_items], measure)
+    return ordered_layers, legend_items, layout
+
+
 def _draw_map(fig, page, frames, layers, scene, font, resolved):
     from matplotlib.lines import Line2D
     from matplotlib.patches import Ellipse, Rectangle
 
-    box = [9, 25, scene.width_mm - 69, scene.height_mm - 45]
-    if box[2] <= 30 or box[3] <= 30:
-        raise ValueError('纸张太小，无法布置图框和图例')
+    ordered_layers, legend_items, layout = _compiled_page_layout(
+        fig, page, frames, layers, scene, font)
+    ids = [layer['id'] for layer in ordered_layers]
+    box, extent = layout['map_rect_mm'], layout['extent']
+    resolved['paper_layout'] = layout
     ax = fig.add_axes([box[0] / scene.width_mm,
         1 - (box[1] + box[3]) / scene.height_mm,
         box[2] / scene.width_mm, box[3] / scene.height_mm])
-    extent = _bounds(page, frames, scene)
-    ids = page.layers or [item['id'] for item in layers]
-    ordered_layers = [next(layer for layer in layers if layer['id'] == key) for key in ids]
-    legend_items = []
+    ax.set_anchor('NW')
     for draw_index, layer in enumerate(ordered_layers, start=1):
         if layer['kind'] == 'raster':
             import rasterio
@@ -314,12 +348,6 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
         elif 'Polygon' in kind:
             kwargs['edgecolor'] = _rgba(symbol['outline'], symbol['opacity'])
         frame.plot(**kwargs)
-        legend = symbol['categories'] or [{'label': layer['name'] or layer['id'],
-                                           'color': symbol['color']}]
-        for entry in legend if layer.get('show_in_legend', True) else []:
-            legend_items.append({'label': entry['label'], 'color': entry['color'],
-                'kind': 'point' if 'Point' in kind else 'line' if 'Line' in kind else 'polygon',
-                'symbol': symbol})
     ax.set_xlim(extent[0], extent[2])
     ax.set_ylim(extent[1], extent[3])
     ax.set_aspect('equal', adjustable='box')
@@ -330,15 +358,33 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
     resolved['frame'] = {'id': page.id, 'crs': scene.crs, 'extent': extent, 'layers': ids,
         'rect_mm': [actual.x0 * scene.width_mm, (1 - actual.y1) * scene.height_mm,
                     actual.width * scene.width_mm, actual.height * scene.height_mm]}
+    resolved['locator_frames'] = []
+    for target_id in page.locator_pages:
+        target = next(p for p in scene.pages if p.id == target_id)
+        _, _, target_layout = _compiled_page_layout(fig, target, frames, layers, scene, font)
+        xmin,ymin,xmax,ymax = target_layout['extent']
+        coords = [(xmin,ymin),(xmax,ymin),(xmax,ymax),(xmin,ymax),(xmin,ymin)]
+        ax.plot(*zip(*coords),color='#222222',linewidth=.3*72/25.4,
+                zorder=len(ordered_layers)+.5)
+        # Match the actual map frame's clipping; never export a line outside it.
+        from shapely.geometry import LineString
+        from shapely.geometry import box as shape_box
+
+        visible = LineString(coords).intersection(shape_box(*extent))
+        segments = [visible] if visible.geom_type == 'LineString' else getattr(visible,'geoms',[])
+        for segment in segments:
+            if segment.is_empty or segment.geom_type != 'LineString':
+                continue
+            pixels = ax.transData.transform(list(segment.coords))
+            resolved.setdefault('lines',[]).append({'points_mm':[
+                [x*25.4/scene.dpi,scene.height_mm-y*25.4/scene.dpi] for x,y in pixels],
+                'width_mm':.3})
+        resolved['locator_frames'].append({'page_id':target_id,'extent':target_layout['extent']})
     resolved['legend_items'] = []
-    unique = {}
-    for entry in legend_items:
-        unique.setdefault(digest(entry), entry)
-    for i, entry in enumerate(unique.values()):
-        x, y = scene.width_mm - 55, 26 + i * 6
-        if y > scene.height_mm - 23:
-            resolved['problems'].append({'code': 'legend_overflow'})
-        _page_text(fig, entry['label'], x + 7, y, 8, font, scene, resolved, width=47)
+    for entry, cell in zip(legend_items, layout['legend_cells_mm']):
+        x, y, cell_width, _ = cell
+        _page_text(fig, entry['label'], x + 7, y, 8, font, scene, resolved,
+                   width=cell_width-9, wrap=True)
         entry.update(rect_mm=[x, y, 5, 3])
         resolved['legend_items'].append(entry)
         if entry['kind'] == 'point':
@@ -391,6 +437,9 @@ def _draw_map(fig, page, frames, layers, scene, font, resolved):
             offsets = [(r * dx, r * dy) for r in (radius, radius+8, radius+16, radius+28)
                        for dx, dy in [(1, 1), (1, -1), (-1, 1), (-1, -1),
                                       (1, 0), (0, 1), (-1, 0), (0, -1)]]
+            explicit = layer.get('label_offsets_mm', {}).get(str(row[layer['key']]))
+            if explicit is not None:
+                offsets = [(explicit[0]*72/25.4, explicit[1]*72/25.4)]
             for dx, dy in offsets:
                 item = ax.annotate(text, (point.x, point.y), xytext=(dx, dy),
                     textcoords='offset points', fontsize=layer['label_size_pt'],
@@ -490,7 +539,9 @@ def _render(scene, scene_ref, context):
 
 
     frames, layers, inventory, facts = _sources(scene, context)
-    implementation = _sha(__file__)
+    from geoharness.cartography import scene_layout
+
+    implementation = digest([_sha(__file__), _sha(scene_layout.__file__)])
     font, font_path = _font(scene)
     key = digest({'scene': scene.model_dump(mode='json'), 'inventory': inventory,
                   'analysis': facts, 'renderer': implementation, 'font_sha256': _sha(font_path)})
@@ -525,6 +576,10 @@ def _render(scene, scene_ref, context):
                                     [layer['id'] for layer in layers])
                     selected_ids = set(selected_ids) | set(page.focus_layers) | {
                         name for rule in page.coverage for name in [rule.layer, *rule.drawn_layers]}
+                    locator_targets = [p for p in scene.pages if p.id in page.locator_pages]
+                    for target in locator_targets:
+                        selected_ids.update(target.layers or [layer['id'] for layer in layers])
+                        selected_ids.update(target.focus_layers)
                     selected_layers = [layer for layer in layers if layer['id'] in selected_ids]
                     page_key = digest({'page': page.model_dump(mode='json'), 'chunk': chunk,
                         'layers': selected_layers, 'sources': {k: v for k, v in inventory.items()
@@ -533,6 +588,7 @@ def _render(scene, scene_ref, context):
                         'crs': scene.crs, 'width': scene.width_mm, 'height': scene.height_mm,
                         'title': page.title or scene.title, 'dpi': scene.dpi,
                         'formats': scene.extra_formats,
+                        'locator_targets': [p.model_dump(mode='json') for p in locator_targets],
                         'font_sha': _sha(font_path), 'implementation': implementation})
                     cache = directory(context) / 'page-cache' / page_key
                     record = cache / 'page.json'
@@ -555,6 +611,8 @@ def _render(scene, scene_ref, context):
                                 extents.append(resolved['frame']['extent'])
                             previews.append({'page_id': identity, 'page_index': index,
                                 'path': filename, 'role': page.role, 'content_key': page_key,
+                                'purpose': page.purpose,
+                                'review_requirements': page.review_requirements,
                                 'frames': [page.id] if resolved['frame'] else [], 'reused': True})
                             files.append(filename)
                             continue
@@ -646,6 +704,7 @@ def _render(scene, scene_ref, context):
                     resolved_pages.append(resolved)
                     previews.append({'page_id': identity, 'page_index': index,
                         'path': filename, 'role': page.role,
+                        'purpose': page.purpose, 'review_requirements': page.review_requirements,
                         'frames': [page.id] if resolved['frame'] else [],
                         'content_key': page_key, 'reused': False})
                     files.append(filename)
@@ -704,8 +763,25 @@ def _render(scene, scene_ref, context):
             'scene_ref': scene_ref, 'scene_plan_sha256': _sha(folder / 'scene-plan.json'),
             'source_inventory': inventory, 'analysis': facts, 'crs': scene.crs,
             'layers': layers, 'extent': extents[0] if extents else [0, 0, 1, 1],
-            'native_facts': {'page_previews': previews}, 'quality_status': 'draft',
-            'layout': {'pages': len(previews), 'bounds_check': {'checked': True,
+            'native_facts': {'page_previews': previews,
+                'frames': {p['frame']['id']: {**p['frame'], 'page_index': p['page_index'],
+                    'page_id': p['page_id'], 'purpose': next((v.purpose for v in scene.pages
+                        if p['page_id'] == v.id), ''),
+                    'label_sources': [layer['id'] for layer in layers
+                        if layer['id'] in p['frame']['layers'] and layer['label_field']]}
+                    for p in resolved_pages if p.get('frame')}}, 'quality_status': 'draft',
+            'layout': {'pages': len(previews),
+                'effective_parameters': {'width_mm': scene.width_mm, 'height_mm': scene.height_mm},
+                'page_regions': {str(p['page_index']): {
+                    **({p['frame']['id']: p['frame']['rect_mm']} if p.get('frame') else {}),
+                    **({'table': p['table']['rect_mm']} if p.get('table') else {}),
+                    **({'legend': p['paper_layout']['legend_rect_mm']}
+                       if p.get('paper_layout') and p.get('legend_items') else {}),
+                    'footer': [65, scene.height_mm-14, scene.width_mm-74, 12]}
+                    for p in resolved_pages},
+                'paper_layouts': {p['page_id']: p.get('paper_layout') for p in resolved_pages
+                                  if p.get('paper_layout')},
+                'bounds_check': {'checked': True,
                 'valid': not problems, 'problems': problems,
                 'scope': 'measured_text_bounds_labels_point_symbols_leaders_declared_coverage; '
                          'not_all_symbol_shapes_or_business_semantics'}},
@@ -725,6 +801,6 @@ def _result(folder, doc, reused=False):
         'backend': 'matplotlib', 'project_fidelity': doc['project_fidelity'],
         'scene_ref': doc['scene_ref'], 'scene_plan_sha256': doc['scene_plan_sha256'],
         'analysis': doc['analysis'], 'layout': doc['layout'], 'extent': doc['extent'],
-        'native_facts': {'page_previews': [{**p, 'path': str(folder / p['path'])}
-                                        for p in doc['native_facts']['page_previews']]},
+        'native_facts': {**doc['native_facts'], 'page_previews': [
+            {**p, 'path': str(folder / p['path'])} for p in doc['native_facts']['page_previews']]},
         'render_executed': not reused, 'reused': reused}

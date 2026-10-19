@@ -613,7 +613,7 @@ def artifact_metadata(path: Path, *, succeeded: bool) -> dict:
 
 def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
                    metric_crs=None, group_by=(), include_median: bool = False,
-                   stratify_by=(), source_layer: str = '') -> dict:
+                   stratify_by=(), source_layer: str = '', missing_by=()) -> dict:
     """Recompute bounded statistics from a persisted table/vector, with its fingerprint.
 
     Predicates are {name, field, op, value}; missing values never count as matches.
@@ -650,6 +650,19 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
             {'value': None if pd.isna(value) else value.item()
                 if hasattr(value, 'item') else value, 'count': int(count)}
             for value, count in frame[field].value_counts(dropna=False, sort=False).items()]
+    if missing_by:
+        if (len(set(missing_by)) != len(missing_by) or any(f not in frame for f in missing_by)
+                or len(missing_by) > 8):
+            raise ValueError('missing_by需要最多8个互不重复的实际类别字段')
+        result['missing_by'], result['missing_by_fields'] = [], list(missing_by)
+        for values, subset in frame.groupby(list(missing_by), dropna=False, sort=False):
+            values = values if isinstance(values, tuple) else (values,)
+            result['missing_by'].append({'group': {field: None if pd.isna(value) else
+                value.item() if hasattr(value,'item') else value
+                for field,value in zip(missing_by,values)}, 'row_count':len(subset),
+                'numeric':{field:{'count':int(subset[field].notna().sum()),
+                                 'missing':int(subset[field].isna().sum())}
+                           for field in numeric_fields if field in subset}})
     for field in numeric_fields:
         if field not in frame:
             raise ValueError(f'Fact field {field!r} missing; actual fields={list(frame.columns)}')
@@ -711,7 +724,7 @@ def _report_paths(path):
 
 def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=(),
                           group_by=(), predicates=(), method: dict, claims=(),
-                          stratify_by=(), source_layer: str = '') -> dict:
+                          stratify_by=(), source_layer: str = '', missing_by=()) -> dict:
     """从落盘结果生成同源JSON/中文Markdown；方法为声明，任意报告文本不受认证。"""
     path, markdown_path = _report_paths(path)
     source_path = Path(source).resolve()
@@ -719,7 +732,8 @@ def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=()
         raise ValueError('Report must not overwrite its source')
     facts = artifact_facts(source, key=key, numeric_fields=numeric_fields,
                            group_by=group_by, predicates=predicates, include_median=True,
-                           stratify_by=stratify_by, source_layer=source_layer)
+                           stratify_by=stratify_by, source_layer=source_layer,
+                           missing_by=missing_by)
     checked = check_claims(facts, list(claims)) if claims else None
     if checked and checked['status'] != 'passed':
         raise ValueError('Declared analysis claims disagree with persisted facts: '

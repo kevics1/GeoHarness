@@ -144,6 +144,7 @@ class MeasuredTool:
 
     def _remember_result(self, result, arguments):
         fields = {"status", "spec_ref", "latest_spec_ref", "manifest_path", "result_path",
+                  "scene_ref", "reviewed_pages", "reused_pages", "pending_pages",
                   "preview_path", "project_manifest", "map_id", "quality_status",
                   "analysis_status", "analysis_correctness", "summary_path", "report_path",
                   "build_call", "create_call", "inspect_call", "plan_ref", "run_dir",

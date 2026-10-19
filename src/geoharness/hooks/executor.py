@@ -77,8 +77,8 @@ class GeoHookExecutor(HookExecutor):
                         "模型返回的工具参数无效；本次工具没有执行。"
                         + json.dumps(safe, ensure_ascii=False)
                         + "。仅重发失败的完整有效调用，保留此前成功结果，不猜测坐标或字段。"
-                        "QGIS变更优先使用build(spec_ref, edits)；旧冻结创建流程仅传"
-                        "action=create与返回的plan_ref。"
+                        "普通制图使用geo_cartography render(scene_ref, edits)；"
+                        "审查通过后由geo_deliver一次生成QGIS工程。"
                     ),
                     metadata={"argument_diagnostic": safe},
                 )])

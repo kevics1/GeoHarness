@@ -90,6 +90,8 @@ class GeoNativeMapTool(BaseTool):
         '返回实际页面路径、稳定ID、字段/布局诊断；geo_map_review(all_pages=true)只读审图；'
         '全部必要页面通过后geo_deliver(project_dir)才一次生成可编辑QGIS工程。'
         '图例categories使用实际字段值；名册自动续页。不会通过移动真实对象修复标注。'
+        'Page.layout自动求解图框/图例；label_offsets_mm可调整文字并自动生成引线，'
+        'locator_pages自动绘制实际详图范围框，不要用Python重复造标签点、引线或测PNG图框。'
         '不清楚业务含义时问用户；不要调用geo_qgis_project反复构建。'
     )
     input_model = NativeMapInput
@@ -125,10 +127,17 @@ class GeoNativeMapTool(BaseTool):
                         'Layer.key': '唯一非空实体字段；select_keys/标注时必须提供。',
                         'Layer.select_keys': '按key选择对象；null保留全部，空数组为空集。',
                         'Layer.label_field': '真实字段；只避让文字，不移动几何。',
+                        'Layer.label_offsets_mm': '实体key字符串到[dx,dy]毫米偏移；只移文字，'
+                            '自动连回真实点位，不需要另写/发布标签点和引线文件。',
                         'Layer.show_in_legend': '重复强调或辅助编号层可设false；仍绘制对象。',
                         'Layer.symbol.categories': '按真实分类值声明label/color；未声明值会拒绝。',
                         'Page.layers': '从底到顶的Layer.id；不填使用全部。',
                         'Page.extent': 'xmin,ymin,xmax,ymax；与focus_layers二选一。',
+                        'Page.layout': '默认auto比较侧栏/上栏/下栏，最大化地图面积；'
+                            'manual须传map_rect_mm，可传legend_rect_mm；fit=frame仅向外扩范围。',
+                        'Page.locator_pages': '其他地图页ID；本页定位框始终绑定目标实际取景。',
+                        'Page.purpose/review_requirements': '稳定页面职责/必需可见内容，'
+                            '可说明总览只显示最终时段、演变由详图承担；不是每轮修复进度。',
                         'Page.table': '名册定义layer/fields/headers/sort_by；自动续页不截断。',
                         'Page.coverage': '声明layer/drawn_layers/可选keys；系统按实体键、几何、'
                             '当前范围核对覆盖承诺，避免标题35处却只画12处。',
@@ -209,6 +218,11 @@ class GeoNativeMapTool(BaseTool):
                 receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
                                           artifact_path=Path(result['preview_path']))
             problems = result.get('layout', {}).get('bounds_check', {}).get('problems', [])
+            from geoharness.cartography.review_findings import sync_review_pages
+
+            sync_review_pages(context.metadata, cwd=context.cwd, map_id=identity,
+                pages=result['native_facts']['page_previews'],
+                version=receipt.get('selected_version'), receipt=receipt)
             visible = {key: result[key] for key in ('scene_ref', 'project_dir', 'preview_path',
                 'output_path', 'reused', 'render_executed', 'layout', 'native_facts')}
             page_reviews = receipt.get('stages', {}).get('visual_checked', {}).get(

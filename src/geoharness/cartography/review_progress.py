@@ -20,6 +20,8 @@ def _same_concern(left, right):
     if (not left.get("issue_code") or left.get("issue_code") != right.get("issue_code")
             or left.get("frame_id", "") != right.get("frame_id", "")):
         return False
+    if left.get('issue_code') in {'extent_whitespace', 'footer_density'}:
+        return True  # One global frame/footer occupancy concern, not new wording per version.
     a, b = left.get("feature_ids"), right.get("feature_ids")
     if (isinstance(a, list) and isinstance(b, list) and a and b
             and all(type(v) is int for v in [*a, *b]) and left.get('source_indices')

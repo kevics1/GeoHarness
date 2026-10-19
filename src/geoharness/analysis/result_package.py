@@ -50,6 +50,9 @@ class FactRequest(BaseModel):
         '必须与当前source共享唯一key并有已登记来源，不能使用任意旧文件。'))
     group_by: list[str] = Field(default_factory=list, max_length=16,
         description='分别计算各类别数量的字段名；不改变源文件和当前结果选集。')
+    missing_by: list[str] = Field(default_factory=list, max_length=8,
+        description='按这些真实类别字段联合统计numeric_fields的有值/缺失数量；'
+        '说明人口缺失属于哪些类别时必须声明，不能从总缺失数推断类别。')
     predicates: list[dict] = Field(default_factory=list, max_length=64,
         description='条件计数列表：每项严格为{name,field,op,value}；op为<、<=、>、>=、==、!=。'
         '例如{name:"near",field:"distance_m",op:"<=",value:500}，不等同于空间包含。')
@@ -274,6 +277,7 @@ def publish_package(context, *, source_ref: str, request: FactRequest):
     target = directory / 'facts.json'
     report = write_analysis_report(target, source=source, key=request.key,
         numeric_fields=request.numeric_fields, group_by=request.group_by,
+        missing_by=request.missing_by,
         predicates=request.predicates, method=request.method, source_layer=request.source_layer)
     identity = _members(source, request.key, request.source_layer)
     if carry_report is not None:
@@ -357,6 +361,7 @@ def verify_package(path: Path, *, guard=None):
         raise ValueError('结果包源数据或伴随文件已经变化')
     actual = artifact_facts(source, key=request.key, numeric_fields=request.numeric_fields,
                             group_by=request.group_by, predicates=request.predicates,
+                            missing_by=request.missing_by,
                             include_median=True, source_layer=request.source_layer)
     if (actual != report['facts'] or report['selection'] != _selection(
             request, actual, inventory, _members(source, request.key, request.source_layer))):

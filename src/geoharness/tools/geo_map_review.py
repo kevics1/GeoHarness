@@ -39,7 +39,14 @@ class GeoMapReviewInput(BaseModel):
     page_checks: dict[str, list[Annotated[str, Field(min_length=1, max_length=200)]]] = Field(
         default_factory=dict, max_length=64,
         description='真实page_id到该页新增验收要求的映射；省略沿用，空列表清除自定义要求。'
-        '仅对应页失效，重启后仍保留；每页最多16项。不把全册目标广播到每张图片。')
+        '首次可声明，后续变更须显式update_page_requirements=true；仅对应页失效。'
+        '每页最多16项。修复进度写repair_notes，不重复改写验收要求。')
+    update_page_requirements: bool = Field(default=False,
+        description='默认false。仅当业务验收要求确实变化时为true；不可为最终复核或修复说明开启。')
+    repair_notes: str = Field(default='', max_length=1000,
+        description='本轮已修改项/进度备注，不改变验收要求与缓存，不传坐标猜测或新的业务要求。')
+    review_layout_draft: bool = Field(default=False,
+        description='默认false，已知布局缺陷先修复再请求视觉。仅明确需要查看带布局错误的草稿时为true；不能授权交付。')
     map_id: str = Field(default="",
         description='逻辑地图ID，默认空按图片登记识别；各版本保持一致。')
     evidence: dict[str, Any] = Field(
@@ -217,6 +224,8 @@ def _verified_render_evidence(
                     "map_id": receipt.get("job_id"),
                     "version": version.get("version") if version else None,
                     "page_index": page_index, "image_sha256": digest,
+                    "page_id": next((p.get('page_id') for p in previews
+                        if p.get('page_index') == page_index), None),
                     "primary_image_sha256": primary_digest,
                     "manifest_sha256": hashlib.sha256(raw).hexdigest(),
                     "source_bindings_sha256": hashlib.sha256(json.dumps(
@@ -240,6 +249,22 @@ def _verified_render_evidence(
             continue
 
     return {"backend": "unknown"}
+
+
+def _layout_precondition(verified, arguments):
+    metadata = verified.get('render_metadata') or {}
+    checks = (metadata.get('layout') or {}).get('bounds_check') or {}
+    if (not arguments.review_layout_draft and verified.get('backend') == 'matplotlib'
+            and (metadata.get('native_facts') or {}).get('frames')
+            and checks.get('valid') is False):
+        return ToolResult(output=json.dumps({'status':'precondition_failed',
+            'error_code':'layout_not_ready', 'request_sent':False,
+            'problems':checks.get('problems', []),
+            'next_action':'先按实际布局问题合并修复并render，再审受影响页；'
+                '如确需读有布局错误的草稿，显式review_layout_draft=true，仍不能交付。'},
+            ensure_ascii=False), is_error=True, metadata={'request_sent':False,
+                'render_executed':False,'failure_stage':'layout_precondition'})
+    return None
 
 
 class GeoMapReviewTool(BaseTool):
@@ -306,6 +331,9 @@ class GeoMapReviewTool(BaseTool):
             return ToolResult(output=f"Batch review unavailable ({type(exc).__name__}): {exc}",
                               is_error=True, metadata={"render_executed": False})
         proof = verified.get("backend_proof", {})
+        blocked = _layout_precondition(verified, arguments)
+        if blocked:
+            return blocked
         if verified.get("backend") not in {"qgis", "matplotlib"} or not proof.get(
                 "manifest_path"):
             return ToolResult(output="Batch unavailable: no verified map package.",
@@ -491,6 +519,9 @@ class GeoMapReviewTool(BaseTool):
             return await self._review_without_ledger(arguments, context, path, str(exc))
         evidence = dict(arguments.evidence)
         verified = _verified_render_evidence(path, digest, existing, roots)
+        blocked = _layout_precondition(verified, arguments)
+        if blocked:
+            return blocked
         evidence.pop("review_binding", None)
         evidence["backend"] = verified["backend"]
         evidence.update(build_review_iteration_context(
@@ -511,7 +542,7 @@ class GeoMapReviewTool(BaseTool):
 
             try:
                 requirements = update_requirements(context, identity, evidence,
-                                                   arguments.page_checks)
+                    arguments.page_checks, allow_change=arguments.update_page_requirements)
             except ValueError as exc:
                 return ToolResult(output=str(exc), is_error=True,
                                   metadata={'request_sent': False})
@@ -548,10 +579,20 @@ class GeoMapReviewTool(BaseTool):
             evidence.pop("backend_proof", None)
         targets = []
         if registered:
-            from geoharness.cartography.review_findings import pending_page_targets
+            from geoharness.cartography.review_contract import stable_contract
+            from geoharness.cartography.review_findings import (
+                pending_page_targets,
+                sync_review_pages,
+            )
+
+            sync_review_pages(context.metadata, cwd=context.cwd, map_id=identity,
+                pages=(verified.get('render_metadata') or {}).get('page_previews', []),
+                version=verified.get('review_binding', {}).get('version'), receipt=existing)
 
             targets = pending_page_targets(context.metadata, cwd=context.cwd, map_id=identity,
-                page_index=verified.get('review_page_index', 0))
+                page_index=verified.get('review_page_index', 0),
+                page_id=verified.get('review_binding', {}).get('page_id') or '',
+                page_contract=stable_contract(evidence))
             evidence['review_targets'] = [{'issue_id': item['issue_id'], 'issue': item['issue']}
                                           for item in targets[:64]]
         # Geometry checks belong to rendering; they never substitute for image review.
@@ -580,6 +621,8 @@ class GeoMapReviewTool(BaseTool):
             result.diagnostics['finding_registry'] = observe_findings(context.metadata,
                 cwd=context.cwd, map_id=identity, page_index=verified.get('review_page_index', 0),
                 image_sha256=digest, pixel_sha256=budget.get('pixel_sha256', ''),
+                page_id=verified.get('review_binding', {}).get('page_id') or '',
+                page_contract=result.diagnostics['page_contract'],
                 review=result.model_dump())
         # Cached conclusions predate newer layouts too; page-zero pixels cannot accept page one.
         page_index = verified.get("review_page_index", 0)

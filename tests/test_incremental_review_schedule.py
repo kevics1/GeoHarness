@@ -88,6 +88,36 @@ async def test_unknown_page_requirement_rejected_before_request(tmp_path):
     assert result.is_error and reviewer.calls == 0
 
 
+async def test_repair_notes_do_not_change_requirements_and_changes_need_explicit_flag(tmp_path):
+    context, first, reviewer = await rendered_four_pages(tmp_path)
+    tool = GeoMapReviewTool()
+    base = {'file_path':first.metadata['preview_path'],'all_pages':True}
+    await tool.execute(GeoMapReviewInput(**base,page_checks={'detail':['编号可读']}),context)
+    assert reviewer.calls == 4
+    noted = await tool.execute(GeoMapReviewInput(
+        **base,repair_notes='已检查取景，准备交付'),context)
+    assert not noted.is_error and reviewer.calls == 4
+    blocked = await tool.execute(GeoMapReviewInput(**base,
+        page_checks={'detail':['最终再确认编号是否可读']}),context)
+    assert blocked.is_error and reviewer.calls == 4
+    changed = await tool.execute(GeoMapReviewInput(**base,update_page_requirements=True,
+        page_checks={'detail':['新增要求：某重点符号需可辨']}),context)
+    assert not changed.is_error and reviewer.calls == 5
+
+
+async def test_known_native_layout_problem_blocks_requests_until_fixed(tmp_path):
+    context, scene = setup(tmp_path)
+    scene.pages[0].role,scene.pages[0].title = 'detail','35处重点对象'
+    native = await GeoNativeMapTool().execute(NativeMapInput(action='render',scene=scene),context)
+    assert not native.is_error, native.output
+    reviewer = Reviewer()
+    context.metadata['map_review_client'] = reviewer
+    checked = await GeoMapReviewTool().execute(GeoMapReviewInput(
+        file_path=native.metadata['preview_path'],all_pages=True),context)
+    assert checked.is_error and reviewer.calls == 0
+    assert 'layout_not_ready' in checked.output
+
+
 async def test_issues_are_reused_and_explicit_requirement_detail_is_preserved(tmp_path):
     context, first, reviewer = await rendered_four_pages(tmp_path)
     reviewer.status = 'issues'
@@ -100,7 +130,8 @@ async def test_issues_are_reused_and_explicit_requirement_detail_is_preserved(tm
     assert reviewer.calls == 4
     # Both requirements contain an alias such as readability, but are different duties.
     await tool.execute(GeoMapReviewInput(file_path=first.metadata['preview_path'],
-        all_pages=True, page_checks={'roster-1': ['检查高程列是否清晰']}), context)
+        all_pages=True, update_page_requirements=True,
+        page_checks={'roster-1': ['检查高程列是否清晰']}), context)
     assert reviewer.calls == 5
     config = context.metadata['geoharness_config']
     from dataclasses import replace

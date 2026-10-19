@@ -29,10 +29,10 @@ def page_checks(evidence, custom):
     else:
         shared += ['总览负责整体分布与分类辨识；密集背景对象不要求逐点辨认或计数。',
             '有真实重点符号或分类被遮盖仍须报告，不以尺度限制豁免可证缺陷。']
-    return shared + list(custom)
+    return shared + list(page_scope(evidence).get('required_content', [])) + list(custom)
 
 
-def update_requirements(context, map_id, evidence, updates):
+def update_requirements(context, map_id, evidence, updates, *, allow_change=True):
     """Only explicit page-keyed updates change acceptance; prose notes never do."""
     from geoharness.cartography.jobs import page_review_requirements
 
@@ -44,6 +44,12 @@ def update_requirements(context, map_id, evidence, updates):
         valid = {page_key(evidence)}
     if set(updates) - valid:
         raise ValueError('page_checks必须使用真实page_id；可用：' + ', '.join(sorted(valid)))
+    current = page_review_requirements(context.metadata, cwd=context.cwd,
+        config=context.metadata['geoharness_config'], map_id=map_id, updates={})
+    if not allow_change and any(key in current and current[key] != value
+                                for key, value in updates.items()):
+        raise ValueError('已有验收要求发生变化；修复进度写repair_notes。'
+                         '仅真实新增/修改业务要求时显式update_page_requirements=true。')
     return page_review_requirements(context.metadata, cwd=context.cwd,
         config=context.metadata['geoharness_config'], map_id=map_id, updates=updates)
 

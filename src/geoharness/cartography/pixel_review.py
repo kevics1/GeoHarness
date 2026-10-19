@@ -15,6 +15,14 @@ class PixelIssue(BaseModel):
     severity: Literal["error", "warning", "info"]
     description: str = Field(min_length=1, max_length=400)
     location: str = Field(default="", max_length=160)
+    reading_impact: Literal['unspecified', 'none', 'unreadable', 'ambiguous', 'hidden',
+                            'clipped', 'misleading', 'uncertain'] = Field(default='unspecified',
+        description='实际阅读影响；none=仅外观，uncertain=无法确认。warning/error须指出受影响内容。')
+    affected_content: str = Field(default='', max_length=160,
+        description='确实无法读取、区分、定位或被误导的当前页内容；不得仅写留白/密集。')
+    assessment_scope: Literal['current_page', 'other_page', 'data_semantics', 'preference'] = (
+        Field(default='current_page',
+              description='观察范围；其他页、数据含义和风格不作为本页像素缺陷。'))
     evidence_kind: Literal['pixel', 'semantic', 'suggestion'] = Field(default='pixel',
         description='pixel=图片可证缺陷；semantic=需核实数据含义；suggestion=表达偏好。'
         '后两者不能作为已证图片错误，未知内容说明限制。')
@@ -32,8 +40,11 @@ class PixelIssue(BaseModel):
 class FindingAssessment(BaseModel):
     model_config = ConfigDict(extra='forbid')
     issue_id: str = Field(min_length=1, max_length=80)
-    state: Literal['resolved', 'persists', 'unassessable']
+    state: Literal['resolved', 'persists', 'unassessable', 'not_a_defect']
     reason: str = Field(min_length=1, max_length=300)
+    basis: Literal['', 'outside_page_duty', 'no_reading_impact', 'data_semantics', 'preference'] = (
+        Field(default='', description='not_a_defect必须给明确依据：不适用当前页、'
+              '没有阅读影响、数据含义或偏好。'))
 
 
 class PixelReview(BaseModel):
@@ -57,12 +68,15 @@ def page_scope(evidence: dict[str, Any]) -> dict:
     for name, frame in {**planned, **native}.items():
         if isinstance(frame, dict) and frame.get("page_index", 0) == page_index:
             frames.append({"frame_id": name, "purpose": frame.get("purpose", ""),
+                           "rect_mm": frame.get('rect_page_mm', frame.get('rect_mm')),
                            "label_sources": frame.get("label_sources")})
     role = 'unknown'
     previews = metadata.get('page_previews') or (metadata.get('native_facts') or {}).get(
         'page_previews', [])
+    current = {}
     for page in previews:
         if isinstance(page, dict) and page.get('page_index') == page_index:
+            current = page
             if page.get('role') in {'map', 'detail', 'locator', 'roster', 'mixed'}:
                 role = page['role']
             # Legacy metadata with an empty, explicitly declared frame list and a
@@ -75,6 +89,8 @@ def page_scope(evidence: dict[str, Any]) -> dict:
     roster_pages = [p['page_index'] for p in previews if isinstance(p, dict)
                     and p.get('role') == 'roster' and type(p.get('page_index')) is int]
     return {"page_index": page_index, "frames": frames, 'page_role': role,
+            'page_id': current.get('page_id'), 'purpose': current.get('purpose', ''),
+            'required_content': current.get('review_requirements', []),
             'roster_page_indices': sorted(roster_pages)}
 
 
@@ -115,9 +131,20 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
         "若有review_targets，在同一次看图中逐项填写finding_assessments，保留原issue_id；"
         "只有能从当前图片明确确认原缺陷已消除才填resolved，并给具体可见依据；"
         "仍存在填persists，缺少局部或无法判断填unassessable，不因没再提及就当解决。"
+        "若旧意见本来就不是当前页像素缺陷，明确填not_a_defect并给basis和当前图中可核实的reason；"
+        "不能仅因当前未再报告就驳回旧意见，也不能把真实遮挡说成偏好。"
         "返回status、简短summary、issues及limitations。明确问题写具体位置及issue_code；"
         "能可靠定位时填写frame_id、roi_ref及该ROI内归一化bbox，不能定位可留空。"
         "正常留白与风格偏好不单独判为错误。不能仅凭像素声称两点同址或数据重复。"
+        "先区分观察与阅读影响：每个问题填写reading_impact和affected_content；"
+        "留白、符号靠近、需沿引线阅读本身不等于无法辨认，正常情况reading_impact=none。"
+        "只有当前页必需内容确实不可读、归属有歧义、被遮住/裁切或图例误导时才报warning/error；"
+        "看不清而不能确证写uncertain，不把缩图限制当作已证缺陷。"
+        "图例不匹配指当前页图例与当前页实际符号矛盾；其他页承担的时段或内容未出现在本页，"
+        "不能据此报legend_mismatch。assessment_scope区分本页、其他页、数据含义与偏好。"
+        "每个ROI前有真实区域标识和原图像素坐标；bbox相对所引用ROI，不能把局部坐标当整页。"
+        "旧review_targets只用于定位待验证现象，可能包含误报；请独立看当前图片，"
+        "不能因旧意见反复出现就承认其成立；旧区域已失效时明确unassessable。"
         "evidence_kind=pixel仅用于可见缺陷；名称不像某类场所属于semantic，不能猜字段错位；"
         "表头和数值重复写单位等纯格式偏好属于suggestion，除非确实误导单位含义。"
         "总览图不要求逐点数清全部背景对象，重点详图才检查编号归属；"

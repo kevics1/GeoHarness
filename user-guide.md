@@ -1,6 +1,6 @@
 # GeoHarness 使用指南
 
-## 当前主流程（2026-10-19）
+## 当前主流程（2026-10-20）
 
 数据获取 → 数据审查 → 空间分析 → 非 QGIS 原生制图 → 原生图片审查 → 交付时一次生成 QGIS 工程。
 
@@ -15,6 +15,12 @@
 字号为 pt，extent 为显示 CRS 的 xmin/ymin/xmax/ymax。页面按从底到顶引用图层 ID。
 名册 `table.layer/fields/headers` 自动分页并保留全部行，不猜测或截断对象。数值默认最多显示2位小数，`table.decimals` 可按字段指定0–8位；不会改写分析原值。
 后续使用返回的 `scene_ref` 加 `edits=[{target,id,changes}]`，按稳定 ID 合并修改。
+`Page.layout.placement="auto"` 比较侧栏、上栏、下栏，直接计算图框与图例，不需要模型
+用Python测PNG边框。需要精确版面时用 `placement="manual"`、`map_rect_mm=[左,上,宽,高]`
+及 `legend_rect_mm`，单位mm。`fit="extent"`保留范围、拟合图框；`fit="frame"`保留图框，
+仅向外扩展范围。`Layer.label_offsets_mm={"实际实体ID":[dx,dy]}`只移动文字，自动连接真实点；
+`Page.locator_pages=["实际详图ID"]`自动绘制与目标实际取景一致的定位框。
+这些显示操作不需要生成标签点/引线文件或再次发布分析。修改目标详图会使其定位框所在页同步失效。
 PNG 和多页 PDF 始终生成，可附加 SVG/HTML；静态审图不认证 HTML 交互功能。
 
 先处理返回的 `layout.bounds_check.problems`，再用
@@ -22,14 +28,25 @@ PNG 和多页 PDF 始终生成，可附加 SVG/HTML；静态审图不认证 HTML
 `all_pages=true` 表示核对全册，不是全部重发：未变页面按职责、验收要求、审查配置、
 图片与报告哈希复用已有 passed/issues；改变的页面仍须审查。重复 issues 会保留，
 不会随机再抽一份结论。已登记地图的 `task/checks` 兼容作备注，不改变验收身份。
-确有新要求时用 `page_checks={"真实page_id":["要求"]}`；省略沿用，空列表清除该页自定义
+固定分工用 `Page.purpose`，必需可见内容用 `Page.review_requirements`。首次也可用
+`page_checks={"真实page_id":["要求"]}`；后续真正变更要求须显式
+`update_page_requirements=true`。修复进度用 `repair_notes`，不会触发重审。
+省略沿用，显式变更时空列表清除该页自定义
 要求，重启后保留。未知 page_id 会在发送请求前拒绝，只让明确改变要求的页面失效。
 总览、详图、名册分别承担各自职责，不再把全册目标广播给单张图片。
 语义疑问和美化建议保留为诊断，不能冒充像素缺陷；
 服务失败保留 unverified。未登记图片的独立审查不制造地图版本。
+系统向同一次视觉请求提供整页图及实际图框、图例、名册等原分辨率区域，保留ROI坐标。
+`reading_impact`说明具体阅读影响，`affected_content`说明受影响内容；普通留白、密集分布、
+其他页承担的内容及风格观察单独保留。真实不可读、遮挡、裁切、归属歧义仍阻断；
+无法确认的关键像素观察保持unverified。原始观察与裁决理由保留在报告中。
+已有确定性布局错误时默认不再请求视觉；仅明确诊断草稿时可传 `review_layout_draft=true`，不能授权交付。
+问题按稳定page_id追踪；改序不转嫁问题，已删除页面保留历史记录，不派给新的名册页。
 修改后的页面在同一次请求中携带本页待核验 `issue_id`，视觉响应的
 `finding_assessments` 逐项回答 `resolved/persists/unassessable`。只有新像素、明确解决依据、
 无同一缺陷再次出现且报告成功登记时，才自动记 `fix_verified`；遗漏或无法判断继续保留。
+若旧意见确属误报，`not_a_defect`必须同时提供明确的`basis`与可核实理由，才可记为dismissed；
+原始报告和处置证据保留，当前仍有相同阻断缺陷时不得关闭。
 
 名册默认自动显示本页实际行号、总行数和页码；`footer` 可用
 `{row_start}/{row_end}/{total_rows}/{page_number}/{page_count}` 模板并自动换行。

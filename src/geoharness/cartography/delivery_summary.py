@@ -118,7 +118,8 @@ def _attached_analysis(delivery: dict) -> list[dict]:
                     raise ValueError('Result selection or declarations disagree')
                 package_measured = artifact_facts(sources[0], key=request.key,
                     numeric_fields=request.numeric_fields, group_by=request.group_by,
-                    predicates=request.predicates, include_median=True)
+                    predicates=request.predicates, include_median=True,
+                    missing_by=request.missing_by, source_layer=request.source_layer)
                 if ({k: v for k, v in package_measured.items() if k != 'source'} !=
                         {k: v for k, v in facts.items() if k != 'source'}):
                     raise ValueError('Result request disagrees with delivered statistics')
@@ -145,7 +146,9 @@ def _attached_analysis(delivery: dict) -> list[dict]:
                 group_by=list(facts.get('groups', {})),
                 predicates=[item['predicate'] for item in facts.get('counts', {}).values()],
                 include_median=any('median' in v for v in facts.get('numeric', {}).values()),
-                stratify_by=facts.get('stratify_by', ()))
+                stratify_by=facts.get('stratify_by', ()),
+                missing_by=facts.get('missing_by_fields', ()),
+                source_layer=facts.get('source_layer', ''))
             expected = {k: v for k, v in facts.items() if k != 'source'}
             actual = {k: v for k, v in measured.items() if k != 'source'}
             if actual != expected:

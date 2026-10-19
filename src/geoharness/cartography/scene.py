@@ -52,9 +52,23 @@ class Layer(Contract):
         description='按key选择实际对象；null保留全部，空数组为空选集，不移动几何。')
     label_field: str = Field(default='', description='标注字段；文字可避让，真实点位不移动。')
     label_size_pt: float = Field(default=8, ge=5, le=30, description='标注字号，pt。')
+    label_offsets_mm: dict[str, list[float]] = Field(default_factory=dict,
+        description='可选：真实实体key字符串到标注(dx,dy)纸面毫米偏移；只移动文字，自动连接原点。'
+        '无需生成标签点/引线文件或重新发布分析。省略的实体自动避让。')
     show_in_legend: bool = Field(default=True,
         description='是否进入专题图例；重复强调层、辅助编号层可设false，不改变实际绘制。')
     symbol: Symbol = Field(default_factory=Symbol, description='统一原生及最终工程符号。')
+
+    @model_validator(mode='after')
+    def label_offsets(self):
+        import math
+
+        if self.label_offsets_mm and (not self.key or not self.label_field):
+            raise ValueError('label_offsets_mm需要key与label_field')
+        if any(len(v) != 2 or not all(math.isfinite(n) and abs(n) <= 200 for n in v)
+               for v in self.label_offsets_mm.values()):
+            raise ValueError('标注偏移须为两个有限毫米数，绝对值不超过200')
+        return self
 
 
 class Table(Contract):
@@ -76,11 +90,44 @@ class Coverage(Contract):
         description='应覆盖的实体键；省略为layer的全部实际对象，不能按标题猜。')
 
 
+class PageLayout(Contract):
+    placement: Literal['auto', 'side', 'top', 'bottom', 'manual'] = Field(default='auto',
+        description='图例布局策略；auto比较侧栏/上栏/下栏并选最大可用地图面积，不靠改extent试版。')
+    map_rect_mm: list[float] | None = Field(default=None, min_length=4, max_length=4,
+        description='manual时必填：纸面左、上、宽、高，毫米；系统拟合实际图框并返回真实矩形。')
+    legend_rect_mm: list[float] | None = Field(default=None, min_length=4, max_length=4,
+        description='manual时可选图例矩形：左、上、宽、高，毫米；不能压盖地图框。')
+    margin_mm: float = Field(default=9, ge=3, le=50, description='纸张边距，毫米。')
+    gap_mm: float = Field(default=6, ge=2, le=30, description='图框与图例间距，毫米。')
+    legend_width_mm: float = Field(default=55, ge=25, le=200, description='侧栏图例宽度，毫米。')
+    fit: Literal['extent', 'frame'] = Field(default='extent',
+        description='extent保留地理范围并拟合图框；frame保留图框比例，仅向外扩展地理范围，不裁实体。')
+
+    @model_validator(mode='after')
+    def rectangles(self):
+        if self.placement == 'manual' and not self.map_rect_mm:
+            raise ValueError('manual布局必须提供map_rect_mm')
+        if self.placement != 'manual' and (self.map_rect_mm or self.legend_rect_mm):
+            raise ValueError('明确图框/图例矩形时placement必须为manual')
+        for rect in (self.map_rect_mm, self.legend_rect_mm):
+            if rect and (min(rect[:2]) < 0 or min(rect[2:]) <= 0):
+                raise ValueError('矩形左上坐标不能为负，宽高必须为正')
+        return self
+
+
 class Page(Contract):
     id: str = Field(min_length=1, max_length=80, description='稳定页面ID，改其他页不变。')
     title: str = Field(default='', description='页面标题；支持{subject_count}，需唯一coverage。')
     role: Literal['map', 'detail', 'roster'] = Field(default='map', description='页面验收职责。')
+    purpose: str = Field(default='', max_length=500,
+        description='当前页固定表达目的及与其他页分工，例如总览只表达最终范围，时序由详图表达；不是修复进度。')
+    review_requirements: list[str] = Field(default_factory=list, max_length=16,
+        description='固定的当前页可见内容要求；不填写最终复核等进度措辞。改变会使该页审查失效。')
+    layout: PageLayout = Field(default_factory=PageLayout,
+        description='纸面图框与图例布局；默认自动求解。')
     layers: list[str] = Field(default_factory=list, description='由底到顶的图层ID；不填使用全部。')
+    locator_pages: list[str] = Field(default_factory=list, max_length=16,
+        description='在本页绘制指定真实Page.id的实际详图范围框；系统与目标取景同步，无需Python生成定位框。')
     extent: list[float] | None = Field(default=None, min_length=4, max_length=4,
         description='显示CRS的xmin,ymin,xmax,ymax；省略按focus_layers拟合。')
     focus_layers: list[str] = Field(default_factory=list,
@@ -120,6 +167,9 @@ class Scene(Contract):
         if not self.pages:
             raise ValueError('至少需要一个页面')
         for page in self.pages:
+            if (set(page.locator_pages) - {p.id for p in self.pages if not p.table}
+                    or page.id in page.locator_pages):
+                raise ValueError('locator_pages需引用其他实际地图/详图页面ID，不能引用自身或名册')
             if (page.role == 'roster') != bool(page.table):
                 raise ValueError('名册页role=roster与table必须同时声明，避免审查职责错配')
             if page.table and page.coverage:

@@ -33,6 +33,10 @@ flowchart LR
 `all_pages` 先核对清单完整性，只对没有有效证据的页面发送图片请求；复用必须同时匹配
 图片、报告 SHA、页面职责、显式要求和审查配置。`passed` 与 `issues` 都可沿用，后者继续
 阻止通过。自由进度文字不进入验收身份，`page_checks` 才会使对应页失效。
+既有要求变更须显式 `update_page_requirements`；常规修复只传 `repair_notes`。
+原生清单提供真实frame/regions、纸面尺寸和页面分工，同一视觉请求附整页与局部原像素。
+像素观察保留reading_impact/affected_content/assessment_scope，原始观察及非阻断裁决独立记录；
+不确定的关键观察保持unverified。问题按page_id与框内位置绑定，页面改序和退役有持久记录。
 旧问题在新像素请求中作为 `review_targets` 携带，明确的 `finding_assessments` 在报告
 成功登记后核验并关闭问题；缺失、同像素或失败响应不能充当解决证据。
 结果包以 `source_layer` 冻结多层 GPKG 的实际视图，制图匹配到同一图层；不能凭同文件

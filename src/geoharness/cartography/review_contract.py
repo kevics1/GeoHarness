@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-CONTRACT_VERSION = 12
+CONTRACT_VERSION = 13
 
 def _bounded(value: Any, depth: int = 0) -> Any:
     if depth > 5:
@@ -33,7 +33,7 @@ def page_contract(evidence: dict[str, Any], *, task: str = "") -> dict[str, Any]
     page = scope.get("page_index", 0)
     page_frames = {
         name: {key: value for key, value in frame.items() if key in {
-            "page_index", "purpose", "label_sources", "rect_page_mm", "rect_mm",
+            "page_index", "purpose", "label_sources", "rect_page_mm", "rect_mm", "extent",
         }}
         for name, frame in frames.items()
         if isinstance(frame, dict) and frame.get("page_index", 0) == page
@@ -59,8 +59,13 @@ def page_contract(evidence: dict[str, Any], *, task: str = "") -> dict[str, Any]
         "contract_version": CONTRACT_VERSION,
         "page_index": page,
         "page_role": scope.get("page_role", "unknown"),
+        "page_id": scope.get('page_id'),
+        "purpose": scope.get('purpose', ''),
+        "required_content": scope.get('required_content', []),
         "frames": page_frames,
         "regions": _bounded(regions),
+        "paper": {k: (layout.get('effective_parameters') or {}).get(k)
+                  for k in ('width_mm', 'height_mm')},
         "duty_checks": duty_checks,
         "detail_placement": (layout.get("page") or {}).get("detail_placement"),
         "analysis_status": ((metadata.get("analysis") or {}).get("status")
