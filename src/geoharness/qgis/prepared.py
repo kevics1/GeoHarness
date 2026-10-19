@@ -94,9 +94,10 @@ def diagnostic_files(*, cwd, settings) -> tuple[Path, ...]:
 
 def summary(report: dict, reference: str, path: Path, *, max_chars=2400) -> dict:
     result = {"status": report.get("status"), "plan_ref": reference,
-        "create_call": {"action": "create", "plan_ref": reference},
         "inspect_call": {"action": "inspect", "plan_ref": reference},
         "report_path": str(path)}
+    if report.get('status') != 'needs_repair':
+        result['create_call'] = {"action": "create", "plan_ref": reference}
     details = {key: report[key] for key in (
         "status", "display_crs", "map_extent", "map_extent_source", "warnings", "issues",
         "parameter_normalizations", "analysis_binding_note",
@@ -122,7 +123,9 @@ def summary(report: dict, reference: str, path: Path, *, max_chars=2400) -> dict
         candidate = {**result, key: item}
         if len(json.dumps(candidate, ensure_ascii=False)) <= max_chars - 200:
             result[key] = item
-    result["note"] = "Use create_call unchanged. Inspect the plan for full diagnostics."
+    result['note'] = ('预检发现硬约束冲突；先查看 frame_checks 并调整布局，再重新预检。'
+                      if report.get('status') == 'needs_repair' else
+                      '使用返回的 create_call；完整诊断可用 inspect_call 查看。')
     return result
 
 

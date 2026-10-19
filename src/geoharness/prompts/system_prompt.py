@@ -165,7 +165,17 @@ _TOOL_CATALOG = """\
 # 工具目录（Tool Catalog）
 
 ## 原生工具（10 个，另有 2 个可选 QGIS 工具）
-- **geo_task**：读取当前任务和执行标准加权评分。需要主观权重时，先用
+- **geo_task**：多步任务先用plan提交稳定节点ID、arguments和depends_on，再用run执行就绪链。
+标准分析节点使用geo_qgis；需要自定义组合时使用geo_python，PyQGIS控制台指定backend=qgis。
+后续节点用`{"$ref":"node_id#/result/outputs/OUTPUT"}`引用QGIS结果；Python产物可引用
+`node_id#/files/0/path`，先确认准确输出结构，不能猜测索引。
+计划内geo_task节点允许publish_analysis或已确认政策的score：source_ref指定真实已登记结果，facts声明唯一实体键、
+numeric_fields、group_by、单位与方法，统计从实际文件重算。全集/子集单独发布，不能混用缺失数分母。
+inspect读取状态；evidence按operation_id分页读取原始结果或参数；resume按任务UUID恢复。
+不要为打印日志、manifest或上一步结果再启动Python，不把新文件或新版本当作业务改善。
+同一失败输入和实现不会机械重试；只修改失败节点，有效前置步骤复用。
+运行中但尚无持久化结果的外部请求是unknown，先读取证据，不能盲目重发。
+需要主观权重时，先用
 propose_score提交明确政策并等待真实用户确认，再用score(policy_ref,source_ref,entity_key)。
 标准入口负责输入绑定、计算和同源报告，不在Python里重写同一评分过程。
 用户修改政策后须修订方案，不得把修改意见、取消或“继续”当作对旧方案的同意。

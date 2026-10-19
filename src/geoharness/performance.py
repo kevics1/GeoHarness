@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from time import perf_counter, time
 from uuid import uuid4
 
@@ -23,9 +24,13 @@ class MeasuredRegistry:
         return MeasuredTool(tool, self.metadata) if tool is not None else None
 
 class MeasuredTool:
-    def __init__(self, tool, metadata):
+    def __init__(self, tool, metadata, *, node_id=None):
         self.tool = tool
         self.metadata = metadata
+        self.node_id = node_id
+        metadata.setdefault('geo_tool_metrics', [])
+        metadata.setdefault('geo_current_state', {})
+        metadata.setdefault('geo_render_reuse', {})
 
     def __getattr__(self, name):
         return getattr(self.tool, name)
@@ -34,9 +39,21 @@ class MeasuredTool:
         started, clock = time(), perf_counter()
         result = None
         error = None
+        from geoharness.task_store import begin_operation, finish_operation, save_record
+
+        handle = begin_operation(self.metadata, cwd=context.cwd, tool=self.tool.name,
+                                 arguments=arguments, node_id=self.node_id)
         try:
-            result = await self.tool.execute(arguments, context)
-            return result
+            from geoharness.task_controller import execution_gate
+
+            blocked = execution_gate(context, self.tool, arguments, node_id=self.node_id)
+            if blocked:
+                from openharness.tools.base import ToolResult
+
+                result = ToolResult(output=json.dumps(blocked, ensure_ascii=False), is_error=True,
+                                    metadata={'execution_status': 'failed'})
+            else:
+                result = await self.tool.execute(arguments, context)
         except BaseException as exc:
             error = type(exc).__name__
             raise
@@ -71,6 +88,31 @@ class MeasuredTool:
                 observe_operation(self.metadata, tool=self.tool.name,
                                   action=getattr(arguments, 'action', None), result=result)
                 self._remember_result(result, arguments)
+            # Persist before upstream truncation/compaction can discard the result.
+            # A failed commit is visible and never silently upgrades an operation.
+            evidence = finish_operation(handle, self.metadata, result=result, error=error)
+            if evidence and result is not None:
+                result.metadata.update(evidence)
+                call = {'action': 'evidence', 'operation_id': evidence['operation_id']}
+                try:
+                    packet = json.loads(result.output)
+                    if isinstance(packet, dict):
+                        if self.tool.name == 'geo_python':
+                            # The full packet was committed above; repeated API help
+                            # belongs in evidence rather than every model response.
+                            packet.pop('execution_contract', None)
+                            for key in ('stdout', 'stderr'):
+                                if isinstance(packet.get(key), str) and len(packet[key]) > 2000:
+                                    packet[key] = packet[key][-2000:]
+                                    packet[key + '_truncated'] = True
+                        packet.update(operation_id=evidence['operation_id'], evidence_call=call)
+                        result = replace(result, output=json.dumps(packet, ensure_ascii=False))
+                except (TypeError, ValueError):
+                    pass
+                self.metadata.setdefault('geo_current_state', {})['last_operation'] = {
+                    'tool': self.tool.name, **evidence, 'evidence_call': call}
+            save_record(self.metadata, cwd=context.cwd)
+        return result
 
     def _remember_result(self, result, arguments):
         fields = {"status", "spec_ref", "latest_spec_ref", "manifest_path", "result_path",
@@ -100,6 +142,10 @@ class MeasuredTool:
         state = self.metadata["geo_current_state"]
         if result.is_error:
             state.setdefault(name, {})["last_attempt_failed"] = True
+            state.setdefault("failures", []).append({
+                "tool": name, "action": action or getattr(arguments, "name", None),
+                "error_summary": packet.get("error_summary") or result.output[:500]})
+            del state["failures"][:-8]
             return
         if name == "geo_qgis_project" and action in {"help", "inspect"}:
             return
@@ -126,8 +172,3 @@ class MeasuredTool:
             state["review"] = packet
         else:
             state[name] = {**state.get(name, {}), **packet}
-        if result.is_error:
-            state.setdefault("failures", []).append({
-                "tool": name, "action": action or getattr(arguments, "name", None),
-                "error_summary": packet.get("error_summary") or result.output[:500]})
-            del state["failures"][:-8]

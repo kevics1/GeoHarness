@@ -801,6 +801,82 @@ geo_map_review根据绑定的page_previews.role区分地图、定位图、名单
 同源结果与报告。修改意见、拒绝、取消和单独“继续”均不会确认方案；暂停状态支持会话恢复。
 自定义 Python 仍可用于扩展分析，执行成功不表示其方法或任意自行实现的公式得到业务认证。
 
-视觉审查同时保存 `image_sha256`（文件身份）和 `pixel_sha256`（规范化 RGBA 像素身份）。只改变 PNG/JPEG 容器元数据而未改变像素时可复用审查结论；像素、页用途、任务或审查设置改变时才形成新的审查缓存键。
+视觉审查同时保存 `image_sha256`（文件身份）和 `pixel_sha256`（规范化 RGBA 像素身份）。只改变容器元数据、运行目录、版本号、页码或“最终复核”等措辞时可复用同像素结论；像素、当前页用途、显式 `checks` 或审查模型配置变化会使缓存失效。数据与工程绑定在每次复用时独立核验。
 
 评分政策可选用 `classification` 声明连续、覆盖 `0..1` 的分级区间和中文标签。分级边界属于需确认的政策参数，会写入评分结果的 `risk_status`、事实报告分组和交付摘要；系统不会把模型自行选择的分级当作用户确认。
+
+
+## 受管理执行与 QGIS 控制台（2026-10-19）
+
+有活动任务时，默认 `agent.managed_workflow: true`。修改性分析、制图和交付先通过
+`geo_task(action="plan", nodes=[...])` 提交完整依赖计划，再通过 `action="run"` 执行就绪链。
+每个节点包含稳定的 `id`、`tool`、`arguments`、`depends_on`；修订节点只使其后代失效，
+已验证输入和产物未变化的成功前置节点继续复用。相同失败不会机械重跑。
+相关配置变化也会使节点失效：例如更换审图模型只影响该审查及其后续节点。
+视觉服务返回 `unverified` 不记为成功依赖；按错误证据修改配置或显式请求服务恢复。
+兼容旧入口可设置 `agent.managed_workflow: false`；已有计划仍需遵守依赖控制。
+不设20分钟或制图次数的强制截停，单次脚本/API超时仍按原配置生效。
+
+```yaml
+agent:
+  managed_workflow: true
+  task_state_dir: .geoharness/tasks
+```
+
+节点参数中的 `{"$ref":"buffer#/result/outputs/OUTPUT"}` 引用 Processing 输出；
+Python 文件可引用 `extract#/files/0/path`；任一节点完整注册元数据可用
+`map#/_metadata/project_dir`、`map#/_metadata/map_id` 等实际返回键引用。
+JSON Pointer 的 `/`、`~` 转义仍遵循 `~1`、`~0`，不能猜测输出索引。
+`geo_task(action="inspect")` 查看就绪/失败/失效节点；
+`geo_task(action="evidence", operation_id="实际ID", section="output")` 分页读取完整证据，
+`section` 还可选 `arguments`、`metadata`、`record`，每页最多12000字符。
+结果已经保存，没必要再调用 Python 打印大段日志。
+
+完整请求在执行前保存，完整结果在模型输出压缩前保存。`geo_task(action="resume", task_id="UUID")`
+在同工作区恢复已有任务；跨进程执行锁阻止重复提交。进程退出而结果未知时保留
+`interrupted/process_outcome_unknown`，不自动重发；先检查参数、日志及实际产物，再有依据地修订节点。
+`revision` 只用于实现或运行环境确有修正，不能只为绕过重复失败保护而递增。
+已经检查的数据别名随任务保存；恢复时核对文件签名，已变化文件的旧描述不继续使用。
+
+标准空间分析先 `geo_qgis search/help` 获取真实算法和参数，再将 `run/model` 放入计划。
+需要自定义组合时使用 `geo_python(backend="qgis", ...)`。它启动独立、已初始化 QGIS 和
+Processing 的进程，提供 `Project`、`processing`、`INPUTS`、`RUN_DIR`、`CONSOLE_STATE`。
+例如下列内容作为计划中 `geo_python` 节点的参数：
+
+```json
+{
+  "backend": "qgis",
+  "input_refs": {"source": "实际返回的数据引用或文件路径"},
+  "expected_outputs": ["result.gpkg"],
+  "code": "out = processing.run('native:buffer', {'INPUT': str(INPUTS['source']), 'DISTANCE': 50, 'SEGMENTS': 5, 'END_CAP_STYLE': 0, 'JOIN_STYLE': 0, 'MITER_LIMIT': 2, 'DISSOLVE': False, 'OUTPUT': str(RUN_DIR / 'result.gpkg')})\nCONSOLE_RESULT = out"
+}
+```
+
+示例的50为调用者指定的米制输入示例值，系统不替用户选择业务阈值；执行前检查实际 CRS/单位。
+QGIS 对象不跨调用保存，`console_state` 及 `CONSOLE_RESULT` 只能是有界 JSON；状态总量
+最多20000字符，不是持续连接的桌面控制台。常用原生读写接口和 Python 文件操作受应用层
+约束，输出写入 `RUN_DIR`，原始文件保持只读；该机制不是针对恶意原生扩展的 OS 沙盒。
+普通 `backend="python"` 路径保留原行为；控制台阶段依赖使用任务计划，评分使用已确认政策入口。
+
+自定义/Processing 结果经 `geo_task(action="publish_analysis", source_ref=..., facts=...)` 发布。
+`facts` 包含唯一非空 `key`、`numeric_fields`、`group_by`、`units`、`scope_name`、`method`。
+全集和子集分别产生选集身份与缺失值分母，不能将重点对象的8/14写成全部对象的统计。
+当前支持单图层矢量或 CSV；多图层 GPKG 需先另存目标层。结果包核对实际落盘值，
+声明方法不等于科学正确性认证，任意 Python 的计算 CRS 未测得时保持 unknown。
+结果包历史不设累计8份的执行上限；上下文仅展示最近8个引用，完整历史仍保存在任务记录。
+产生分析结果后，每个分析候选图层须有自己的事实绑定，不能用一个有效图层为其他结果背书。
+交付自动附加选中工程所引用的事实包、源和中文报告，并从复制后的数据重新核对统计、选集与单位。
+
+系统创建且依赖可测的工程按页复用 PNG：改名单表题只重画名单；共享数据、样式、字体或
+布局变化按依赖失效。未知或用户编辑工程保守重画；QGIS 工程仍完整保存/读回，PDF按当前完整布局导出。
+预检 `needs_repair` 表示检测到支持范围内的硬符号冲突，不返回误导性的 `create_call`；
+需先调整比例尺、符号或真实覆盖同一对象的详图。任意符号、引线和所有文字的精确碰撞仍不能由该检查认证。
+完全同坐标的多个记录保留风险提示，需要核实重复数据、叠加或聚合的业务含义；
+系统不会仅凭坐标相同禁止已有绘制方式，也不会移动真实点位。
+
+`geo_map_review` 继续只读图片，`all_pages=true` 可在一次工具调用中检查已验证的工程各页。
+新增实质要求用 `checks`，省略沿用；普通 `task` 改写不触发相同像素重新审查。
+`passed` 和 `issues` 均缓存，不能反复抽样直至通过。正式像素结论在任务证据目录以 SHA256
+绑定保存，恢复后核验复用，再绑定当前工程版本；单纯会话快照中的通过文字不予采信。
+未再次报出的旧问题保持 `needs_recheck`，不自动计作已解决；服务失败保持 unverified，
+处理服务恢复而不重做分析或改图。主模型思考强度和自定义审图模型沿用当前用户配置。

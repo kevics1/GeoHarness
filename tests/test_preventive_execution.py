@@ -28,7 +28,24 @@ def test_composition_warns_before_rendering_dense_cross_layer_labels():
                              "display_crs": "EPSG:3857"}, layout={})
     assert risk["warnings"][0]["code"] == "dense_point_labels"
     assert risk["warnings"][0]["close_anchor_pairs"] == 1
+    # Font-size estimates do not prove rendered label or symbol collisions.
+    assert risk["hard_conflict_count"] == 0
     assert risk["scope"].endswith("not a visual overlap test")
+
+def test_unlabeled_point_symbols_report_density_without_forbidding_them():
+    from shapely.geometry import Point
+
+    from geoharness.cartography.composition import composition_risks
+
+    frame = gpd.GeoDataFrame({"id": [1, 2]}, geometry=[Point(1284, 875),
+                                                       Point(1284.00001, 875)], crs=3857)
+    risk = composition_risks([{"gdf": frame, "style": {"size_mm": 5.4},
+                               "layer_index": 7}],
+        report={"map_extent": [1283.9, 874.9, 1284.1, 875.1],
+                "display_crs": "EPSG:3857"}, layout={})
+    assert risk["symbolized_point_count"] == 2
+    assert risk["hard_conflict_count"] == 0
+    assert risk["warnings"][0]["minimum_anchor_distance_mm"] < 5.4
 
 
 def test_previous_outputs_use_persisted_actual_paths_and_reject_fabricated_inputs(tmp_path):

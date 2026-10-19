@@ -68,7 +68,8 @@ def page_scope(evidence: dict[str, Any]) -> dict:
 
 def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "tool") -> str:
     """Only page purpose is context; engineering tables never enter this request."""
-    scope = {**page_scope(evidence), 'task': task}
+    scope = {**page_scope(evidence), 'task': task,
+             'checks': evidence.get('review_checks', [])}
     purpose = (
         '本页是独立名单/表格页，只检查表题、表头、单位、行列可读性、裁切、'
         '分页和内容布局；不得要求本页出现主图、定位图、地图图例或比例尺。'

@@ -54,10 +54,10 @@ async def test_real_tool_boundary_rejects_marker_without_disrupting_valid_calls(
         },
     })
     assert result.is_error
-    assert "no tool was executed" in result.content
+    assert "本次工具没有执行" in result.content
     assert '"json_error_position": 11' in result.content
     assert "Expecting ',' delimiter" in result.content
-    assert "action+returned plan_ref" in result.content
+    assert "action=create与返回的plan_ref" in result.content
     assert "must-not-be-echoed" not in result.content
     assert tool.executions == 0
     valid = await _execute_tool_call(context, tool.name, "good", {"value": "complete"})

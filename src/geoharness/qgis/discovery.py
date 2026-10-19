@@ -195,6 +195,7 @@ def child_environment(runtime: QgisRuntime, run_dir: Path) -> dict[str, str]:
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONFAULTHANDLER": "1",
             "PROJ_NETWORK": "OFF",
             "GDAL_FILENAME_IS_UTF8": "YES",
             "QGIS_CUSTOM_CONFIG_PATH": str(profile),

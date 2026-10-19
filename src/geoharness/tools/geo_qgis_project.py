@@ -1181,6 +1181,8 @@ class GeoQgisProjectTool(BaseTool):
                 return ToolResult(output=f"Error: map task could not start: {exc}", is_error=True)
             reserve_map_render(identity, context.metadata, config)
         payload["map_id"] = identity
+        payload['_page_reuse'] = list(context.metadata.get('geo_page_reuse', {}).get(
+            identity, {}).values())
         try:
             if owner:
                 owner.stage("native_" + arguments.action)
@@ -1241,6 +1243,9 @@ class GeoQgisProjectTool(BaseTool):
                 tracked = await asyncio.shield(registration)
                 remember_render(context.metadata, reuse_key, tracked,
                                 limit=config.qgis.reuse_cache_entries)
+                from geoharness.qgis.page_cache import remember_pages
+
+                remember_pages(context.metadata, tracked, identity)
                 return tracked
             except asyncio.CancelledError:
                 await _drain_task(registration)
@@ -1452,12 +1457,14 @@ class GeoQgisProjectTool(BaseTool):
         report["composition"] = composition_risks(
             frames, report=report, layout=arguments.layout.model_dump() if arguments.layout else {},
         )
+        from geoharness.analysis.result_package import infer_packages, require_candidate_bindings
         from geoharness.cartography.facts import infer_analysis_manifests, load_analysis_facts
 
         roots = qgis_read_roots(config, context.cwd)
         manifests = list(dict.fromkeys([
             *arguments.analysis_manifests,
             *infer_analysis_manifests(mapped_sources, cwd=context.cwd, read_roots=roots),
+            *infer_packages(context.metadata, mapped_sources),
         ]))
         report["analysis_evidence_status"] = "verified" if manifests else "not_provided"
         report["analysis_manifests"] = manifests
@@ -1473,6 +1480,12 @@ class GeoQgisProjectTool(BaseTool):
                 read_roots=qgis_read_roots(config, context.cwd), mapped_sources=mapped_sources,
                 display_crs=report["display_crs"],
             )
+            require_candidate_bindings(context.metadata, mapped_sources, report['analysis'])
+        elif context.metadata.get('geo_task_record', {}).get('analysis_requirement') == 'required':
+            raise ValueError(
+                '当前任务已产生分析结果，但制图输入尚未绑定结果事实。'
+                '先用geo_task publish_analysis发布当前实际选集，'
+                '再将该结果作为图层；不要重复渲染无分析来源的工程。')
         return report
 
 
@@ -1483,6 +1496,11 @@ def _apply_native_frame_evidence(preflight: dict, details: dict) -> None:
     plan = details["layout_plan"]
     preflight.update(layout_plan=plan, composition=details["composition"],
                      frame_checks=details["frame_checks"])
+    constraints = details['frame_checks'].get('symbol_constraints', {})
+    preflight['render_feasible'] = constraints.get('feasible', True)
+    if not preflight['render_feasible']:
+        preflight['status'] = 'needs_repair'
+        preflight['issues'] = constraints.get('unresolved', [])
     if details.get("layout"):
         preflight["layout"] = details["layout"]
     extent = plan["frames"]["main_map"]["extent"]

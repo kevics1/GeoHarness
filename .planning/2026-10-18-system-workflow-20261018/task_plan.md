@@ -10,6 +10,17 @@
 
 每阶段实现→真实调用入口回归→ruff/pytest→提交→CLI检查。复用现有Pydantic、阶段依赖与SQLite清单，不新建重复数据库。真实业务验收与离线验证分开。
 
+2026-10-19 新测试只读诊断：complete。21次制图尝试/17成功、29页审查、至少27分52秒；定位同像素重审与结论漂移、页面目标/选集错误、重复问题追踪未建立、全册重建与事实链绕过。上方complete仅代表上轮已实施与离线检查，不代表系统收敛验收；真实业务仍未通过。详见 diagnostics/2026-10-19-latest-test-review.md。
+
+2026-10-19 全局重构设计：complete（仅方案，未实施）。文档 docs/system-workflow-redesign.md 定义任务控制器、强制分析包、制图编译/页面依赖、审图三身份及处置、证据持久化、兼容迁移和真实验收；后续实施需用户明确启动。20分钟仍为性能目标，不设调用/时间截停。
 
 
 
+
+
+2026-10-19 用户已明确启动实施，并补充QGIS Processing作为标准分析主路径，geo_python提供兼容的PyQGIS控制台入口。
+实施A（implemented / engineering_checked）：持久操作证据、任务依赖控制与状态恢复；QGIS/Python统一执行登记。配置/实现失效、恢复别名、unknown不重发均有回归。
+实施B（implemented / engineering_checked）：标准QGIS分析及显式控制台，分析结果发布与事实绑定。真实Processing→事实→工程→草稿交付已验证。
+实施C（partially_implemented）：稳定图片契约和持久缓存、页面增量及保守几何检查已验证；完整confirmed/dismissed/fix_verified处置状态机和精确文字/任意符号检测未实现，不能记complete。
+实施D（engineering_checked / business_acceptance_pending）：交付复算、中文文档、原生QGIS与安装核对推进完成；独立审查无有效报告，真实模型对话质量/性能未验收。
+所有complete仅按实际证据记录；保留主模型high、不修改用户密钥，不采用20分钟强制截停。

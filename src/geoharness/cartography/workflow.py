@@ -35,6 +35,7 @@ def reset_map_workflow(metadata: dict[str, Any]) -> None:
         # Keep actual in-memory conclusions; changing the target invalidates their
         # fingerprint, and checkpoint restoration still invalidates old passes.
         old_settings = state.get("cache_settings", {})
+        review_checks = state.get('review_checks', {})
         retained_cache = {
             digest: review for digest, review in state.get("cache", {}).items()
             if isinstance(review, dict) and review.get("status") in {"passed", "issues"}
@@ -59,6 +60,7 @@ def reset_map_workflow(metadata: dict[str, Any]) -> None:
             provider_calls_total=0,
             cache_hits_total=0,
             repair_attempts={},
+            review_checks=review_checks,
         )
         if isinstance(metadata.get("map_job_state"), dict):
             metadata["map_job_state"].pop("budget_job_id", None)
@@ -313,6 +315,7 @@ async def review_with_budget(
         return await _review_once(
             path,
             state=state,
+            metadata=metadata,
             digest=digest,
             pixel_digest=pixel_digest,
             config=config,
@@ -330,6 +333,7 @@ async def _review_once(
     path: Path,
     *,
     state: dict[str, Any],
+    metadata: dict[str, Any],
     digest: str,
     pixel_digest: str,
     config: GeoConfig,
@@ -346,26 +350,14 @@ async def _review_once(
     expected_evidence = {key: value for key, value in evidence.items() if key not in {
         'previous_visual_reviews', 'version_limit', 'remaining_render_versions',
         'generation_unlimited'}}
+    identity_contract = None
     if pixel_only:
-        from geoharness.cartography.pixel_review import page_scope
+        from geoharness.cartography.review_contract import add_scope, stable_contract
 
-        scope = page_scope(evidence)
-        page = scope['page_index']
-        layout = native_evidence.get('layout') or {}
-        frames = (native_evidence.get('native_facts') or {}).get('frames') or {}
-        native_evidence = {'scope': scope,
-            'page': layout.get('page'),
-            'detail_placement': (layout.get('page') or {}).get('detail_placement'),
-            'regions': (layout.get('page_regions') or {}).get(str(page),
-                layout.get('regions') if page == 0 else None),
-            'frames': {k: {f: v.get(f) for f in ('rect_page_mm', 'rect_mm')}
-                for k, v in frames.items() if isinstance(v, dict)
-                and v.get('page_index', 0) == page},
-            'legends': {k: {f: v.get(f) for f in ('rect_page_mm', 'rect_mm', 'page_index')}
-                for k, v in (layout.get('legends') or {}).items() if isinstance(v, dict)
-                and v.get('page_index', 0) == page}}
-        # Pixel conclusions depend on image/task/page/crops, not fresh package IDs
-        # or the data-only facts from another unchanged page.
+        evidence = add_scope(evidence, task=task)
+        native_evidence = stable_contract(evidence)
+        identity_contract = evidence['review_scope_identity']
+        # Only rendered geometry and explicit checks define a pixel review scope.
         expected_evidence = {}
     fingerprint = hashlib.sha256(
         json.dumps(
@@ -386,8 +378,9 @@ async def _review_once(
                 "max_rois": getattr(settings, "max_rois", 5),
                 "roi_max_side": getattr(settings, "roi_max_side", 2048),
                 "native_evidence": native_evidence,
-                "task": task,
-                "expected_evidence": expected_evidence,
+                "scope_identity": identity_contract,
+                "task": task if not pixel_only else "",
+                "expected_evidence": expected_evidence if not pixel_only else {},
                 "request_extra_body": settings.request_extra_body,
                 "reasoning_effort": settings.reasoning_effort,
                 "response_format": settings.response_format,
@@ -465,6 +458,20 @@ async def _review_once(
 
     recovery = False
     cached = None
+    if pixel_only and cache_key not in state['cache']:
+        from geoharness.task_store import read_pixel_review
+
+        committed = read_pixel_review(metadata, cache_key)
+        if committed is not None:
+            try:
+                restored = MapReview.model_validate(committed)
+                if restored.status in {'passed', 'issues'} and not restored.diagnostics.get(
+                        'failure_stage'):
+                    restored.diagnostics['persistent_pixel_evidence_reused'] = True
+                    state['cache'][cache_key] = restored.model_dump()
+                    state['cache_settings'][cache_key] = fingerprint
+            except ValueError:
+                pass
     lookup_key = cache_key if cache_key in state["cache"] else digest
     if lookup_key in state["cache"] and state["cache_settings"].get(lookup_key) == fingerprint:
         cached = MapReview.model_validate(state["cache"][lookup_key])
@@ -562,4 +569,9 @@ async def _review_once(
     # Keep the file-key alias for checkpoint compatibility with older sessions.
     state["cache"][digest] = result.model_dump()
     state["cache_settings"][digest] = fingerprint
+    if (pixel_only and result.status in {'passed', 'issues'}
+            and flags.get('visual_review_completed')):
+        from geoharness.task_store import save_pixel_review
+
+        save_pixel_review(metadata, cache_key, result.model_dump())
     return result, flags

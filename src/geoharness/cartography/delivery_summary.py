@@ -86,13 +86,14 @@ def _attached_analysis(delivery: dict) -> list[dict]:
              if isinstance(p, str) and Path(p).resolve().is_relative_to(root)]
     reports = []
     for path in files:
-        if path.suffix.lower() != '.json' or not path.is_file() or path.stat().st_size > 262144:
+        if path.suffix.lower() != '.json' or not path.is_file() or path.stat().st_size > 1024*1024:
             continue
         try:
             report = json.loads(path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
-        if not isinstance(report, dict) or report.get('kind') != 'persisted_analysis_report':
+        if not isinstance(report, dict) or report.get('kind') not in {
+                'persisted_analysis_report', 'analysis_result_package'}:
             continue
         try:
             if not isinstance(report.get('method'), dict) or not report['method']:
@@ -102,6 +103,25 @@ def _attached_analysis(delivery: dict) -> list[dict]:
                        and _sha(p) == facts['sha256']]
             if not sources:
                 raise ValueError('Matching source not delivered')
+            if report.get('kind') == 'analysis_result_package':
+                from geoharness.analysis.result_package import FactRequest, _members, _selection
+
+                request = FactRequest.model_validate(report['request'])
+                inventory = report['source_inventory']
+                copied_hashes = {_sha(p) for p in files if p.is_file()}
+                if (not isinstance(inventory, dict) or not inventory
+                        or not set(inventory.values()) <= copied_hashes):
+                    raise ValueError('Result source companions not delivered intact')
+                if (report.get('units') != request.units or report['method'] != request.method
+                        or report['selection'] != _selection(request, facts, inventory,
+                            _members(sources[0], request.key))):
+                    raise ValueError('Result selection or declarations disagree')
+                package_measured = artifact_facts(sources[0], key=request.key,
+                    numeric_fields=request.numeric_fields, group_by=request.group_by,
+                    predicates=request.predicates, include_median=True)
+                if ({k: v for k, v in package_measured.items() if k != 'source'} !=
+                        {k: v for k, v in facts.items() if k != 'source'}):
+                    raise ValueError('Result request disagrees with delivered statistics')
             measured = artifact_facts(sources[0], key=facts['key'],
                 numeric_fields=list(facts.get('numeric', {})),
                 group_by=list(facts.get('groups', {})),
@@ -122,6 +142,7 @@ def _attached_analysis(delivery: dict) -> list[dict]:
                 'source_sha256': measured['sha256'], 'facts': measured,
                 'status': 'persisted_values_checked', 'method': report.get('method'),
                 'execution_evidence': report.get('execution_evidence', {}),
+                'selection': report.get('selection'), 'units': report.get('units', {}),
                 'method_status': 'declared_not_independently_verified',
                 'analysis_correctness': 'unverified'})
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -242,6 +263,7 @@ def build_delivery_summary(
             "row_count": r['facts']['row_count'], "numeric": r['facts']['numeric'],
             "groups": r['facts']['groups'], "counts": r['facts']['counts'],
             "strata": r['facts'].get('strata', []), "method": r.get('method'),
+            "selection": r.get('selection'), "units": r.get('units', {}),
             "analysis_correctness": 'unverified',
             "execution_evidence": r.get('execution_evidence', {})}
             for r in analysis_reports if r['status'] == 'persisted_values_checked'],

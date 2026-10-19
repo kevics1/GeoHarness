@@ -184,6 +184,8 @@ async def test_runtime_tool_loop_shares_inspected_profiles_and_refs(tmp_path, mo
     monkeypatch.setattr("geoharness.runtime._warm_data_layer", lambda catalog: None)
     config = GeoConfig()
     config = replace(config, data=replace(config.data, file_dir=str(source.parent)))
+    # This test exercises the explicitly supported unplanned compatibility path.
+    config = replace(config, agent=config.agent.model_copy(update={'managed_workflow': False}))
     bundle = await build_geo_runtime(tmp_path, config_override=config)
     bundle.engine._hook_executor = None
     events = [event async for event in bundle.engine.submit_message("inspect then read data")]

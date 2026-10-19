@@ -78,6 +78,8 @@ class AgentConfig(BaseModel):
         "Continue pending tool results after a turn batch when new successful progress exists."
     ))
     internal_todo_path: str = ".geoharness/tasks/TODO.md"
+    task_state_dir: str = ".geoharness/tasks"
+    managed_workflow: bool = True
     include_stream_usage: bool = True
     request_extra_body: dict[str, Any] = Field(default_factory=dict)
     reasoning_effort: Literal["low", "medium", "high", "max"] | None = Field(

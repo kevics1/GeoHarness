@@ -69,6 +69,8 @@ def main() -> int:
         action, payload = request["action"], request["payload"]
         if action.startswith("project_"):
             from geoharness.qgis.project_worker import dispatch
+        elif action == "console":
+            from geoharness.qgis.console import dispatch
         else:
             from geoharness.qgis.processing_worker import dispatch
         response = {

@@ -176,8 +176,8 @@ def lookup_reference(value: str, references: dict[str, dict]) -> dict[str, Any]:
     if value in references:
         return references[value]
     matches = [item for item in references.values() if value in {
-        item.get("path"), item.get("name"), item.get("output_label"),
-        Path(item.get("path", "")).stem,
+        item.get("path"), item.get("name"), item.get("output_label"), item.get('requested_name'),
+        Path(item.get("path", "")).stem, Path(item.get("path", "")).name,
     }]
     if not matches and Path(value).is_absolute():
         # Canonical path equality is exact identity, not fuzzy filename guessing.

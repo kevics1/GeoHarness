@@ -252,6 +252,7 @@ class GeoDeliverTool(BaseTool):
             project_digest = None
             project_file = "map.qgs"
             project_fidelity = "unverified"
+            recorded_project = {}
             if project_directory:
                 project_root = Path(project_directory).expanduser()
                 project_root = (
@@ -332,6 +333,9 @@ class GeoDeliverTool(BaseTool):
                             Path("project") / target.relative_to(project_root),
                         )
                     )
+            from geoharness.analysis.result_package import delivery_packages
+
+            files = delivery_packages(context.metadata, files, recorded_project, resolve)
             if not files and not project_files:
                 raise ValueError("Select at least one artifact or a portable project.")
             if primary is None:
@@ -399,6 +403,17 @@ class GeoDeliverTool(BaseTool):
                 and package_matches
                 and receipt.get("status") != "stale"
             )
+            requirement = context.metadata.get('geo_task_record', {}).get(
+                'analysis_requirement', 'unclassified')
+            analysis_acceptance = {
+                'requirement': requirement,
+                'status': 'not_applicable' if requirement != 'required' else
+                'persisted_values_checked' if recorded_project.get('analysis', {}).get(
+                    'status') == 'verified' else 'unverified',
+                'scientific_correctness': 'unverified',
+            }
+            if requirement == 'required' and analysis_acceptance['status'] == 'unverified':
+                verified = False
             expected_package = {
                 item["path"]: item["sha256"]
                 for item in packaged.get("files", [])
@@ -486,6 +501,7 @@ class GeoDeliverTool(BaseTool):
                 "project_note": ("Reference QGIS layout differs from the main image."
                                  if project_fidelity == "reference" else ""),
                 "quality_status": "passed" if verified else "draft",
+                "analysis_acceptance": analysis_acceptance,
                 "ledger_errors": list(dict.fromkeys(ledger_errors)),
                 "snapshot_status": "changed" if snapshot_changed else "passed",
                 "map_id": receipt.get("map_id"),

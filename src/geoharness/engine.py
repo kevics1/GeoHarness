@@ -75,22 +75,24 @@ class GeoQueryEngine(QueryEngine):
             return
         # Only a new task starts fresh budgets and recovery policy. A pending
         # continuation does not append a user message or replace the task goal.
-        self._query_recovery_state = None
-        self.tool_metadata.pop("geo_query_recovery", None)
-        if not pending:
+        fresh_task = not pending and not (
+            continuation and self.tool_metadata.get('geo_task_record'))
+        if fresh_task:
+            self._query_recovery_state = None
+            self.tool_metadata.pop("geo_query_recovery", None)
             reset_map_workflow(self.tool_metadata)
         config = self.tool_metadata.get("geoharness_config")
         if config is not None:
             from geoharness.task_budget import start_task
 
-            if not pending:
+            if fresh_task:
                 start_task(self.tool_metadata, config)
                 from geoharness.task_state import begin_task
 
                 begin_task(self.tool_metadata, cwd=self._cwd, goal=user_message.text)
             begin_map_request(self.tool_metadata, cwd=self._cwd, config=config,
                               continuation=continuation or bool(pending))
-        if user_message.text.strip() and not self._tool_metadata.pop(
+        if not continuation and user_message.text.strip() and not self._tool_metadata.pop(
             "_suppress_next_user_goal", False,
         ):
             remember_user_goal(self._tool_metadata, user_message.text)
@@ -249,6 +251,15 @@ class GeoQueryEngine(QueryEngine):
     @staticmethod
     def _progress_fingerprint(event: ToolExecutionCompleted) -> str:
         """Count changed results, not fresh run timestamps or repeated read calls."""
+        if event.tool_name == 'geo_task':
+            try:
+                packet = json.loads(event.output)
+                if isinstance(packet.get('nodes'), list):
+                    return hashlib.sha256(json.dumps([
+                        {'id': n['id'], 'status': n['status']} for n in packet['nodes']
+                    ], sort_keys=True).encode()).hexdigest()
+            except (ValueError, TypeError, KeyError, AttributeError):
+                pass
         if event.tool_name == "geo_map_review":
             try:
                 review, _ = json.JSONDecoder().raw_decode(event.output.lstrip())
@@ -269,6 +280,7 @@ class GeoQueryEngine(QueryEngine):
         volatile = {
             "run_dir", "script_path", "manifest_path", "stdout_path", "stderr_path",
             "duration_seconds", "elapsed_seconds", "duration_ms",
+            "operation_id", "evidence_call", "evidence_path", "evidence_sha256",
         }
 
         def stable(value):

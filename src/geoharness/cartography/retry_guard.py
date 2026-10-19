@@ -51,6 +51,7 @@ def _fingerprint(tool, arguments, context) -> str | None:
         config = context.metadata.get("geoharness_config")
         roots = []
         if config:
+            from geoharness.analysis.result_package import infer_packages
             from geoharness.cartography.facts import infer_analysis_manifests
             from geoharness.qgis.worker_context import WorkerContext
             from geoharness.tools.geo_qgis import qgis_read_roots
@@ -61,6 +62,7 @@ def _fingerprint(tool, arguments, context) -> str | None:
                 *payload.get("analysis_manifests", []),
                 *infer_analysis_manifests([{"file_path": value} for value in paths],
                                          cwd=context.cwd, read_roots=roots),
+                *infer_packages(context.metadata, [{'file_path': value} for value in paths]),
             ]))
             for value in manifests:
                 try:

@@ -113,7 +113,8 @@ async def test_invalid_review_body_is_local_diagnostics_only_never_a_tool_patch(
     assert rejected_instruction not in result.output
     assert rejected_instruction not in json.dumps(result.metadata)
     saved = json.loads(Path(result.metadata["review_path"]).read_text(encoding="utf-8"))
-    assert rejected_instruction in saved["diagnostics"]["raw_review_excerpt"]
+    assert rejected_instruction in saved['diagnostics'][
+        'format_recovery_initial_diagnostics']['raw_review_excerpt']
     assert saved["issues"] == [] and "qgis_patch" not in saved
 
 

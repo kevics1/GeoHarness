@@ -55,4 +55,7 @@ async def test_pixel_cache_reuses_unchanged_page_but_not_changed_purpose(tmp_pat
     assert len(calls) == 2
     await workflow.review_with_budget(path, evidence=evidence(3, 'map'),
                                      **{**kwargs, 'task': '检查图例'})
+    assert len(calls) == 2  # Prose alone cannot create a new pixel check.
+    await workflow.review_with_budget(path,
+        evidence={**evidence(3, 'map'), 'review_checks': ['检查图例与本页类别是否对应']}, **kwargs)
     assert len(calls) == 3

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -31,8 +31,11 @@ class GeoMapReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra=_input_schema)
     file_path: str = Field(description="PNG/JPEG map image to inspect; PDF/SVG need a PNG preview.")
     task: str = Field(default="", description=(
-        "仅首次或检查要求改变时填写。复审省略则复用同地图的检查目标；"
+        "检查任务的简短说明；复审省略复用原说明。新增实质检查要求请用checks，"
         "不要把最终复核等进度措辞当作新目标。"))
+    checks: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=16,
+        description='新增或改变的图片检查要求；同一页复审沿用，不能仅改措辞反复请求审图。')
     map_id: str = Field(default="", description="Stable logical map ID; keep it across versions.")
     evidence: dict[str, Any] = Field(
         default_factory=dict,
@@ -76,6 +79,10 @@ def review_goal(task, metadata, identity, config):
 async def review_pixels(path, *, arguments, context, identity, evidence):
     config = context.metadata['geoharness_config']
     task = review_goal(arguments.task, context.metadata, identity, config)
+    checks = context.metadata.setdefault('map_workflow_state', {}).setdefault('review_checks', {})
+    if 'checks' in arguments.model_fields_set:
+        checks[identity] = list(arguments.checks)
+    evidence = {**evidence, 'review_checks': checks.get(identity, [])}
     kwargs = dict(config=config, task=task, evidence=evidence,
         retry_service_failure=arguments.retry_service_failure, metadata=context.metadata,
         map_id=identity, client=context.metadata.get('map_review_client'), pixel_only=True)
@@ -87,9 +94,11 @@ async def review_pixels(path, *, arguments, context, identity, evidence):
             and 'retry_invalid_response' not in arguments.model_fields_set
             and not flags.get('invalid_response_retry')):
         first_sent = bool(flags.get('request_sent'))
+        first_diagnostics = dict(result.diagnostics)
         result, flags = await review_with_budget(path, **kwargs, retry_invalid_response=True)
         result.diagnostics.update(format_recovery_attempted=True,
-                                  format_recovery_initial_stage=stage)
+                                  format_recovery_initial_stage=stage,
+                                  format_recovery_initial_diagnostics=first_diagnostics)
         flags['format_recovery_request_count'] = int(first_sent) + int(
             bool(flags.get('request_sent')))
     return result, flags
@@ -436,6 +445,12 @@ class GeoMapReviewTool(BaseTool):
                       if page not in verified.get("reviewed_page_indices", [])]
         current_binding = verified.get("review_binding")
         if budget.get("review_cached") and current_binding:
+            if (result.status in {'passed', 'issues'}
+                    and not result.diagnostics.get('failure_stage')):
+                result.diagnostics.setdefault('source_review_binding',
+                                              result.diagnostics.get('review_binding', {}))
+                result.diagnostics['review_binding'] = dict(current_binding)
+                result.diagnostics['pixel_conclusion_rebound_to_current_package'] = True
             clean_pixels = (result.status == "passed" or result.diagnostics.get(
                 "page_visual_status") == "passed") and (
                 not result.diagnostics.get("failure_stage")

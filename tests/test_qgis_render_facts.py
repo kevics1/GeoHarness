@@ -240,7 +240,10 @@ async def test_actual_png_export_reports_pal_and_classified_hollow_symbols(tmp_p
     body = frame["layer_bboxes"][0]
     assert body["layer_index"] == 2 and body["minimum_span_mm"] < 1
     manifest = json.loads(Path(result["project_manifest"]).read_text(encoding="utf-8"))
-    assert manifest["native_facts"] == facts
+    expected = copy.deepcopy(facts)
+    for page in expected['page_previews']:
+        page['path'] = Path(page['path']).relative_to(Path(result['project_dir'])).as_posix()
+    assert manifest["native_facts"] == expected
     assert manifest["creation_spec"]["source_bindings"] == creation["source_bindings"]
     assert all(layer["file_path"].startswith("data/")
                for layer in manifest["creation_spec"]["parameters"]["layers"])

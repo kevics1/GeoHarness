@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import hashlib
 import json
 import os
 import signal
@@ -27,6 +28,7 @@ _ACTIONS = {
     "project_inspect",
     "project_export",
     "project_preflight",
+    "console",
 }
 
 
@@ -162,8 +164,9 @@ async def execute_qgis(
     cwd: Path,
     settings: QgisConfig,
     read_roots: list[Path] | tuple[Path, ...] = (),
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Execute a structured QGIS request; no shell or user Python code is evaluated."""
+    """Run structured Processing/project tasks or an explicit guarded console script."""
     if action not in _ACTIONS:
         raise ValueError(f"Unsupported QGIS action: {action}")
     if action == "search" and not payload.get("limit"):
@@ -199,6 +202,12 @@ async def execute_qgis(
     paths["request.json"].write_text(
         json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    if action == 'console':
+        (run_dir / 'analysis.py').write_text(payload['code'], encoding='utf-8')
+    effective_timeout = (
+        settings.timeout_seconds if timeout_seconds is None
+        else min(float(timeout_seconds), settings.timeout_seconds)
+    )
     result: dict[str, Any] = {
         "status": "error",
         "result": None,
@@ -214,7 +223,7 @@ async def execute_qgis(
         "stdout_truncated": False,
         "stderr_truncated": False,
         "exit_code": None,
-        "timeout_seconds": settings.timeout_seconds,
+        "timeout_seconds": effective_timeout,
         "guard": "trusted QGIS runtime with application-level file guards; not an OS sandbox",
     }
     process = None
@@ -255,11 +264,11 @@ async def execute_qgis(
         # The worker waits for this marker before importing QGIS or starting native jobs.
         (run_dir / ".start").touch()
         try:
-            await asyncio.wait_for(process.wait(), timeout=settings.timeout_seconds)
+            await asyncio.wait_for(process.wait(), timeout=effective_timeout)
         except asyncio.TimeoutError:
             result.update(
                 status="timeout",
-                error_summary=f"QGIS exceeded {settings.timeout_seconds:g}s timeout",
+                error_summary=f"QGIS exceeded {effective_timeout:g}s timeout",
             )
             await _terminate_process_tree(process, job)
         if result["status"] != "timeout":
@@ -271,9 +280,29 @@ async def execute_qgis(
                         status="error", error_summary=f"QGIS exited with code {process.returncode}"
                     )
             else:
+                # The exception can occur before worker.py enters its own try
+                # block (import/bootstrap failures). Captured stderr is the only
+                # actionable diagnostic; surface its last cause immediately.
                 result["error_summary"] = (
                     f"QGIS exited without a result file (code {process.returncode})"
                 )
+                try:
+                    tail = paths["stderr.txt"].read_text(encoding="utf-8")[-12000:]
+                except OSError:
+                    tail = ""
+                lines = [line.strip() for line in tail.splitlines() if line.strip()]
+                cause = next((line for line in reversed(lines)
+                              if not line.startswith("File \"")), "")
+                if cause:
+                    result["error_summary"] += f": {cause[:2000]}"
+                result["diagnostics"] = {
+                    "code": "worker_no_result",
+                    "exit_code": process.returncode,
+                    "stderr_tail": tail[-6000:],
+                    "recovery": ("Inspect stderr_path. If the worker failed during import, "
+                                 "verify the QGIS package boundary and installed runtime; "
+                                 "do not retry the same request unchanged."),
+                }
     except asyncio.CancelledError:
         cancelled = True
         result.update(status="cancelled", error_summary="QGIS request was cancelled")
@@ -315,7 +344,8 @@ async def execute_qgis(
         )
         reserved = set(paths) | {".start"}
         result["files"] = [
-            {"path": str(path), "size_bytes": path.stat().st_size}
+            {"path": str(path), "size_bytes": path.stat().st_size,
+             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
             for path in sorted(run_dir.rglob("*"))
             if path.is_file()
             and path.resolve().is_relative_to(run_dir)

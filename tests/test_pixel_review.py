@@ -328,7 +328,7 @@ async def test_legacy_cache_cannot_skip_pixel_review_and_deadline_is_not_service
 
     monkeypatch.setattr(workflow, "review_map", deadline)
     _, flags = await workflow.review_with_budget(image, config=GeoConfig(), task="New scope",
-        evidence={}, metadata=metadata, pixel_only=True)
+        evidence={'review_checks': ['检查新增要求']}, metadata=metadata, pixel_only=True)
     assert not flags["service_retry_allowed"]
     assert flags["service_retry_after_seconds"] == 0
     assert flags["next_action"] == "inspect_failure_and_fix_configuration_or_input"

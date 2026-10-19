@@ -247,6 +247,14 @@ def _workflow(raw: Any, secrets: tuple[str, ...], *, restoring: bool) -> dict[st
         calls, hits = _counter(value.get("provider_calls")), _counter(value.get("cache_hits"))
         if calls is not None and hits is not None:
             validated_activity[key] = {"provider_calls": calls, "cache_hits": hits}
+    checks = raw.get('review_checks', {})
+    validated_checks = {}
+    if isinstance(checks, dict):
+        for key, value in list(checks.items())[-MAX_REVIEW_CACHE:]:
+            if (_text(key, _MAX_PATH) is not None and isinstance(value, list)
+                    and len(value) <= 16 and all(isinstance(item, str)
+                        and 1 <= len(item) <= 200 for item in value)):
+                validated_checks[key] = _safe_json(value, secrets)
     return {
         "reviews": reviews, "seconds": seconds,
         # Reservation is an in-flight promise, not measured consumption. After
@@ -257,6 +265,7 @@ def _workflow(raw: Any, secrets: tuple[str, ...], *, restoring: bool) -> dict[st
         "validation_retries": validated_retries,
         "service_recovery": validated_services,
         "review_activity": validated_activity,
+        'review_checks': validated_checks,
         "provider_calls_total": _counter(raw.get("provider_calls_total")) or 0,
         "cache_hits_total": _counter(raw.get("cache_hits_total")) or 0,
         "repair_attempts": validated_attempts,

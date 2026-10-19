@@ -106,6 +106,11 @@ def resolve_policy_answer(metadata, answer):
         '同意', '可以', '按这个方案', '按此方案', '同意上述方案', 'yes', 'approve'} else
         'rejected' if normalized in {'不同意', '拒绝', 'no', 'reject'} else 'needs_revision')
     decisions[identity] = decision.model_dump(mode='json')
+    task = metadata.get('geo_task_record')
+    if task:
+        from geoharness.task_store import save_record
+
+        save_record(metadata, cwd=task['workspace'])
 
 
 def approved_score_policy(metadata, identity):

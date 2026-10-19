@@ -340,7 +340,8 @@ async def test_registered_detail_page_uses_its_pixels_and_does_not_create_a_map_
     context = ToolExecutionContext(cwd=tmp_path, metadata=metadata)
     first = await GeoMapReviewTool().execute(GeoMapReviewInput(
         file_path=str(image), map_id=receipt["job_id"], task="Check actual detail"), context)
-    assert first.metadata["review_status"] == "unverified"
+    assert first.metadata["review_status"] == "passed"
+    assert first.metadata['map_receipt']['stages']['visual_checked']['status'] == 'unverified'
     result = await GeoMapReviewTool().execute(GeoMapReviewInput(
         file_path=str(detail), map_id=receipt["job_id"], task="Check actual detail"),
         context)
@@ -362,7 +363,7 @@ async def test_registered_detail_page_uses_its_pixels_and_does_not_create_a_map_
 
 
 @pytest.mark.parametrize("status", ["passed", "issues"])
-async def test_only_clean_cached_pixels_can_rebind_to_a_new_native_package(
+async def test_completed_pixel_findings_rebind_without_reusing_native_repair_authority(
     tmp_path, monkeypatch, status,
 ):
     from openharness.tools.base import ToolExecutionContext
@@ -390,9 +391,10 @@ async def test_only_clean_cached_pixels_can_rebind_to_a_new_native_package(
         assert report["diagnostics"]["review_binding"]["version"] == 2
         assert report["diagnostics"]["pixel_pass_rebound_to_current_package"] is True
     else:
-        assert report["diagnostics"]["review_binding"]["version"] == 1
+        assert report["diagnostics"]["review_binding"]["version"] == 2
+        assert report["diagnostics"]["source_review_binding"]["version"] == 1
         assert "qgis_patch" not in report
-        assert report["diagnostics"]["repair_binding_status"] == "stale_cached_package"
+        assert report["diagnostics"]["pixel_conclusion_rebound_to_current_package"] is True
 
 
 def test_strategy_uses_its_own_issues_instead_of_first_whitespace_patch(tmp_path):

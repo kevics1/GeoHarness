@@ -146,7 +146,10 @@ async def test_read_only_preflight_does_not_create_snapshot_directories(tmp_path
     )
     assert not result.is_error, result.output
     assert json.loads(result.output)["layers"][0]["feature_count"] == 1
-    assert set(tmp_path.rglob("*")) == original_files
+    assert original_files <= set(tmp_path.rglob("*"))
+    assert list(tmp_path.glob('.geoharness/qgis-plans/*.json'))
+    assert not (tmp_path / '.geoharness/qgis').exists()
+    assert not list(tmp_path.rglob('*.png'))
 
 
 async def test_source_change_during_freezing_rejects_before_budget_and_cleans(

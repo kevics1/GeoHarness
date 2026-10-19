@@ -66,13 +66,17 @@ def assess_repair_progress(history: list, current: dict) -> dict:
     persistent = [issue for issue in now if len(previous) == 2 and all(
         any(_same_concern(issue, old) and severity[issue["severity"]] >= severity[old["severity"]]
             for old in _issues(review)) for review in previous)]
-    resolved = sum(not any(_same_concern(old, issue) for issue in now)
-                   for old in _issues(previous[0])) if previous and current.get("status") in {
-                       "passed", "issues"} else 0
+    # A different model response is not independent evidence that an old issue
+    # was repaired. Keep unmatched concerns open until a verified disposition exists.
+    unmatched = [old for old in _issues(previous[0])
+                 if not any(_same_concern(old, issue) for issue in now)] if previous else []
+    resolved = 0
     repeated = bool(persistent and current.get("image_sha256"))
     return {"state": "persistent_concerns" if repeated else "not_established",
             "requires_user_decision": False,
             "repeated_concern_count": len(persistent), "resolved_concern_count": resolved,
+            "unmatched_concern_count": len(unmatched),
+            "unmatched_state": "needs_recheck" if unmatched else "none",
             "concerns": [{key: issue.get(key) for key in
                 ("issue_code", "frame_id", "roi_ref", "location", "bbox", "feature_ids")}
                 for issue in persistent],

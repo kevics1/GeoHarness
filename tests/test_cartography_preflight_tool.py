@@ -71,7 +71,10 @@ async def test_native_readonly_preflight_without_qgis(tmp_path):
     assert not result.is_error, result.output
     assert result.metadata["render_executed"] is False
     assert not context.metadata.get("map_workflow_state")
-    assert not (tmp_path / ".geoharness").exists()
+    # Native preflight returns a hash-bound capsule for a short create call.
+    assert list((tmp_path / '.geoharness/qgis-plans').glob('*.json'))
+    assert not (tmp_path / '.geoharness/qgis').exists()
+    assert not list(tmp_path.rglob('*.png'))
 
 
 async def test_same_deterministic_preflight_error_is_not_executed_again(tmp_path, monkeypatch):

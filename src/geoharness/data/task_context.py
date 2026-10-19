@@ -149,8 +149,11 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             continue
         try:
-            path = Path(item["path"]).absolute()
-            if path.resolve() != path or not path.is_file():
+            # Windows may expose valid files through an 8.3 short directory name.
+            # Canonicalize before identity checks; catalog/profile paths are never
+            # used as symlink authorization grants.
+            path = Path(item["path"]).expanduser().resolve()
+            if not path.is_file():
                 continue
             signature = file_signature(path)
             if signature is None or source and (

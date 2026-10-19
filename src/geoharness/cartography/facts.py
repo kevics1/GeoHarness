@@ -38,6 +38,7 @@ _METHODS = {
     "impact": "距离阈值影响分析",
     "area": "面积统计",
     "accessibility": "路网可达性",
+    "result_package": "结果集事实",
 }
 
 
@@ -658,9 +659,51 @@ def _footer(analyses: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _package_facts(manifest, path, raw, reader, mapped_sources, display_name):
+    from geoharness.analysis.result_package import verify_package
+
+    package = verify_package(path, guard=reader.guard)
+    facts = package['facts']
+    source = reader.path(facts['source'])
+    matches = []
+    for index, item in enumerate(mapped_sources):
+        if not item.get('file_path') or reader.path(item['file_path']) != source:
+            continue
+        if facts.get('crs') is None:
+            raise ValueError('表格事实不能直接用作空间图层的几何证据')
+        import geopandas as gpd
+
+        frame = gpd.read_file(source)
+        expected = frame
+        if item.get('derivation') is not None:
+            from geoharness.cartography.derivation import MapDerivation, derive_frame
+
+            expected = derive_frame(frame, MapDerivation.model_validate(item['derivation']))
+        if item.get('gdf') is not None and frame_content(item['gdf']) != frame_content(expected):
+            raise ValueError('绘图缓存与结果包源文件不一致')
+        matches.append({'output': 'result', 'layer_index': item.get('layer_index', index),
+                        'match': 'derivation' if item.get('derivation') is not None else 'path',
+                        'source_feature_count': len(frame), 'mapped_feature_count': len(expected),
+                        'selection_id': package['selection']['id']})
+    if not matches:
+        raise AnalysisBindingError({'result': {'path': source}}, mapped_sources)
+    return {'manifest_path': str(path), 'manifest_digest': hashlib.sha256(raw).hexdigest(),
+        'action': 'result_package', 'metric_crs': package['execution_evidence'].get(
+            'metric_crs') or 'unknown', 'export_crs': facts.get('crs'),
+        'display_crs': display_name, 'parameters': {},
+        'statistics': {'feature_count': facts['row_count'], 'numeric': facts['numeric'],
+                       'counts': facts['counts'], 'groups': facts['groups'],
+                       'selection': package['selection'], 'units': package['units']},
+        'mapped_outputs': matches, 'output_fingerprints': {'result': facts['sha256']},
+        'verification': 'sha256_verified', 'analysis_correctness': 'unverified',
+        'method_status': package['method_status'],
+        'verification_scope': 'Recomputed persisted values and exact selection only; '
+                              'scientific method and free prose are not certified.'}
+
+
 def infer_analysis_manifests(mapped_sources: list[dict], *, cwd: Path,
                              read_roots: list[Path]) -> list[str]:
-    """Recognize only adjacent native manifests explicitly listing this local output."""
+    """Recognize only adjacent producer records explicitly listing this local output."""
     reader = _EvidenceReader(cwd, read_roots)
     manifests = []
     for source in mapped_sources:
@@ -674,7 +717,7 @@ def infer_analysis_manifests(mapped_sources: list[dict], *, cwd: Path,
                 document.get("paths"), dict,
             ):
                 continue
-            if not any(isinstance(entry, dict) and entry.get("geojson")
+            elif not any(isinstance(entry, dict) and entry.get("geojson")
                        and reader.path(entry["geojson"]) == path
                        for entry in document["paths"].values()):
                 continue
@@ -693,7 +736,7 @@ def load_analysis_facts(
     mapped_sources: list[dict],
     display_crs: str,
 ) -> dict[str, Any]:
-    """Validate native manifests and produce safe, output-backed map facts.
+    """Validate native manifests and published packages and produce output-backed map facts.
 
     Mapped sources use original local ``file_path`` locators, including when the
     renderer uses a temporary bridge copy. Labels/free text are never evidence.
@@ -714,6 +757,10 @@ def load_analysis_facts(
         seen.add(path)
         raw = reader.read(path, _MANIFEST_BYTES)
         manifest = _json(raw)
+        if manifest.get('kind') == 'analysis_result_package':
+            analyses.append(_package_facts(manifest, path, raw, reader,
+                                           mapped_sources, display_name))
+            continue
         action = manifest.get("action")
         if _is_accessibility(manifest):
             analyses.append(_accessibility_facts(manifest, path, raw, reader,

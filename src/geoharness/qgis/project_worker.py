@@ -15,6 +15,7 @@ import re
 import shutil
 import xml.etree.ElementTree as ET
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ def _layout_input_digest(payload: dict[str, Any]) -> str:
         "action", "map_id", "output_path", "output_format", "project_format",
         "strict_layout", "_frozen_frames", "_consume_plan",
         "_creation_spec", "_layout_origin", "_layout_zoom_history", "_candidate_probe",
+        "_page_reuse",
     }}
     bound["layout"] = {key: value for key, value in (payload.get("layout") or {}).items()
                        if key != "layout_plan"}
@@ -301,8 +303,44 @@ def _plan_frames(layout: Any, project: Any, layers: list[Any], payload: dict) ->
     return result
 
 
+def _marker_diameter(renderer, feature, render_context):
+    """Measure filled static circular markers; other shapes remain risk hints."""
+    from qgis.core import Qgis, QgsMarkerSymbol
+
+    render_context.expressionContext().setFeature(feature)
+    symbol = renderer.symbolForFeature(feature, render_context)
+    if not isinstance(symbol, QgsMarkerSymbol) or symbol.sizeUnit() != Qgis.RenderUnit.Millimeters:
+        return 0
+    parts = symbol.symbolLayers()
+    if (len(parts) != 1 or parts[0].layerType() != 'SimpleMarker'
+            or parts[0].properties().get('name') != 'circle'
+            or not parts[0].offset().isNull() or parts[0].color().alpha() == 0
+            or symbol.opacity() <= 0
+            or any(part.dataDefinedProperties().hasActiveProperties() for part in parts)):
+        return 0
+    return symbol.size()
+
+
+@contextmanager
+def _marker_reader(layer, *, enabled):
+    """Initialize a private renderer once; categorized fields are invalid before startRender."""
+    if not enabled or layer.renderer() is None:
+        yield lambda feature: 0
+        return
+    from qgis.core import QgsExpressionContextUtils, QgsRenderContext
+
+    renderer = layer.renderer().clone()
+    context = QgsRenderContext()
+    context.expressionContext().appendScopes(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
+    renderer.startRender(context, layer.fields())
+    try:
+        yield lambda feature: _marker_diameter(renderer, feature, context)
+    finally:
+        renderer.stopRender(context)
+
+
 def _frame_evidence(
-    project: Any, layers: list[Any], payload: dict, frames: dict,
+    project: Any, layers: list[Any], payload: dict, frames: dict, *, report_only=False,
 ) -> tuple[dict, dict]:
     """Count required features over the frame union and measure only drawn point labels."""
     from qgis.core import (
@@ -349,26 +387,32 @@ def _frame_evidence(
             field = (labeling.fieldName
                      if labeling and labeling.drawLabels and not labeling.isExpression else None)
             layer_count = 0
-            for feature in layer.getFeatures(request):
-                geometry = QgsGeometry(feature.geometry())
-                if geometry.isEmpty():
-                    continue
-                geometry.transform(transform)
-                if not geometry.intersects(extent):
-                    continue
-                visible[index].add(feature.id())
-                layer_count += 1
-                if field and geometry.type() == QgsWkbTypes.PointGeometry \
-                        and not geometry.isMultipart() and feature[field] != NULL:
-                    labeled_count += 1
-                    if len(anchors) < 512:
-                        point = geometry.asPoint()
-                        style = payload.get("layers", [])[index].get("style") or {}
-                        sizes = [style.get("size_mm", 3)]
-                        sizes.extend(entry.get("size_mm", sizes[0]) for entry in
-                                     [*style.get("categories", []), *style.get("ranges", [])])
-                        anchors.append({"x": point.x(), "y": point.y(), "layer_index": index,
-                            "radius_mm": max(*sizes, labeling.format().size() * 25.4 / 72)})
+            with _marker_reader(layer, enabled=bool(field)) as marker_diameter:
+                for feature in layer.getFeatures(request):
+                    geometry = QgsGeometry(feature.geometry())
+                    if geometry.isEmpty():
+                        continue
+                    geometry.transform(transform)
+                    if not geometry.intersects(extent):
+                        continue
+                    visible[index].add(feature.id())
+                    layer_count += 1
+                    if geometry.type() == QgsWkbTypes.PointGeometry and not geometry.isMultipart():
+                        labeled = bool(field and feature[field] != NULL)
+                        labeled_count += int(labeled)
+                        if len(anchors) < 512:
+                            point = geometry.asPoint()
+                            style = payload.get("layers", [])[index].get("style") or {}
+                            sizes = [style.get("size_mm") or 3]
+                            sizes.extend(entry.get("size_mm") or sizes[0] for entry in
+                                         [*style.get("categories", []), *style.get("ranges", [])])
+                            anchors.append({"x": point.x(), "y": point.y(), "layer_index": index,
+                                "feature_id": int(feature.id()),
+                                "radius_mm": max(*sizes, labeling.format().size() * 25.4 / 72
+                                                 if labeled else 0),
+                                # Dense unlabelled point themes can intentionally overlap.
+                                # Hard identity separation applies to individual labels.
+                                "symbol_diameter_mm": (marker_diameter(feature) if labeled else 0)})
             counts[index][name] = layer_count
         composition[name] = composition_from_anchors(anchors,
             labeled_point_count=labeled_count, bounds=frame["extent"],
@@ -398,6 +442,57 @@ def _frame_evidence(
     if not frame_checks["valid"]:
         error = ValueError("Required layer visibility failed across the rendered frame union")
         error.diagnostics = {"frame_checks": frame_checks}
+        raise error
+    hard_conflicts = []
+    for frame_name, evidence in composition.items():
+        for conflict in evidence.get("hard_conflicts", []):
+            hard_conflicts.append({"frame_id": frame_name, **conflict})
+    # A hard conflict is actionable only when a frame claims to carry those
+    # features but its own paper footprint cannot separate them. A dedicated
+    # detail frame is the intended remedy; it must not be rejected by the same
+    # overview collision it was created to solve.
+    unresolved = []
+    def pair_ids(pair):
+        return frozenset(((pair['layer_index'], pair['anchor_feature_id']),
+                          (pair['other_layer_index'], pair['other_feature_id'])))
+
+    for conflict in hard_conflicts:
+        current = conflict['frame_id']
+        remaining = []
+        for pair in conflict.get('hard_pairs', []):
+            subjects = pair_ids(pair)
+            resolved_elsewhere = False
+            for other_name, other in composition.items():
+                if other_name == current:
+                    continue
+                present = {(p['layer_index'], p['feature_id'])
+                           for p in other.get('symbol_subjects', [])}
+                overlaps = {pair_ids(p) for c in other.get('hard_conflicts', [])
+                            for p in c.get('hard_pairs', [])}
+                if subjects <= present and subjects not in overlaps:
+                    resolved_elsewhere = True
+                    break
+            if not resolved_elsewhere:
+                remaining.append(pair)
+        if remaining:
+            unresolved.append({**conflict, 'hard_pairs': remaining})
+    frame_checks['symbol_constraints'] = {'feasible': not unresolved,
+                                          'scope': 'labeled_static_filled_circles',
+                                          'unresolved': unresolved}
+    if unresolved and not report_only:
+        error = ValueError(
+            "Point symbol footprints overlap at the measured paper scale; "
+            "rendering would repeat the same collision")
+        error.diagnostics = {
+            "code": "paper_symbol_conflict",
+            "hard_conflicts": unresolved,
+            "remedies": [
+                "Reduce the classified symbol size or symbol extent for the named layer.",
+                "Render an explicit detail frame/page covering the named feature group.",
+                "Do not re-review unchanged pixels expecting a different conclusion.",
+            ],
+            "composition": composition,
+        }
         raise error
     frame_checks["subjects"] = _declared_frame_evidence(project, layers, payload, frames)
     if frame_checks["subjects"]["checked"]:
@@ -2319,47 +2414,46 @@ def _export_layout(
     exporter = QgsLayoutExporter(layout)
     if payload.get("strict_layout", False):
         _validate_layout_bounds(layout)
-    preview = Path(context.output_path(None, "preview.png"))
-    image_settings = QgsLayoutExporter.ImageExportSettings()
-    image_settings.dpi = payload.get("dpi", 150)
-    image_settings.pages = [0]
-    status = exporter.exportToImage(str(preview), image_settings)
-    if status != QgsLayoutExporter.Success:
-        raise ValueError(f"QGIS PNG export failed: {exporter.errorMessage()}")
-    if not preview.is_file() and preview.with_stem("preview_1").is_file():
-        preview.with_stem("preview_1").rename(preview)
-    if not preview.is_file():
-        raise ValueError("QGIS did not write the layout preview")
-    labels = _export_label_facts(layout, exporter)
-    from geoharness.qgis.layout_table import label_table_facts
+    from .layout_table import label_table_facts
+    from .page_cache import page_key, recall_page
 
     tables = label_table_facts(layout)
-    roster_previews, page_previews = [], [{"page_index": 0, "path": str(preview),
-        "frames": [name for name in ("main_map", "detail_map")
-                   if layout.itemById(name) is not None and layout.itemById(name).page() == 0]}]
-    page_previews[0]['role'] = ('mixed' if any(t['page'] == 0 for t in tables) else 'map')
-    for index in range(1, layout.pageCollection().pageCount()):
-        frame_ids = [name for name in ("main_map", "detail_map")
+    image_settings = QgsLayoutExporter.ImageExportSettings()
+    image_settings.dpi = payload.get('dpi', 150)
+    labels, roster_previews, page_previews = {}, [], []
+    for index in range(layout.pageCollection().pageCount()):
+        frame_ids = [name for name in ('main_map', 'detail_map')
                      if layout.itemById(name) is not None and layout.itemById(name).page() == index]
-        prefix = "detail_page" if frame_ids else "roster_page"
-        path = Path(context.output_path(None, f"{prefix}_{index + 1}.png"))
-        image_settings.pages = [index]
-        status = exporter.exportToImage(str(path), image_settings)
-        if status != QgsLayoutExporter.Success:
-            raise ValueError(f"QGIS roster-page PNG export failed: {exporter.errorMessage()}")
-        numbered = path.with_stem(path.stem + f"_{index + 1}")
-        if not path.is_file() and numbered.is_file():
-            numbered.rename(path)
-        if not path.is_file():
-            raise ValueError("QGIS did not write the roster-page preview")
-        labels.update({key: value for key, value in _export_label_facts(layout, exporter).items()
-                       if value})
         has_table = any(table['page'] == index for table in tables)
-        page_previews.append({"page_index": index, "path": str(path), "frames": frame_ids,
-                              'role': 'mixed' if has_table and frame_ids else
-                                      'roster' if has_table else 'map' if frame_ids else 'unknown'})
-        if any(table["page"] == index for table in tables):
+        prefix = 'detail_page' if frame_ids else 'roster_page'
+        name = 'preview.png' if index == 0 else f'{prefix}_{index + 1}.png'
+        path = Path(context.output_path(None, name))
+        try:
+            content_key = page_key(layout, index, payload, context, tables)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            content_key = None  # Unproven dependency identity means render normally.
+        page_labels = recall_page(content_key, path, payload, context)
+        reused = page_labels is not None
+        if not reused:
+            image_settings.pages = [index]
+            status = exporter.exportToImage(str(path), image_settings)
+            if status != QgsLayoutExporter.Success:
+                raise ValueError(f'QGIS PNG export failed: {exporter.errorMessage()}')
+            numbered = path.with_stem(path.stem + f'_{index + 1}')
+            if not path.is_file() and numbered.is_file():
+                numbered.rename(path)
+            if not path.is_file():
+                raise ValueError('QGIS did not write the page preview')
+            page_labels = {key: value for key, value in _export_label_facts(
+                layout, exporter).items() if key in frame_ids}
+        labels.update(page_labels)
+        page_previews.append({'page_index': index, 'path': str(path), 'frames': frame_ids,
+            'role': 'mixed' if has_table and frame_ids else 'roster' if has_table else
+                    'map' if frame_ids else 'unknown',
+            'content_key': content_key, 'reused': reused, 'labels': page_labels})
+        if has_table:
             roster_previews.append(str(path))
+    preview = Path(page_previews[0]['path'])
     native_facts = _export_geometry_facts(layout, labels, image_settings.dpi)
     native_facts.update(roster_previews=roster_previews, page_previews=page_previews)
     if payload.get("strict_layout", False):
@@ -2732,7 +2826,8 @@ def dispatch(action: str, payload: dict[str, Any], context: Any) -> dict[str, An
                                      "run preflight again")
                 layout_plan = supplied_plan
             composition, frame_checks = _frame_evidence(
-                project, layers, payload, layout_plan["frames"])
+                project, layers, payload, layout_plan["frames"],
+                report_only=action == 'project_preflight')
             if action == "project_create":
                 project.layoutManager().removeLayout(layout)
                 payload = {**payload, "layout": layout_plan["parameters"],

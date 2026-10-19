@@ -57,11 +57,12 @@ Processing。结果层必须持久化后才返回，摘要记录字段、数量�
 
 ## 分析事实与地图任务
 
-`cartography/facts.py` 仅接受显式传入或由实际输出路径识别到的原生 geo_analysis 清单。
+`cartography/facts.py` 接受原生 geo_analysis 清单及显式发布的分析结果包。
 它读取实际 GeoJSON/CSV、核对清单输出 SHA256 和计数，检查 impact 标记与阈值/选集
 一致性，并要求输出匹配当前实际地图图层。新清单使用 sha256_verified；没有原始摘要
 的旧清单仅作 legacy_count_verified，不能升级为完整性证明。任意自由文字、
-QGIS Processing 或 Python 清单不作为这个接口的统计证据。
+QGIS Processing 或 Python 原始清单不直接作为统计证据，须经 `geo_task publish_analysis`
+从实际落盘数据重算实体、统计、选集与缺失值分母，再绑定到当前图层。
 
 `values.py` 在副本中规范日期/null 与分类值。内容比较使用已经核对的输出字节，经同一 GDAL/GeoPandas 读取后比较；只有能匹配原始 Feature.id 且属性里不存在业务 id 时，才排除驱动加入的编号。`derivation.py` 用原输出行位置、字段选择和新注记列生成地图视图，核验期从已验证字节重建该视图并与实际冻结图层比较，不把声明当作证据。来源记录同时保留完整分析数和上图数。
 
@@ -138,3 +139,29 @@ QGIS create 使用临时 GPKG/GeoTIFF 冻结输入，预检和 worker 共用这�
 Windows worker 启动 native 代码前附加 Job Object；取消/超时清理整个任务进程树。
 其他平台使用独立进程组。这里的路径与算法检查用于可信 GIS 工作流，不是可抵御
 任意恶意 native 代码的操作系统沙箱。
+
+
+## 持久任务与增量页面执行
+
+`task_controller.py` 在既有引擎与工具 registry 之间执行有稳定节点 ID 的依赖计划。
+SQLite 保存在工作区 `agent.task_state_dir/<task UUID>/task.sqlite3`，任务身份与地图台账
+分离，节点只认证执行依赖；质量仍由真实地图回执和分析结果包判断。
+`task_store.py` 先提交不可变请求证据，再执行工具，完整输出/元数据在上游压缩前落盘。
+Windows msvcrt / Unix flock 保证一个任务只有一个执行者，进程退出自动释放锁。
+未知中断保留请求与未知结果，不重放；已完成节点以输入/伴随文件/生产者清单/产物及证据 SHA 验证复用。
+
+`qgis/console.py` 为 `geo_python backend=qgis` 提供独立的 PyQGIS 命名空间，
+Processing 仍经原有算法校验，显式 JSON 状态代替跨调用原生对象。
+`analysis/result_package.py` 统一发布选集绑定的可复算事实；不引入第二套分析 bundle。
+制图前逐候选矢量核对绑定，交付从复制后的源核对统计、选集和单位，未知科学方法仍未验证。
+
+`qgis/page_cache.py` 只为有输入快照和创建契约的系统工程计算保守页面内容键，
+包含 QGIS 原生页面 XML、实际二维样式、源摘要、字体、表格内容与渲染环境；
+去除随机容器身份及二维不使用的剖面默认色，保留实际绘制顺序和共享样式契约。
+相同内容复制已验证 SHA 的 PNG 和相应标签测量；工程仍完整生成，PDF从当前布局导出。
+页面复用不自动代表新 PDF 已完成独立像素验收。
+
+`review_contract.py` 将规范像素、稳定页面检查契约与当前工程绑定分开。
+普通任务措辞、工程目录、页码、分析清单位置不属于像素检查身份；显式 checks、当前页角色
+和检查配置才影响结论复用。完成的 passed/issues 均可从任务 SQLite 的 SHA 绑定证据恢复；
+普通会话恢复仍不认证任意旧通过。复用结论重新绑定当前工程，原始疑点不因措辞变化自动解决。

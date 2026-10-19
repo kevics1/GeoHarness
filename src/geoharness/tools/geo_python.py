@@ -8,6 +8,7 @@ import heapq
 import json
 import math
 from pathlib import Path
+from typing import Any, Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -17,6 +18,7 @@ from geoharness.config.settings import CartographyConfig, ExecutionConfig, GeoCo
 from geoharness.execution import execute_python
 from geoharness.invocation import invocation_guide
 from geoharness.qgis.artifacts import returned_preview_paths
+from geoharness.tools.geo_qgis import qgis_read_roots
 
 
 def qgis_diagnostic_files(root: Path) -> tuple[Path, ...]:
@@ -257,6 +259,17 @@ class GeoPythonInput(BaseModel):
     depends_on: list[str] = Field(default_factory=list, max_length=32,
         description="Prior successful stage IDs whose unchanged artifacts this step requires.")
     policy_ref: str = Field(default='', description='用户已确认的评分政策引用；模型不能自签确认。')
+    backend: Literal['python', 'qgis'] = Field(default='python', description=(
+        "PyQGIS 控制台模式：在已初始化的独立 QGIS Python 解释器中运行完整脚本，"
+        "可直接 import processing/qgis.core 并使用 Project。仍需显式声明输入；"
+        "每次调用是新进程，不保留隐式全局变量。"
+    ))
+    console_state: dict[str, Any] = Field(default_factory=dict, max_length=64,
+        description="backend=qgis 时显式传入的有界 JSON 变量；不传则无跨调用状态。")
+    console_result: str = Field(default="CONSOLE_RESULT", max_length=80, pattern=(
+        r"^[A-Za-z_][A-Za-z0-9_]{0,79}$"), description=(
+        "backend=qgis 时读取的脚本变量名；必须是 JSON 可序列化值，不能返回 QGIS 原生对象。"
+    ))
 
     @field_validator('expected_outputs')
     @classmethod
@@ -275,6 +288,9 @@ class GeoPythonInput(BaseModel):
                 + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True)
                 + ". Send a shorter complete script using the configured timeout."
             )
+        if isinstance(value, dict) and value.get("console_state") is not None \
+                and not isinstance(value.get("console_state"), dict):
+            raise ValueError("console_state must be a JSON object")
         if isinstance(value, dict) and (
             not value.get("code")
             or isinstance(value.get("code"), str)
@@ -291,10 +307,13 @@ class GeoPythonInput(BaseModel):
 class GeoPythonTool(BaseTool):
     name: str = "geo_python"
     description: str = (
-        "运行完整 Python 脚本，用于自定义 GIS 分析或制图。"
+        "运行完整 Python 脚本，用于自定义 GIS 分析或制图。backend=qgis 时在已初始化的"
+        "独立 QGIS Python 解释器中运行（PyQGIS 控制台），可直接使用 processing/qgis.core/Project；"
+        "console_state 是显式 JSON，不保留隐式跨调用变量。"
+        "标准分析优先 geo_qgis 的 Processing 算法。"
         + invocation_guide("geo_python") + " "
         "可用库：GeoPandas、Shapely、pandas、numpy、rasterio、matplotlib（Agg）。"
-        "原生 buffer/clip/intersection/distance/count/impact/area 优先使用 geo_analysis。"
+        "标准空间算法优先geo_qgis，兼容已有geo_analysis入口。"
         "注入路径：RUN_DIR（唯一写入根/当前 cwd）、SOURCE_CWD、"
         "DATA_DIRS:list[Path]（直接迭代；[0] 是工作区，不是数据集目录）。"
         "只有 os.environ['DATA_DIRS'] 是用 os.pathsep 分隔的字符串。"
@@ -353,6 +372,99 @@ class GeoPythonTool(BaseTool):
                 option["maximum"] = self.timeout_limit
         return schema
 
+    async def _execute_console(self, arguments: GeoPythonInput,
+                              context: ToolExecutionContext) -> ToolResult:
+        """Run an explicit PyQGIS console script in the independent QGIS interpreter."""
+        config = context.metadata.get("geoharness_config")
+        if config is None or not getattr(config.qgis, "enabled", False):
+            return ToolResult(output="PyQGIS console requires enabled QGIS integration.",
+                              is_error=True, metadata={"script_executed": False})
+        from geoharness.data.artifacts import assert_usable_artifact
+        from geoharness.data.task_context import resolve_registered_path
+        from geoharness.qgis.runner import execute_qgis
+
+        inputs = {}
+        try:
+            if arguments.stage_id or arguments.depends_on or arguments.policy_ref:
+                raise ValueError('PyQGIS控制台的阶段依赖请用geo_task plan；'
+                                 '评分请用确认后的score入口')
+            if set(arguments.input_requirements) - set(arguments.input_refs):
+                raise ValueError("input_requirements must name existing input_refs aliases")
+            for alias, value in arguments.input_refs.items():
+                value = resolve_registered_path(value, context.metadata,
+                                                cwd=Path(context.cwd), config=config)
+                path = Path(value)
+                path = (path if path.is_absolute() else context.cwd / path).resolve()
+                from geoharness.execution.contracts import validate_input
+
+                assert_usable_artifact(path)
+                if alias in arguments.input_requirements:
+                    validate_input(path, arguments.input_requirements[alias].model_dump())
+                inputs[alias] = str(path)
+        except (OSError, ValueError) as exc:
+            return ToolResult(output=f"Precondition failed; no console script executed: {exc}",
+                              is_error=True, metadata={"script_executed": False})
+        timeout = min(arguments.timeout_seconds or config.qgis.timeout_seconds,
+                      config.qgis.timeout_seconds)
+        try:
+            result = await execute_qgis(
+                "console", {"code": arguments.code, "inputs": inputs,
+                            "console_state": arguments.console_state,
+                            "console_result": arguments.console_result},
+                cwd=Path(context.cwd), settings=config.qgis,
+                read_roots=qgis_read_roots(config, Path(context.cwd)),
+                timeout_seconds=timeout,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            return ToolResult(output=f"PyQGIS console could not run: {exc}", is_error=True,
+                              metadata={"script_executed": False})
+        if result.get("status") != "succeeded":
+            return ToolResult(output=json.dumps({
+                "status": result.get("status"), "error_summary": result.get("error_summary"),
+                "run_dir": result.get("run_dir"), "stderr": result.get("stderr", "")[-4000:],
+                "execution_scope": "PyQGIS console; QGIS initialized",
+            }, ensure_ascii=False, indent=2), is_error=True, metadata=result)
+        payload = result.get("result") or {}
+        files = []
+        run_dir = Path(result.get("run_dir", "")).resolve()
+        for path in sorted(run_dir.rglob("*")) if run_dir.is_dir() else []:
+            if (path.is_file() and path.resolve().is_relative_to(run_dir)
+                    and path.relative_to(run_dir).parts[0] != ".profile"
+                    and path.name not in {"request.json", "result.json", "manifest.json",
+                                          "stdout.txt", "stderr.txt", ".start"}):
+                files.append({"path": str(path), "size_bytes": path.stat().st_size,
+                              "state": "succeeded",
+                              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        missing = [name for name in arguments.expected_outputs
+                   if not (run_dir / name).is_file()]
+        declared = payload.get('console_result')
+        if missing:
+            from openharness.utils.fs import atomic_write_text
+
+            manifest_path = Path(result['manifest_path'])
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            manifest.update(status='failed', error_summary=f'Expected outputs missing: {missing}')
+            for item in manifest.get('files', []):
+                item.update(state='partial', usable=False)
+            atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
+            return ToolResult(output=json.dumps({
+                "status": "failed", "execution_status": "completed",
+                "error_summary": f"console expected outputs missing: {missing}",
+                "run_dir": str(run_dir), "files": files,
+                "script_executed": True, "console": True,
+            }, ensure_ascii=False, indent=2), is_error=True,
+                metadata={**result, "execution_status": "completed",
+                          "script_executed": True, "console": True,
+                          "files": files, "inputs": inputs})
+        visible = {key: result[key] for key in (
+            'status', 'run_dir', 'manifest_path', 'stdout_path', 'stderr_path', 'stdout', 'stderr')}
+        visible.update(result=payload, inputs=inputs, files=files, backend='qgis')
+        return ToolResult(output=json.dumps(visible, ensure_ascii=False, indent=2),
+                          metadata={**result, "script_executed": True,
+                                    "console": True, "inputs": inputs, "files": files,
+                                    "console_result_value": declared,
+                                    "console_result_name": arguments.console_result})
+
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         assert isinstance(arguments, GeoPythonInput)
         config = context.metadata.get("geoharness_config")
@@ -361,6 +473,11 @@ class GeoPythonTool(BaseTool):
             return ToolResult(
                 output="Error: Python execution is disabled or unconfigured.", is_error=True
             )
+        if arguments.backend == 'qgis':
+            return await self._execute_console(arguments, context)
+        if arguments.console_state:
+            return ToolResult(output="console_state requires backend=qgis", is_error=True,
+                              metadata={"script_executed": False})
         from geoharness.data.artifacts import assert_usable_artifact
         from geoharness.data.task_context import resolve_registered_path
         from geoharness.execution.stages import prepare_stage
@@ -532,6 +649,7 @@ class GeoPythonTool(BaseTool):
                            "geometries=None -> RasterData(array masked 3D,crs,transform,nodata)",
             "write_raster": "path,RasterData or 3D array,crs=None,transform=None,nodata=... "
                             "-> GeoTIFF Path; raw arrays require CRS/transform",
+            "backend": "qgis uses PyQGIS interpreter; console_result names JSON return",
             "raster_backdrop": "source,output,band=1,out_shape=None,geometries=None,"
                                "percentiles=(2,98),rgb=False,resampling='nearest' -> Path; "
                                "display stretch only, not analytical reclassification",
