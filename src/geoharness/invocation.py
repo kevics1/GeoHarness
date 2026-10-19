@@ -17,25 +17,26 @@ PYTHON_CAUTIONS = (
 )
 
 QGIS_CAUTIONS = (
-    "优先只写一次 spec，再 build(spec_ref, edits by layer_key)：验证和导出共用一个原生"
-    "作业。不要对未变化的成功 build 再调用 preflight/create。旧版冻结 create 只接受 "
-    "action+plan_ref；任何变更都需要重新验证。",
+    "首选 build(spec_ref, edits)：一个原生作业完成验证、渲染和打包。首次草案用 "
+    "action=spec 并给 layers；已有草案才用 spec_ref。旧版冻结 create 只接受 "
+    "action+plan_ref；任何变更都需要重新构建。",
     "每个图框二选一：FIT focus_layers 或显式 extent，绝不能同时使用。"
-    "render_layers 必须包含 focus_layers/label_layers；详图必须有范围来源。",
+    "render_layers 必须包含 focus_layers/label_layers；详图必须有范围来源。"
+    "table_only 图层只能做名单源，不能出现在任何图框的 render/focus/label 列表。",
     "保留稳定的 layer_key 和声明的对象覆盖要求。收紧范围必须保持覆盖；实际缩放为原生"
     "拟合后的 main_scale/detail_scale。使用返回的 candidate_edit_calls 及其准确的 "
-    "base_spec_ref，然后重新 preflight。",
+    "base_spec_ref，然后重新 build；不要猜索引或显示名称。",
     "诊断用的 detail_path/offset/limit 只是 help/inspect 的只读选择器；不要把它们复制"
-    "到 create/preflight/spec。",
+    "到 build/spec/create/preflight。",
     "名录 key_field（或第一个字段）必须唯一且非空；top_n 需要 sort_by 且会排除 keys。"
-    "测量表格/图例空间；create 不代表视觉验收。",
+    "测量表格/图例空间；build/create 只证明工程产出，不代表视觉验收。",
+    "成功结果返回 project_dir/project_file 和 preview_path。制作地图最终交付时，"
+    "geo_deliver 必须带 project_dir；不能只交 PNG/PDF，也不能把截图当可编辑工程。",
 )
-
 
 def invocation_guide(tool_name: str) -> str:
     rules = PYTHON_CAUTIONS if tool_name == "geo_python" else QGIS_CAUTIONS
     return "调用前注意事项（CALL-TIME CAUTIONS）：" + " ".join(rules)
-
 
 def section_cautions(section: str) -> list[str]:
     by_section = {
@@ -53,12 +54,12 @@ def section_cautions(section: str) -> list[str]:
     }
     return list(by_section.get(section, QGIS_CAUTIONS))
 
-
 def action_forms() -> dict:
     """推荐短调用字段；旧版完整输入仍兼容。"""
     return {
-        "help": ["action", "section", "detail_path?", "offset?", "limit?"],
-        "spec": ["action", "spec_ref", "edits or patches"],
+        "help": ["action", "section?", "detail_path?", "offset?", "limit?"],
+        "spec:new": ["action", "layers", "title?", "crs?", "layout?", "dpi?"],
+        "spec:edit": ["action", "spec_ref", "edits or patches"],
         "build": ["action", "spec_ref", "edits or patches?"],
         "preflight": ["action", "spec_ref"],
         "create": ["action", "plan_ref"],

@@ -33,6 +33,20 @@ def test_offloaded_repeat_ignores_call_identity_without_following_artifact_paths
         GeoQueryEngine._progress_fingerprint(event(2)))
 
 
+def test_execution_receipts_do_not_turn_an_unchanged_result_into_progress():
+    def event(identity, count=13):
+        return ToolExecutionCompleted(tool_name='geo_python', output=json.dumps({
+            'result': {'console_result': {'count': count}},
+            'operation_id': identity, 'execution_id': identity,
+            'target_operation_id': identity,
+            'execution_evidence_call': {'action': 'evidence', 'operation_id': identity},
+        }))
+
+    fingerprint = GeoQueryEngine._progress_fingerprint
+    assert fingerprint(event('a')) == fingerprint(event('b'))
+    assert fingerprint(event('a')) != fingerprint(event('b', count=14))
+
+
 class Input(BaseModel):
     index: int = 0
 

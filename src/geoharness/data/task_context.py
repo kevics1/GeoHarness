@@ -236,13 +236,16 @@ def data_references(profiles: dict, outputs: list[dict]) -> dict[str, dict[str, 
 
 
 def data_ref_snapshot(metadata: dict, *, cwd: Path, config: Any) -> dict[str, dict]:
-    """Use exactly the last model-visible snapshot, including its stale identities."""
+    """Retain every issued identity; consumers still verify content before use."""
+    from geoharness.data.reference_store import retained_references
+
     snapshot = metadata.get("_data_refs_snapshot")
     if isinstance(snapshot, dict):
-        return snapshot
+        return retained_references(metadata, cwd=cwd, current=snapshot)
     from geoharness.data.profiles import current_profiles
 
-    return data_references(current_profiles(metadata), recent_outputs(cwd, config, limit=16))
+    current = data_references(current_profiles(metadata), recent_outputs(cwd, config, limit=16))
+    return retained_references(metadata, cwd=cwd, current=current)
 
 
 def resolve_registered_path(value: str, metadata: dict, *, cwd: Path, config: Any) -> str:
@@ -331,6 +334,10 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
     profiles = current_profiles(metadata)
     records = recent_outputs(cwd, config, limit=16)
     references = data_references(profiles, records)
+    from geoharness.data.reference_store import retained_references
+
+    # Presentation is bounded, issued identities are not revoked by that bound.
+    retained_references(metadata, cwd=cwd, current=references)
     qgis_jobs = recent_qgis_results(cwd, config)
     from geoharness.qgis.specification import recent_specs
 
@@ -383,7 +390,8 @@ def model_data_context(metadata: dict, *, cwd: Path, config: Any) -> str:
         "geo_analysis reference.filters; distance/impact return reference_relation and "
         "optional distance_class from distance_breaks_m. A positive-distance threshold is "
         "external proximity, never containment. Bind labels/statistics to reference_scope. "
-        "data_refs is the exact DATA_REFS snapshot used by geo_python. Prefer resolve_data(ref), "
+        "data_refs lists current locators; previously issued task refs remain usable, "
+        "subject to file/producer integrity checks. Prefer resolve_data(ref), "
         "read_vector(ref, target_crs=None), or native_layer(ref, derivation=None) "
         "over path guesses. "
         "Each layer may use a different declared encoding; read_vector(ref) uses that layer's "

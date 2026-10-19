@@ -16,7 +16,9 @@ from geoharness.config.settings import GeoConfig
 class GeoQgisInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["doctor", "search", "help", "run", "model"]
+    action: Literal["doctor", "search", "help", "run", "model"] = Field(
+        description='doctor检查运行时；search搜索算法；help读准确参数/枚举/单位；'
+        'run执行算法；model执行本地.model3。未知算法须先search/help。')
     query: str = Field(default="", description="搜索算法名称、ID、分组；支持中文与英文关键词。")
     algorithm_id: str = Field(default="", description="search 返回的实际已安装算法 ID，不能猜测。")
     parameters: dict[str, Any] = Field(
@@ -24,8 +26,10 @@ class GeoQgisInput(BaseModel):
         description="help 返回的准确参数；输出只写入本次独立任务目录。",
     )
     model_path: str = Field(default="", description="现有的本地 QGIS .model3 处理模型。")
-    limit: int | None = Field(default=None, ge=1, le=100)
-    offset: int = Field(default=0, ge=0)
+    limit: int | None = Field(default=None, ge=1, le=100,
+        description='search每页算法数量，省略使用配置max_search_results；1..100。')
+    offset: int = Field(default=0, ge=0,
+        description='search结果起始索引，从0开始；不用于算法业务参数。')
 
     @model_validator(mode="after")
     def validate_action(self) -> GeoQgisInput:

@@ -35,9 +35,7 @@ class GeoRasterDataInput(BaseModel):
     action: Literal["list", "inspect", "stats"] = Field(
         default="list",
         description=(
-            "list: list local raster files; "
-            "inspect: show size/bands/CRS/bounds/resolution; "
-            "stats: compute min/max/mean/percentiles for a band"
+            '默认list列出栅格；inspect检查尺寸/波段/CRS/范围/分辨率；stats计算指定波段统计。'
         ),
     )
     name: str = Field(
@@ -49,12 +47,12 @@ class GeoRasterDataInput(BaseModel):
     )
     file_path: str = Field(
         default="",
-        description="Explicit path to a raster file; overrides 'name'.",
+        description='可选准确栅格路径，默认空按name定位。',
     )
     band: int = Field(
         default=1,
         ge=1,
-        description="1-based band index (rasters are usually single-band).",
+        description='统计波段号，从1开始，默认1；先检查波段含义与数量。',
     )
 
     def target(self) -> str:
@@ -66,10 +64,11 @@ class GeoRasterDataTool(BaseTool):
 
     name: str = "geo_raster_data"
     description: str = (
-        "Load local raster data (GeoTIFF/IMG/ASC/VRT). "
-        "Actions: list (raster files), inspect (dimensions/CRS/bounds), "
-        "stats (band min/max/mean). Use this for gridded surfaces such as "
-        "elevation or fuel-load rasters."
+        (
+        'geo_raster_data：发现并读取本地栅格GeoTIFF/IMG/ASC/VRT。list列文件'
+        '，inspect返回尺寸/波段/CRS/范围/分辨率，stats返回指定'
+        '波段统计；不猜波段意义，不访问数据库。'
+    )
     )
     input_model: type[BaseModel] = GeoRasterDataInput
 

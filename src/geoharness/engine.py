@@ -281,6 +281,7 @@ class GeoQueryEngine(QueryEngine):
             "run_dir", "script_path", "manifest_path", "stdout_path", "stderr_path",
             "duration_seconds", "elapsed_seconds", "duration_ms",
             "operation_id", "evidence_call", "evidence_path", "evidence_sha256",
+            "execution_id", "target_operation_id", "execution_evidence_call",
         }
 
         def stable(value):

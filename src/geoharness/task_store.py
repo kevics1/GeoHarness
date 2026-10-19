@@ -195,14 +195,37 @@ def finish_operation(handle, metadata, *, result=None, error=None):
     return {'operation_id': identity, 'evidence_path': str(path), 'evidence_sha256': digest}
 
 
+def committed_result(metadata, *, cwd, operation_id):
+    """Read a complete committed packet internally, validating the exact bytes once."""
+    directory = task_directory(metadata, cwd=Path(cwd))
+    if directory is None:
+        raise ValueError('No persistent task is active')
+    with connect(directory) as db:
+        row = db.execute('SELECT * FROM operations WHERE id=?', (operation_id,)).fetchone()
+    if row is None or not row['evidence']:
+        raise ValueError('Operation has no committed result; inspect its saved request first')
+    path = Path(row['evidence']).resolve()
+    if not path.is_relative_to(directory.resolve() / 'evidence'):
+        raise ValueError('Operation evidence is outside this task')
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != row['digest']:
+        raise ValueError('Operation evidence changed; it cannot be used for recovery')
+    document = json.loads(raw)
+    if document.get('operation_id') != operation_id:
+        raise ValueError('Operation evidence identity mismatch')
+    return dict(row), document
+
+
 def read_evidence(metadata, *, cwd, operation_id='', section='output', offset=0, limit=4000):
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 12000:
         raise ValueError('Evidence requires offset >= 0 and limit between 1 and 12000')
     directory = task_directory(metadata, cwd=Path(cwd))
     if directory is None:
         raise ValueError('No persistent task is active')
-    if section not in {'output', 'arguments', 'metadata', 'record'}:
-        raise ValueError('Evidence section must be output/arguments/metadata/record')
+    if section not in {'output', 'arguments', 'metadata', 'record', 'result',
+                       'stdout', 'stderr', 'artifacts'}:
+        raise ValueError('Evidence section must be output/arguments/metadata/record/'
+                         'result/stdout/stderr/artifacts')
     if not operation_id:
         with connect(directory) as db:
             records = [dict(row) for row in db.execute(
@@ -227,11 +250,25 @@ def read_evidence(metadata, *, cwd, operation_id='', section='output', offset=0,
                 hashlib.sha256(path.read_bytes()).hexdigest() != digest):
             raise ValueError('Operation evidence changed; it cannot be used for recovery')
         document = json.loads(path.read_text(encoding='utf-8'))
-    value = dict(row) if section == 'record' else document[section]
+    if section in {'result', 'stdout', 'stderr', 'artifacts'}:
+        try:
+            packet, _ = json.JSONDecoder().raw_decode(document['output'].lstrip())
+        except (TypeError, ValueError):
+            packet = {}
+        packet = packet if isinstance(packet, dict) else {}
+        name = 'files' if section == 'artifacts' else section
+        value = packet.get(name, document.get('metadata', {}).get(name))
+    else:
+        value = dict(row) if section == 'record' else document[section]
     content = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    next_offset = offset+limit if offset+limit < len(content) else None
     return {'operation_id': operation_id, 'status': row['status'], 'section': section,
+            'target_operation_id': operation_id,
             'offset': offset, 'total_chars': len(content), 'content': content[offset:offset+limit],
-            'next_offset': offset+limit if offset+limit < len(content) else None}
+            'next_offset': next_offset,
+            'next_call': {'action': 'evidence', 'operation_id': operation_id,
+                          'section': section, 'offset': next_offset, 'limit': limit}
+                         if next_offset is not None else None}
 
 
 @contextmanager

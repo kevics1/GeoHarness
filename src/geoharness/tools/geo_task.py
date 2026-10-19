@@ -14,21 +14,50 @@ from geoharness.task_controller import TaskNode
 
 class GeoTaskInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['inspect', 'propose_score', 'score', 'plan', 'run', 'evidence',
-                    'publish_analysis', 'resume']
-    policy: ScorePolicy | None = None
-    policy_ref: str = ''
-    source_ref: str = ''
-    entity_key: str = ''
+    action: Literal['inspect', 'propose_score', 'score', 'plan', 'run', 'execute', 'evidence',
+                    'publish_analysis', 'resume', 'review_issues'] = Field(description=(
+        'execute登记并执行一个node，一次调用返回结果；plan增量保存nodes但不执行；'
+        'run执行已保存节点；inspect查看状态；evidence仅排错/读取大结果；'
+        'publish_analysis发布落盘事实包；resume恢复任务；review_issues查看/处置审图问题；'
+        'propose_score/score确认并执行评分。'))
+    map_id: str = Field(default='',
+        description='review_issues筛选的实际逻辑地图ID，省略匹配本任务。')
+    page_index: int = Field(default=0, ge=0, description='review_issues的页面索引，从0开始。')
+    issue_id: str = Field(default='', description='review_issues返回的稳定issue:引用，处置时必填。')
+    disposition: Literal['inspect', 'confirmed', 'dismissed', 'fix_verified'] = Field(
+        default='inspect', description='review_issues：inspect只读；confirmed确认问题；'
+        'dismissed记录有证据的误报判断；fix_verified需新像素原生审查明确核验该issue_id。'
+        '处置不会直接提升交付质量。')
+    reason: str = Field(default='', max_length=2000,
+        description='问题处置的具体依据，非inspect时必填。')
+    evidence_operation_id: str = Field(default='', max_length=64,
+        description='问题处置引用的成功操作ID；fix_verified须为同图同页新图片审查，checks含issue_id。')
+    policy: ScorePolicy | None = Field(default=None,
+        description='仅propose_score：待用户确认的评分目的、字段、权重、缺失政策和分类。')
+    policy_ref: str = Field(default='',
+        description='仅score：propose_score返回且经真实用户确认的政策引用；不得自行编造。')
+    source_ref: str = Field(default='',
+        description='score/publish_analysis：已登记成功文件的data:引用或工具返回的完整文件路径。')
+    entity_key: str = Field(default='', description='仅score：实际存在且唯一非空的实体ID字段名。')
     nodes: list[TaskNode] = Field(default_factory=list, max_length=64,
-        description='完整依赖计划。arguments可用{"$ref":"node_id#/result/outputs/OUTPUT"}引用前置结果。')
+        description='仅plan：新增/修改的节点，未列出旧节点默认保留；'
+                    '$ref按原始结果JSON Pointer引用。')
+    node: TaskNode | None = Field(default=None,
+        description='仅execute：要登记并立即执行的单个节点；相同ID修订，成功且未变化时复用。')
+    replace_plan: bool = Field(default=False,
+        description='仅plan：默认false为增量更新；true明确删除未列出的节点并替换完整计划。')
     node_id: str = Field(default='',
         description='run时可只执行一个已就绪节点；省略执行确定性就绪链。')
     operation_id: str = Field(default='', max_length=64,
         description='evidence读取返回的准确operation_id；省略则分页列出调用。')
-    section: Literal['output', 'arguments', 'metadata', 'record'] = 'output'
-    offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=4000, ge=1, le=12000)
+    section: Literal['output', 'arguments', 'metadata', 'record', 'result',
+                     'stdout', 'stderr', 'artifacts'] = Field(default='output', description=(
+        'evidence读取区段：result结构化返回值，artifacts产物列表，stdout/stderr日志；'
+        'output完整原始输出，arguments原请求，metadata执行元数据，record操作状态。'))
+    offset: int = Field(default=0, ge=0,
+        description='evidence字符偏移，从0开始；翻页直接使用返回next_call，不修改目标ID。')
+    limit: int = Field(default=4000, ge=1, le=12000,
+        description='evidence每页字符数，1..12000；未指定operation_id时为记录条数（最多100）。')
     facts: FactRequest | None = Field(default=None,
         description='publish_analysis的唯一实体键、统计字段、单位和声明方法；统计从source_ref重算。')
     task_id: str = Field(default='', max_length=36,
@@ -46,6 +75,10 @@ class GeoTaskInput(BaseModel):
             raise ValueError('plan requires nodes')
         if self.nodes and self.action != 'plan':
             raise ValueError('Only plan accepts nodes')
+        if (self.action == 'execute') != (self.node is not None):
+            raise ValueError('execute requires node; other actions do not accept node')
+        if self.replace_plan and self.action != 'plan':
+            raise ValueError('Only plan accepts replace_plan')
         if self.action == 'publish_analysis' and (not self.facts or not self.source_ref):
             raise ValueError('publish_analysis requires source_ref and facts')
         if self.facts and self.action != 'publish_analysis':
@@ -55,7 +88,9 @@ class GeoTaskInput(BaseModel):
 
 class GeoTaskTool(BaseTool):
     name = 'geo_task'
-    description = ('持久任务控制器。plan提交有稳定ID和depends_on的工具节点；run按依赖执行，'
+    description = ('持久任务控制器。普通单步优先execute，提供node={id,tool,arguments,depends_on}，'
+        '一次调用登记、执行并返回nodes[].result；无需先plan再run或为看结果启动Python。'
+        '多步plan增量保存有稳定ID和depends_on的节点，未列出的节点保留；run按依赖执行，'
         '复用未变化的成功结果，失败只修当前节点，不能重复同一失败。'
         '标准分析优先geo_qgis；自定义PyQGIS用geo_python backend=qgis。'
         'publish_analysis从已登记成功产物生成选集绑定的统计/中文报告；facts只验证落盘值，'
@@ -77,16 +112,33 @@ class GeoTaskTool(BaseTool):
                 snapshot['plan'] = plan_status(context)
             return ToolResult(output=json.dumps(snapshot, ensure_ascii=False))
         try:
+            if arguments.action == 'review_issues':
+                from geoharness.cartography.review_findings import review_findings
+
+                packet = review_findings(context, map_id=arguments.map_id,
+                    page_index=arguments.page_index, issue_id=arguments.issue_id,
+                    disposition=arguments.disposition, reason=arguments.reason,
+                    evidence_operation_id=arguments.evidence_operation_id)
+                return ToolResult(output=json.dumps(packet, ensure_ascii=False))
             if arguments.action == 'plan':
                 from geoharness.task_controller import submit_plan
 
-                return ToolResult(output=json.dumps(submit_plan(context, arguments.nodes),
+                return ToolResult(output=json.dumps(submit_plan(context, arguments.nodes,
+                                                     replace=arguments.replace_plan),
                                                      ensure_ascii=False))
-            if arguments.action == 'run':
-                from geoharness.task_controller import run_plan
+            if arguments.action in {'run', 'execute'}:
+                from geoharness.task_controller import run_plan, submit_plan
 
-                packet = await run_plan(context, node_id=arguments.node_id)
-                failed = any(n['status'] in {'failed', 'interrupted'} for n in packet['nodes'])
+                target = arguments.node_id
+                if arguments.action == 'execute':
+                    submit_plan(context, [arguments.node])
+                    target = arguments.node.id
+                packet = await run_plan(context, node_id=target)
+                selected = [n for n in packet['nodes'] if not target or n['id'] == target]
+                failed = any(n['status'] != 'succeeded' for n in selected)
+                if target:
+                    packet['target_node'] = target
+                    packet['target_complete'] = bool(selected) and not failed
                 return ToolResult(output=json.dumps(packet, ensure_ascii=False), is_error=failed,
                                   metadata={'reused': packet['reused']})
             if arguments.action == 'evidence':
@@ -146,8 +198,14 @@ class GeoTaskTool(BaseTool):
                 policy_ref=arguments.policy_ref, input_refs={'source': record['ref']},
                 expected_outputs=[filename, 'score_facts.json', 'score_facts.md']), context)
         except (ValueError, OSError, KeyError, TypeError) as exc:
-            return ToolResult(output=f'Task precondition failed: {exc}', is_error=True,
+            return ToolResult(output=json.dumps({'status': 'precondition_failed',
+                'code': 'task_contract_error', 'tool_executed': False,
+                'error_summary': str(exc),
+                'next_action': '按失败字段修正当前请求；使用inspect查看已有节点，'
+                               '保留成功前置结果。'},
+                ensure_ascii=False), is_error=True,
                               metadata={'script_executed': False})
 
     def is_read_only(self, arguments):
-        return arguments.action in {'inspect', 'evidence'}
+        return arguments.action in {'inspect', 'evidence'} or (
+            arguments.action == 'review_issues' and arguments.disposition == 'inspect')

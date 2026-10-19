@@ -151,7 +151,8 @@ async def test_delivery_filename_collisions_do_not_overwrite_selected_artifacts(
         path.write_text(str(index), encoding="utf-8")
         paths.append(str(path))
     ctx = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
-    result = await GeoDeliverTool().execute(GeoDeliverInput(files=paths), ctx)
+    result = await GeoDeliverTool().execute(
+        GeoDeliverInput(files=paths, allow_report_only=True), ctx)
     assert not result.is_error, result.output
     copied = result.metadata["files"]
     assert len(set(copied)) == len(names)

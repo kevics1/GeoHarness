@@ -29,35 +29,33 @@ def _input_schema(schema):
 
 class GeoMapReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra=_input_schema)
-    file_path: str = Field(description="PNG/JPEG map image to inspect; PDF/SVG need a PNG preview.")
+    file_path: str = Field(description='必填，实际PNG/JPEG图片路径；PDF/SVG须先使用其PNG预览。')
     task: str = Field(default="", description=(
         "检查任务的简短说明；复审省略复用原说明。新增实质检查要求请用checks，"
         "不要把最终复核等进度措辞当作新目标。"))
     checks: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
         default_factory=list, max_length=16,
         description='新增或改变的图片检查要求；同一页复审沿用，不能仅改措辞反复请求审图。')
-    map_id: str = Field(default="", description="Stable logical map ID; keep it across versions.")
+    map_id: str = Field(default="",
+        description='逻辑地图ID，默认空按图片登记识别；各版本保持一致。')
     evidence: dict[str, Any] = Field(
         default_factory=dict,
         description="Expected layers, CRS, source counts and rendering parameters.",
     )
     retry_invalid_response: bool = Field(
         default=False,
-        description="Allow one explicit retry of a cached JSON/schema failure; never loops.",
+        description='默认false；仅允许对已缓存的JSON/Schema失败显式恢复一次。',
     )
     retry_service_failure: bool = Field(
         default=False,
-        description="Explicitly request review of the same image after a transient outage. "
-        "Never bypasses service cooldown/Retry-After, retries credentials/input errors, "
-        "or redraws the map. After cooldown a new call can send one request.",
+        description='默认false；瞬态服务故障恢复后显式重试，同样受冷却约束，不重画图片。',
     )
     auto_repair: bool | None = Field(
         default=None, exclude=True,
         description="Compatibility only: this tool is always read-only.",
     )
     all_pages: bool = Field(default=False, description=(
-        "Review all verified pages of the same registered QGIS package in one tool call. "
-        "Review-only; merge findings into one build. No guessed page paths or hidden rebuilds."))
+        '默认false；true一次检查已验证QGIS工程的全部页面，逐页返回结论。'))
 
     @model_validator(mode="after")
     def validate_review_controller(self):
@@ -219,14 +217,14 @@ def _verified_render_evidence(
 class GeoMapReviewTool(BaseTool):
     name = "geo_map_review"
     description = (
-        "Read actual map images and report visible problems: unreadable text, overlap, "
-        "occlusion, clipping, blank space and legend mismatches. Returns status, summary, "
-        "issues, limitations and image-bound reports. Read-only: never changes styles, "
-        "plans parameter patches, rebuilds maps or selects another candidate. "
-        "Use all_pages=true to inspect verified package pages. Whole-page images and "
-        "original-resolution crops are inspected directly by the image model. "
-        "A service/budget failure is unverified, never passed. Read request_sent and "
-        "diagnostics before retrying; cooldown/cache hits are not new service requests."
+        (
+        '只读取真实地图图片并找出可见问题：文字难读、重叠、遮挡、裁切、留白与图例'
+        '不符。返回status/summary/issues/limitatio'
+        'ns和绑定图片的报告；不修改地图。all_pages=true检查已验证'
+        '工程的全部页，整页与原始分辨率裁剪直接发给图片模型。服务失败保持unve'
+        'rified；先读request_sent和diagnostics再决定'
+        '恢复，缓存/冷却命中不算新服务请求。'
+    )
     )
     input_model = GeoMapReviewInput
 
@@ -439,6 +437,12 @@ class GeoMapReviewTool(BaseTool):
             evidence.get('previous_visual_reviews', []),
             {**result.model_dump(), 'image_sha256': digest,
              'page_index': verified.get('review_page_index', 0)})
+        from geoharness.cartography.review_findings import observe_findings
+
+        result.diagnostics['finding_registry'] = observe_findings(context.metadata,
+            cwd=context.cwd, map_id=identity, page_index=verified.get('review_page_index', 0),
+            image_sha256=digest, pixel_sha256=budget.get('pixel_sha256', ''),
+            review=result.model_dump())
         # Cached conclusions predate newer layouts too; page-zero pixels cannot accept page one.
         page_index = verified.get("review_page_index", 0)
         unreviewed = [page for page in _unreviewed_pages(verified.get("render_metadata") or {})
@@ -557,6 +561,9 @@ class GeoMapReviewTool(BaseTool):
                 "backend": verified["backend"],
                 "review_path": str(report),
                 "image_path": str(path),
+                "image_sha256": digest,
+                "review_checks": context.metadata.get('map_workflow_state', {}).get(
+                    'review_checks', {}).get(identity, []),
                 "map_id": identity,
                 "map_receipt": receipt,
                 **budget,

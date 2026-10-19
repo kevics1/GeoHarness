@@ -30,20 +30,18 @@ class GeoDBDataInput(BaseModel):
     action: Literal["list", "inspect", "load"] = Field(
         default="list",
         description=(
-            "list: list PostGIS tables; "
-            "inspect: show a table's columns/CRS/extent; "
-            "load: read rows and report shape/columns"
+            '默认list列出PostGIS表；inspect查看字段/CRS/范围；load读取并返回行数/字段。'
         ),
     )
     name: str = Field(
         default="",
-        description="Table name (required for inspect and load).",
+        description='表名，inspect/load时必填，默认空。',
     )
     limit: int = Field(
         default=5000,
         ge=1,
         le=200_000,
-        description="Maximum rows to read for the load action.",
+        description='默认5000，读取行数上限，范围1..200000。',
     )
 
 
@@ -52,9 +50,11 @@ class GeoDBDataTool(BaseTool):
 
     name: str = "geo_db_data"
     description: str = (
-        "Load geographic data from the PostGIS database. "
-        "Actions: list (tables), inspect (schema/CRS/extent), "
-        "load (read rows). Use this for anything stored as a database table."
+        (
+        '读取配置的PostGIS数据库。list发现表，inspect检查字段/'
+        'CRS/范围，load读取并返回行数与字段；本地文件使用geo_vect'
+        'or_data。'
+    )
     )
     input_model: type[BaseModel] = GeoDBDataInput
 

@@ -27,6 +27,18 @@ def preflight_code(code: str, input_aliases=None) -> list[dict]:
                 raise ValueError(f"INPUTS[{node.slice.value!r}] is not bound; declare input_refs. "
                                  f"Available aliases: {sorted(input_aliases)}")
     checks = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'write_analysis_report'):
+            target = node.args[0] if node.args else next(
+                (k.value for k in node.keywords if k.arg == 'path'), None)
+            # Validate a known literal suffix before launching the child. Unknown
+            # dynamic expressions are checked by the helper at runtime.
+            if isinstance(target, ast.BinOp) and isinstance(target.op, ast.Div):
+                target = target.right
+            if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                _report_paths(target.value)
+                checks.append({'check': 'analysis_report_paths', 'line': node.lineno})
     for node in tree.body:
         names = ([alias.name.split('.')[0] for alias in node.names]
                  if isinstance(node, ast.Import) else
@@ -642,10 +654,22 @@ def artifact_facts(path: Any, *, key: str, numeric_fields=(), predicates=(),
     return result
 
 
+def _report_paths(path):
+    path = Path(path)
+    if path.suffix.lower() not in {'.json', '.md'}:
+        raise ValueError('Analysis report path must end in .json or .md; '
+                         'both machine-readable JSON and Chinese Markdown are generated')
+    return path.with_suffix('.json'), path.with_suffix('.md')
+
+
 def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=(),
                           group_by=(), predicates=(), method: dict, claims=(),
                           stratify_by=()) -> dict:
     """从落盘结果生成同源JSON/中文Markdown；方法为声明，任意报告文本不受认证。"""
+    path, markdown_path = _report_paths(path)
+    source_path = Path(source).resolve()
+    if source_path in {path.resolve(), markdown_path.resolve()}:
+        raise ValueError('Report must not overwrite its source')
     facts = artifact_facts(source, key=key, numeric_fields=numeric_fields,
                            group_by=group_by, predicates=predicates, include_median=True,
                            stratify_by=stratify_by)
@@ -681,12 +705,6 @@ def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=()
                             'scientific method remains unverified')
               },
               'claims': checked, 'analysis_correctness': 'unverified'}
-    path = Path(path)
-    if path.suffix.lower() != '.json':
-        raise ValueError('Analysis report path must end in .json')
-    source_path = Path(source).resolve()
-    if source_path in {path.resolve(), path.with_suffix('.md').resolve()}:
-        raise ValueError('Report must not overwrite its source')
     lines = ['# 分析事实与方法记录', '', f"数据文件：{Path(source).name}",
              f"数据 SHA256：{facts['sha256']}", f"实体数：{facts['row_count']}", '',
              '以下统计从落盘结果重算；评分方法为声明，科学正确性尚未独立验证。', '',
@@ -695,8 +713,8 @@ def write_analysis_report(path: Any, *, source: Any, key: str, numeric_fields=()
              '```json', json.dumps({k: facts[k] for k in ('numeric', 'counts', 'groups')},
                                   ensure_ascii=False, indent=2), '```', '']
     markdown = '\n'.join(lines)
-    markdown_path = path.with_suffix('.md')
     markdown_path.write_text(markdown, encoding='utf-8')
+    report['paths'] = {'json': str(path.resolve()), 'markdown': str(markdown_path.resolve())}
     report['companions'] = {'markdown': {'path': str(markdown_path.resolve()),
         'sha256': hashlib.sha256(markdown_path.read_bytes()).hexdigest()}}
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False),

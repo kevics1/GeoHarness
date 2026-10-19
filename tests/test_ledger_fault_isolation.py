@@ -9,6 +9,17 @@ from geoharness.cartography import jobs, tracking  # noqa: F401 (bind before fai
 from geoharness.config.settings import GeoConfig
 
 
+def project_for_image(tmp_path, image):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    from geoharness.cartography.project import export_map_project
+
+    return export_map_project(tmp_path / 'editable-project', output_path=image,
+        layers=[{'gdf': gpd.GeoDataFrame({'id': [1]}, geometry=[Point(0, 0)], crs=3857)}],
+        render_kwargs={'mode': 'layers'})['project_dir']
+
+
 async def test_failed_draft_registration_preserves_successful_native_result(tmp_path, monkeypatch):
     from geoharness.tools.geo_qgis_project import GeoQgisProjectInput, GeoQgisProjectTool
 
@@ -40,6 +51,7 @@ async def test_selected_draft_can_be_copied_when_ledger_is_unreadable(tmp_path, 
 
     path = tmp_path / "preview.png"
     Image.new("RGB", (8, 8), "red").save(path)
+    project = project_for_image(tmp_path, path)
     def fail(*args, **kwargs):
         raise ValueError("injected ledger failure")
     monkeypatch.setattr(jobs, "map_job_receipt", fail)
@@ -48,7 +60,7 @@ async def test_selected_draft_can_be_copied_when_ledger_is_unreadable(tmp_path, 
     denied = await tool.execute(GeoDeliverInput(primary_map=str(path)), context)
     assert denied.is_error
     delivered = await tool.execute(GeoDeliverInput(primary_map=str(path),
-        version_policy="selected"), context)
+        version_policy="selected", project_dir=project), context)
     assert not delivered.is_error, delivered.output
     assert delivered.metadata["quality_status"] == "draft"
     assert delivered.metadata["ledger_errors"]
@@ -139,6 +151,7 @@ async def test_delivery_registration_failure_preserves_copied_manifest(tmp_path,
 
     path = tmp_path/'preview.png'
     Image.new('RGB', (8, 8), 'red').save(path)
+    project = project_for_image(tmp_path, path)
     context = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': GeoConfig()})
     identity = jobs.ensure_map_job(context.metadata, cwd=tmp_path, config=GeoConfig(),
                                     artifact_path=path)
@@ -146,7 +159,7 @@ async def test_delivery_registration_failure_preserves_copied_manifest(tmp_path,
         raise ValueError('injected registration failure after copying')
     monkeypatch.setattr(jobs, 'record_map_delivery', fail)
     result = await GeoDeliverTool().execute(GeoDeliverInput(map_id=identity,
-        primary_map=str(path), version_policy='selected'), context)
+        primary_map=str(path), version_policy='selected', project_dir=project), context)
     assert not result.is_error, result.output
     assert result.metadata['quality_status'] == 'draft'
     assert result.metadata['receipt_status'] == 'failed'
@@ -211,6 +224,7 @@ async def test_delivery_postcopy_read_failure_returns_copied_unregistered_files(
 
     path = tmp_path / "preview.png"
     Image.new("RGB", (8, 8), "red").save(path)
+    project = project_for_image(tmp_path, path)
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": GeoConfig()})
     original = jobs.map_job_receipt
     reads = 0
@@ -223,7 +237,8 @@ async def test_delivery_postcopy_read_failure_returns_copied_unregistered_files(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(jobs, "map_job_receipt", read)
-    result = await GeoDeliverTool().execute(GeoDeliverInput(primary_map=str(path)), context)
+    result = await GeoDeliverTool().execute(GeoDeliverInput(primary_map=str(path),
+        project_dir=project), context)
     assert reads == 3
     assert not result.is_error, result.output
     assert result.metadata["delivery_status"] == "copied_unregistered"

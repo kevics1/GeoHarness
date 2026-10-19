@@ -165,13 +165,17 @@ _TOOL_CATALOG = """\
 # 工具目录（Tool Catalog）
 
 ## 原生工具（10 个，另有 2 个可选 QGIS 工具）
-- **geo_task**：多步任务先用plan提交稳定节点ID、arguments和depends_on，再用run执行就绪链。
+- **geo_task**：普通单步直接调用原生工具，系统自动登记、执行和复用，无需先plan再run。
+需要明确多步依赖时用plan增量提交稳定节点ID、arguments和depends_on，再用run执行就绪链；
+未列出的旧节点保留，只有replace_plan=true才整体替换。execute(node={...})可一次显式登记并执行。
 标准分析节点使用geo_qgis；需要自定义组合时使用geo_python，PyQGIS控制台指定backend=qgis。
 后续节点用`{"$ref":"node_id#/result/outputs/OUTPUT"}`引用QGIS结果；Python产物可引用
 `node_id#/files/0/path`，先确认准确输出结构，不能猜测索引。
 计划内geo_task节点允许publish_analysis或已确认政策的score：source_ref指定真实已登记结果，facts声明唯一实体键、
 numeric_fields、group_by、单位与方法，统计从实际文件重算。全集/子集单独发布，不能混用缺失数分母。
-inspect读取状态；evidence按operation_id分页读取原始结果或参数；resume按任务UUID恢复。
+成功结果直接返回业务内容和产物路径；run的result为目标/最后成功节点结果，nodes含各节点状态。
+inspect读取状态；evidence仅用于排错/大结果，section=result/stdout/stderr/artifacts可直接定位；
+翻页原样使用next_call，不把execution_id替换为被读取的operation_id。resume按任务UUID恢复。
 不要为打印日志、manifest或上一步结果再启动Python，不把新文件或新版本当作业务改善。
 同一失败输入和实现不会机械重试；只修改失败节点，有效前置步骤复用。
 运行中但尚无持久化结果的外部请求是unknown，先读取证据，不能盲目重发。
@@ -231,8 +235,11 @@ zones、distance_m、output_name。
 都要提供完整 code 和稳定 map_id。SOURCE_CWD/RUN_DIR 也是环境变量；DATA_DIRS 使用 \
 os.pathsep 分隔。
   - 对前序文件使用 `input_refs={alias: returned_ref_or_path}` 和 `INPUTS[alias]`；\
-`expected_outputs` 声明必须真实存在的文件。修正时复用 stage_id，对成功的前置步骤使用 \
-`depends_on`。失败的部分产物只能用于检查。不要从 stdout 推断成功。
+`expected_outputs` 声明必须真实存在的文件。需要多步依赖时统一用geo_task节点depends_on；\
+Python内stage_id/depends_on是兼容入口，不再同时建立第二套计划。两个backend都可赋值\
+CONSOLE_RESULT={...}，在result.console_result返回有界JSON，无需为查看结果创建ok.json。\
+write_analysis_report接受.json或.md并生成两种报告，使用返回paths，不猜伴随文件名。\
+失败的部分产物只能用于检查。不要从 stdout 推断成功。
   - 排序/筛选 GeoDataFrame 时保留几何；不要用 `source.geometry.values` 重建属性表。\
 `entity_join(source, table, key='existing_unique_id')` 用于安全连接新属性；键必须唯一\
 且非空。GeoJSON 写出会规范化为 EPSG:4326；米制数据使用 GeoPackage。数据完整性检查\
@@ -243,13 +250,17 @@ os.pathsep 分隔。
 和限制；不会生成 QGIS patch、修改样式、重建地图或选择其他版本。
   - 使用与 geo_python 相同的 map_id。把具体错误/警告合并为一次修复。遇到 passed、\
 unverified、仅信息性建议或没有可执行变化时停止。未变化图片会缓存；不要盲目重复失败检查。
-    对多页工程，逐个审查返回 page_previews 中 frames 非空的页面，使用其准确路径和同一\
-map_id。其他页面仍在等待不是提供方失败：继续审查该页，不要重试未变化的主 PNG。页面\
-审查属于同一地图版本；纯名册页使用原生布局检查。
+    对多页工程，使用all_pages=true读取所有已验证页面，包括纯名册页；不要按frames是否为空\
+跳过页面。其他页面仍在等待不是提供方失败。审图返回finding_registry的稳定issue_id；\
+geo_task review_issues查看/记录confirmed或有证据的dismissed；未再提及保持needs_recheck。\
+fix_verified需要同图同页的新像素通过审查，checks明确包含该issue_id，不能自行宣布修复。
     只有经过验证的可执行 patch 才能作为修复指令。unverified 响应、被拒绝的原始审查\
 摘录或 frame/ROI 不匹配只属于诊断信息，不能当作修改计划。使用原生修复结果；不要把被\
 拒绝的 patch 转成新的完整地图调用。
-- **geo_deliver**：把选定文件和 project_dir 复制到工作区 exports。
+- **geo_deliver**：把选定文件和project_dir复制到工作区exports。地图必须包含真实可编辑QGIS工程；
+工程未生成但已有spec_ref时，传spec_ref由交付工具先生成再打包。不能仅交PNG/PDF或把截图当工程。
+分析地图必须附相关已发布事实包；报告、图例和最终文字使用同一规则、选集和统计。
+未知业务阈值应说明探索性假设或询问用户，不将自定规则包装成正式风险/疏散标准。
   - 在最终回答中使用返回的 delivery_dir 和 qgis_project 路径。包括地图、可编辑工程、\
 分析输出、报告和原始 Python 脚本。提供 primary_map 及其 review_path；工程必须引用\
 该准确图片。视觉验证不可用或仍有问题时，尊重 quality_status=draft。

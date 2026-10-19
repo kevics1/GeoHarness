@@ -40,7 +40,8 @@ async def test_public_help_detail_preserves_original_descriptions(tmp_path):
     detail = await tool.execute(GeoQgisProjectInput(action="help", section="frame",
         detail_path=["schema", "properties", "focus_layers", "description"]), context)
     assert not detail.is_error, detail.output
-    assert "FIT mode" in json.loads(detail.output)["value"]
+    description = json.loads(detail.output)["value"]
+    assert "FIT" in description and "layer_key" in description
 
 
 def test_tool_and_system_share_python_cautions_without_growing_the_description():
@@ -51,8 +52,8 @@ def test_tool_and_system_share_python_cautions_without_growing_the_description()
     assert "read(1) is 2D" in prompt and "nodata, not fill_value" in prompt
     assert "调用前注意事项" in prompt
     assert len(GeoPythonTool.description) < 4463
-    assert set(action_forms()) == {"help", "spec", "build", "preflight", "create", "inspect",
-                                   "export", "recover"}
+    assert set(action_forms()) == {"help", "spec:new", "spec:edit", "build", "preflight",
+                                   "create", "inspect", "export", "recover"}
 
 
 def test_cross_field_feedback_locates_the_conflict_and_measured_missing_references():

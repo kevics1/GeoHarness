@@ -132,6 +132,7 @@ async def execute_python(
     expected_outputs: tuple[str, ...] = (),
     managed_inputs: bool = False,
     approved_score_policy: dict | None = None,
+    result_variable: str = 'CONSOLE_RESULT',
 ) -> dict[str, Any]:
     """Save and execute a script, returning and persisting its reproducibility record."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
@@ -175,6 +176,7 @@ async def execute_python(
              "input_requirements": input_requirements or {}, "managed_inputs": managed_inputs,
              "approved_score_policy": approved_score_policy,
              "expected_outputs": list(expected_outputs),
+             "result_variable": result_variable, "result_max_chars": max_output_chars,
              "previous_outputs": [str(path) for path in previous_outputs]},
             ensure_ascii=False,
         ),
@@ -237,6 +239,7 @@ async def execute_python(
     except (OSError, ValueError):
         integrity = {}
     reserved = {"analysis.py", "manifest.json", "stdout.txt", "stderr.txt", ".execution.json",
+                '.python-result.json',
                 "integrity.json"}
     for path in sorted(run_dir.rglob("*")):
         relative = path.relative_to(run_dir)
@@ -303,6 +306,11 @@ async def execute_python(
         "files": files,
         "guard": "application-level guards; not an OS security sandbox",
     }
+    returned_path = run_dir / '.python-result.json'
+    if status == 'succeeded' and returned_path.is_file():
+        if returned_path.stat().st_size > max_output_chars * 4:
+            raise ValueError('Python structured result exceeds configured output limit')
+        result['result'] = {'console_result': json.loads(returned_path.read_text(encoding='utf-8'))}
     (run_dir / "manifest.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -954,6 +962,17 @@ def _child_main() -> None:
         **_data_helpers(data_refs, tracker),
     }
     exec(code, namespace)
+    result_name = spec.get('result_variable', 'CONSOLE_RESULT')
+    if result_name in namespace:
+        try:
+            returned = json.dumps(namespace[result_name], ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'{result_name} must contain JSON values, not native GIS/array '
+                             'objects; convert scalar values or return a file reference') from exc
+        if len(returned) > spec.get('result_max_chars', 12000):
+            raise ValueError(f'{result_name} exceeds configured max_output_chars; '
+                             'return a short summary and named artifacts')
+        (run_dir / '.python-result.json').write_text(returned, encoding='utf-8')
     # Raw JSON/native writes also need a read-back check. Keep failed partial
     # files for diagnosis, but the parent never registers them as usable output.
     import geopandas as gpd

@@ -11,19 +11,18 @@ class MapDerivation(BaseModel):
 
     feature_indices: list[StrictInt] | None = Field(
         default=None, max_length=100000,
-        description="Zero-based source row positions, in map order. Omit for all features.",
+        description='可选，从0开始的源要素行索引，必须唯一非负；null保留全部，不能当业务ID。',
     )
     keep_fields: list[str] | None = Field(
         default=None, max_length=256,
-        description="Source attributes to retain; geometry is always preserved.",
+        description='可选保留的实际属性字段列表；null保留全部，几何始终保留。',
     )
     annotations: dict[str, list[str | int | float | bool | None]] = Field(
         default_factory=dict, max_length=32,
-        description="New map-only fields, with one value per selected feature; never statistics.",
+        description='默认空，新字段到逐要素标量列表的映射；长度须匹配选集，不能覆盖源字段。',
     )
     number_field: str = Field(default="", max_length=128, description=(
-        "Optional new map-only ordinal field, 1..N in selected source order. "
-        "Use as label_field and first label_table field; no hand-written number arrays."
+        '默认空；需要稳定显示编号时指定新字段名，不能覆盖已有源字段。'
     ))
 
     @model_validator(mode="after")

@@ -808,8 +808,10 @@ geo_map_review根据绑定的page_previews.role区分地图、定位图、名单
 
 ## 受管理执行与 QGIS 控制台（2026-10-19）
 
-有活动任务时，默认 `agent.managed_workflow: true`。修改性分析、制图和交付先通过
-`geo_task(action="plan", nodes=[...])` 提交完整依赖计划，再通过 `action="run"` 执行就绪链。
+有活动任务时，默认 `agent.managed_workflow: true`。普通单步可直接调用原生工具，由系统自动登记节点、核验权限与依赖并保存完整结果；
+也可用 `geo_task(action="execute", node={...})` 明确节点身份，一次调用登记并执行。
+多步任务用 `geo_task(action="plan", nodes=[...])` 增量保存节点，再通过 `action="run"`
+执行就绪链；未列出的旧节点保留，只有 `replace_plan=true` 才替换整个计划。
 每个节点包含稳定的 `id`、`tool`、`arguments`、`depends_on`；修订节点只使其后代失效，
 已验证输入和产物未变化的成功前置节点继续复用。相同失败不会机械重跑。
 相关配置变化也会使节点失效：例如更换审图模型只影响该审查及其后续节点。
@@ -829,7 +831,10 @@ Python 文件可引用 `extract#/files/0/path`；任一节点完整注册元数�
 JSON Pointer 的 `/`、`~` 转义仍遵循 `~1`、`~0`，不能猜测输出索引。
 `geo_task(action="inspect")` 查看就绪/失败/失效节点；
 `geo_task(action="evidence", operation_id="实际ID", section="output")` 分页读取完整证据，
-`section` 还可选 `arguments`、`metadata`、`record`，每页最多12000字符。
+`section` 还可选 `result`、`stdout`、`stderr`、`artifacts`、`arguments`、`metadata`、`record`，
+每页最多12000字符。普通成功调用直接返回业务结果，无需另读完整执行契约。
+翻页原样使用 `next_call`：`operation_id`/`target_operation_id` 指向被读取的目标，
+`execution_id` 标识本次读取操作，不能用它替换目标 ID。末页的 `next_call` 为 null。
 结果已经保存，没必要再调用 Python 打印大段日志。
 
 完整请求在执行前保存，完整结果在模型输出压缩前保存。`geo_task(action="resume", task_id="UUID")`
@@ -838,7 +843,7 @@ JSON Pointer 的 `/`、`~` 转义仍遵循 `~1`、`~0`，不能猜测输出索�
 `revision` 只用于实现或运行环境确有修正，不能只为绕过重复失败保护而递增。
 已经检查的数据别名随任务保存；恢复时核对文件签名，已变化文件的旧描述不继续使用。
 
-标准空间分析先 `geo_qgis search/help` 获取真实算法和参数，再将 `run/model` 放入计划。
+标准空间分析先 `geo_qgis search/help` 获取真实算法和参数，再直接调用 `run/model`，或放入多步计划。
 需要自定义组合时使用 `geo_python(backend="qgis", ...)`。它启动独立、已初始化 QGIS 和
 Processing 的进程，提供 `Project`、`processing`、`INPUTS`、`RUN_DIR`、`CONSOLE_STATE`。
 例如下列内容作为计划中 `geo_python` 节点的参数：
@@ -856,7 +861,11 @@ Processing 的进程，提供 `Project`、`processing`、`INPUTS`、`RUN_DIR`、
 QGIS 对象不跨调用保存，`console_state` 及 `CONSOLE_RESULT` 只能是有界 JSON；状态总量
 最多20000字符，不是持续连接的桌面控制台。常用原生读写接口和 Python 文件操作受应用层
 约束，输出写入 `RUN_DIR`，原始文件保持只读；该机制不是针对恶意原生扩展的 OS 沙盒。
-普通 `backend="python"` 路径保留原行为；控制台阶段依赖使用任务计划，评分使用已确认政策入口。
+普通 `backend="python"` 同样支持 `CONSOLE_RESULT`，结果见返回的 `result.console_result`；
+`console_result` 参数可指定其他合法变量名。只需字段名、数量或小对象时使用这个变量，
+不必创建临时 ok.json。返回必须是有限、有界 JSON，不能返回 GeoDataFrame、QGIS 对象或 NaN。
+`write_analysis_report` 接受 `.json` 或 `.md` 路径，并生成配套两份报告；其他后缀会被拒绝。
+控制台阶段依赖可用任务计划，评分使用已确认政策入口。
 
 自定义/Processing 结果经 `geo_task(action="publish_analysis", source_ref=..., facts=...)` 发布。
 `facts` 包含唯一非空 `key`、`numeric_fields`、`group_by`、`units`、`scope_name`、`method`。
@@ -880,3 +889,35 @@ QGIS 对象不跨调用保存，`console_state` 及 `CONSOLE_RESULT` 只能是�
 绑定保存，恢复后核验复用，再绑定当前工程版本；单纯会话快照中的通过文字不予采信。
 未再次报出的旧问题保持 `needs_recheck`，不自动计作已解决；服务失败保持 unverified，
 处理服务恢复而不重做分析或改图。主模型思考强度和自定义审图模型沿用当前用户配置。
+
+
+### 字段帮助、引用与工程交付
+
+工具顶层及嵌套字段包含中文说明，特别区分数据路径、地图 ID、操作 ID、草案引用、
+坐标单位和纸面单位。QGIS 工具常驻 Schema 保留顶层参数与描述；复杂样式、布局、
+编辑的完整字段按需读取 `geo_qgis_project(action="help", section="style")`，
+其他 section 包括 `labels`、`frame`、`layout`、`edits`。帮助来自实际校验模型，
+不能以算法帮助替代布局帮助。`geo_cartography` 的纸张 `layout.width` / `layout.height` 使用英寸，
+QGIS 布局尺寸使用 mm，地图范围使用当前地图 CRS 的单位，不能互换。
+
+已发出的 data 引用随任务持久保存；上下文只显示近期引用，不撤销较早引用。
+跨会话恢复仍验证原文件签名和生产者，源变化后应重新加载，不能强行复用旧引用。
+
+地图交付必须有真实 `.qgz/.qgs` 工程。已有工程可传 `project_dir`，或由已登记的主图
+恢复工程；只有草案时传 `spec_ref`，交付工具先生成工程与预览再打包，工程生成仍受
+权限和工具钩子约束。`project_dir` 与 `spec_ref` 二选一。只有 PNG/PDF 而无工程或草案
+会返回 `missing_project`，不会从图片伪造工程。分析地图还须绑定已发布的事实包；
+手写统计文件不等于已验证事实包。草稿也包含工程，质量状态仍如实记录。
+纯 CSV/JSON/Markdown 数据包保持兼容；无地图任务的图片/PDF报告附件可显式用
+`allow_report_only=true`，它不能绕过已指定主地图的工程要求。
+
+### 审图问题的处置
+
+`geo_map_review` 只读取图片、报告问题，并在持久任务中登记稳定 `issue_id`。
+`geo_task(action="review_issues", map_id="实际地图ID", page_index=0)` 读取该页问题；
+页面索引从0开始。问题未再次出现时仅记为 `needs_recheck`，不能视为已经修好。
+`confirmed` 确认问题；`dismissed` 记录有证据的误报判断。两者须提供实际 `issue_id`、
+具体 `reason` 和已成功提交的 `evidence_operation_id`。
+`fix_verified` 还须是同一地图、同一页的新图片原生审查通过，`checks` 明确包含该
+`issue_id`，且当前图片 SHA256 匹配。改变后的图片再次报告同一问题会重新打开它。
+这些处置不直接认证视觉或业务质量；交付附带仍未解决的问题，并保留草稿状态。

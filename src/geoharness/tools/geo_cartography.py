@@ -75,59 +75,51 @@ class GeoCartographyInput(BaseModel):
     ] = Field(
         default="full",
         description=(
-            "symbolize: plan symbolization for a layer (no rendering); "
-            "compose: describe map composition elements; "
-            "export: arrange elements and write the map file; "
-            "full: symbolize + compose + export in one step; "
-            "project: create an editable QGIS project for an existing output map; "
-            "preflight: read-only source, field, CRS and window checks without rendering"
+            '默认full完成符号/布局/导出；symbolize只规划样式，compose只规划布局，export导出，project保存已有图对应工程，preflight只检查，status查状态。'
         ),
     )
     layer_name: str = Field(
         default="",
-        description="Label for the layer being symbolized (for symbolize/full).",
+        description='图层显示名，默认空；symbolize/full使用。',
     )
     analysis_type: str = Field(
         default="",
         description=(
-            "Analysis type for bridge rule lookup (e.g., 'moran_local', "
-            "'getis_ord', 'cluster_detect', 'od_flow'). Determines symbolization."
+            '分析类型，默认空，用于现有桥接规则匹配并选择符号。'
         ),
     )
     field_name: str = Field(
         default="",
-        description="Attribute field to symbolize (categorized/graduated/flow).",
+        description='用于分类/分级/流量符号的真实属性字段，默认空。',
     )
     output_format: Literal["pdf", "image", "png", "svg", "html"] = Field(
         default="pdf",
-        description="Output format: pdf/png/svg (static) or html (interactive Leaflet).",
+        description='默认pdf；静态pdf/png/svg，交互html；image兼容png。',
     )
     output_path: str = Field(
         default="",
         description=(
-            "Output file path. If empty, writes to the configured outputs "
-            "directory (workspace exports by default) using layer_name as file stem."
+            '可选输出文件路径；默认空写配置输出目录并以图层名命名。'
         ),
     )
     # ── Data source (required for actual rendering) ──
     source_type: Literal["", "file", "postgis", "admin_kg"] = Field(
         default="",
-        description="Data source kind for rendering. Empty = plan mode only.",
+        description='默认空仅规划；file本地、postgis数据库、admin_kg行政知识源。',
     )
     file_path: str = Field(
         default="",
-        description="Path to a local spatial file (.shp/.geojson/.gpkg) to render.",
+        description='可选真实空间文件路径，例如shp/geojson/gpkg。',
     )
     source_name: str = Field(
         default="",
         description=(
-            "Source name for rendering: file name, PostGIS table, or "
-            "administrative region name/adcode (depends on source_type)."
+            '按source_type选择的文件名/数据库表名/行政名称或adcode，不猜名称。'
         ),
     )
     geojson: str = Field(
         default="",
-        description="Inline GeoJSON FeatureCollection to render instead of a source.",
+        description='可选完整GeoJSON FeatureCollection字符串。',
     )
     layers: str = Field(
         default="",
@@ -158,55 +150,52 @@ class GeoCartographyInput(BaseModel):
     basemap_raster: str = Field(
         default="",
         description=(
-            "Optional raster file path (e.g. elevation GeoTIFF) drawn as the "
-            "static-map backdrop beneath all layers."
+            '可选栅格底图路径，绘于所有矢量层下方。'
         ),
     )
     title: str = Field(
         default="",
-        description="Map title. Defaults to layer_name when empty.",
+        description='地图标题，默认空沿用layer_name。',
     )
     review_task: str = Field(
         default="",
-        description="User goal and concrete requirements for visual map inspection.",
+        description='用户目标和具体图片检查要求，默认空。',
     )
     map_id: str = Field(
         default="",
-        description="Stable logical map ID across all versions/formats.",
+        description='默认空；跨格式/版本保持相同的逻辑地图ID。',
     )
     layout: MapLayout | None = Field(
         default=None,
-        description="Optional presentation settings; visual review may adjust these.",
+        description='可选matplotlib版面设置；纸张width/height为英寸、符号点面积为pt²，不能填地图米范围。',
     )
     map_path: str = Field(
-        default="", description="For action=project: existing rendered map input."
+        default="", description='action=project时的实际已有地图文件路径。'
     )
     project_output_dir: str = Field(
         default="",
-        description="New editable project directory within the workspace; never overwrites data.",
+        description='可选工程输出目录，默认空使用配置目录。',
     )
     renderer: Literal["", "qgis", "matplotlib"] = Field(
         default="",
-        description="Static renderer override; default QGIS. HTML/SVG keep their renderer.",
+        description='默认空使用配置；qgis原生工程，matplotlib兼容绘图。',
     )
-    map_crs: str = Field(default="", description="Explicit display CRS; map_extent uses this CRS.")
+    map_crs: str = Field(default="",
+        description='明确显示CRS，默认空按来源/配置；map_extent使用此坐标单位。')
     analysis_manifests: list[str] = Field(
         default_factory=list,
         max_length=8,
-        description="Actual geo_analysis manifests for source-verified statistics and methods.",
+        description='实际分析清单路径列表，默认空，绑定可验证分析产物。',
     )
     qgis_layout: QgisProjectLayout | None = Field(
         default=None,
-        description=("Native layout: main map, optional detail, legend and footer. "
-                     "Map title uses the top-level title field, not qgis_layout.title."),
+        description=('可选QGIS布局对象，纸面单位mm，完整嵌套字段按QGIS帮助查询。'),
     )
     map_extent: list[float] | QgisExtent | None = Field(
         default=None,
         validation_alias=AliasChoices("map_extent", "project_extent"),
         description=(
-            "Actual map-frame xmin,ymin,xmax,ymax in project/output CRS. "
-            "Locks multilayer rendering or action=project's editable map frame. "
-            "Use the existing map's bounds when context layers extend beyond its frame."
+            '可选地图CRS范围，数组顺序xmin,ymin,xmax,ymax，或命名对象；不是纸张尺寸。'
         ),
     )
 
@@ -238,22 +227,53 @@ class GeoCartographyTool(BaseTool):
 
     name: str = "geo_cartography"
     description: str = (
-        "Cartography pipeline — static PNG/PDF uses the same QGIS layout and editable project. "
-        "Explicit matplotlib and SVG/HTML remain available: symbolize → compose → export. "
-        "Reads bridge rules from config to auto-select symbolization by analysis "
-        "type. Provide a data source (file_path/source_type+source_name/geojson) "
-        "to actually render; omit it to get a symbolization plan only. "
-        "Rendering returns an editable QGIS project with data and print layout. "
-        "action=preflight checks fields, geometry, CRS, bounds and visible counts without drawing. "
-        "action=project packages an existing map with its actual sources without redrawing. "
-        "Use analysis_manifests for output-backed statistics/method/footer; adjacent native "
-        "manifests may be inferred from actual outputs. Datetime categories are normalized. "
-        "With qgis_layout, preflight also measures layout without exporting. "
-        "duplicate_error_blocked requires changed arguments/data; preserve successful outputs. "
-        "Returned map_id is the persistent task UUID; action=status reads its factual receipt. "
-        "Keep that ID across all versions; use geo_deliver for final delivery."
+        (
+        'geo_cartography制图兼容入口：静态PNG/PDF默认从同一QGIS布局生成可编辑工程；也'
+        '保留显式matplotlib及SVG/HTML。按配置桥接规则由anal'
+        'ysis_type选择符号；无来源只返回规划。preflight只检查数'
+        '据/字段/CRS/范围/可见数，qgis_layout同时量测布局；pr'
+        'oject保留真实来源打包已有地图。analysis_manifests'
+        '绑定输出统计与方法，时间类别归一化。重复错误须先改输入，不重做成功分析。'
+        '返回map_id/工程/文件/状态；status读取台账，各版本保留同一'
+        'map_id，最后用geo_deliver交付。高级样式优先geo_qg'
+        'is_project完整契约。'
+    )
     )
     input_model: type[BaseModel] = GeoCartographyInput
+
+    def to_api_schema(self):
+        # The QGIS layout contract is already discoverable through its native
+        # help tool; do not transmit that entire nested tree a second time.
+        from copy import deepcopy
+
+        schema = super().to_api_schema()
+        wire = deepcopy(schema['input_schema'])
+        layout = wire['properties']['qgis_layout']
+        wire['properties']['qgis_layout'] = {'default': None,
+            'description': layout['description'] +
+                ' 完整字段含义/单位/默认与geo_qgis_project布局一致，'
+                '使用geo_qgis_project help(section=layout)读取；运行时严格校验。',
+            'anyOf': [{'type': 'object', 'additionalProperties': True}, {'type': 'null'}]}
+        definitions = wire.get('$defs', {})
+        used = set()
+
+        def refs(value):
+            if isinstance(value, dict):
+                if '$ref' in value:
+                    key = value['$ref'].rsplit('/', 1)[-1]
+                    if key not in used:
+                        used.add(key)
+                        refs(definitions[key])
+                for child in value.values():
+                    refs(child)
+            elif isinstance(value, list):
+                for child in value:
+                    refs(child)
+
+        refs(wire['properties'])
+        wire['$defs'] = {key: definitions[key] for key in used}
+        schema['input_schema'] = wire
+        return schema
 
     @guard_map_errors
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:

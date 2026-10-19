@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from openharness.tools.base import BaseTool, ToolExecutionContext, ToolResult
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from geoharness.cartography.project import MapProject
 from geoharness.cartography.quality import MapReview
@@ -31,35 +31,80 @@ class _QgisDeliveryProject(BaseModel):
 
 
 class GeoDeliverInput(BaseModel):
-    map_id: str = Field(default="", description="Recorded logical map to deliver or select by ID.")
-    version_policy: Literal["prefer_checked", "selected"] = Field(default="prefer_checked",
-        description="Prefer a recorded unchanged layout pass when the selected map has known "
-        "issues/stale checks. selected explicitly retains the requested map as a draft.")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{
+        "map_id": "returned-map-id",
+        "project_dir": "returned-project-dir",
+        "primary_map": "returned-preview.png",
+        "files": ["returned-report.md"],
+        "version_policy": "selected",
+        "name": "用户交付",
+    }]})
+
+    map_id: str = Field(default="", description=(
+        "可选。geo_qgis_project/geo_python 出图时返回的逻辑地图 ID；"
+        "用于选择同一张图的已登记版本及工程。不要填 operation_id、run_dir 或文件名。"
+        "仅交非地图数据时可留空。"
+    ))
+    version_policy: Literal["prefer_checked", "selected"] = Field(
+        default="prefer_checked",
+        description=(
+        "可选，默认 prefer_checked。prefer_checked = 选择最新、未变化且通过实测布局检查的版本；"
+        "selected = 明确交付请求的这张图，即使它有已知问题也按草稿交付。"
+        "两者都不会伪造视觉通过。地图有成熟候选时优先使用默认值。"
+    ))
     files: list[str] = Field(
         default_factory=list,
         max_length=100,
-        description="Explicit map, table, report or script file paths to deliver.",
+        description=(
+            "可选。要复制的实际产物路径（报告、表格、派生数据等），必须来自工具实际返回。"
+            "不能传目录、glob、猜测名称或 project 目录；工程另用 project_dir。"
+            "主地图可从台账或工程预览推断；若明确给出 primary_map，它必须与工程预览 SHA256 一致。"
+        ),
     )
-    project_dir: str = Field(default="", description="Portable map project folder to include.")
+    project_dir: str = Field(default="", description=(
+        "可选。geo_qgis_project 成功返回的便携工程目录；地图交付必须有真实工程，"
+        "已有登记主图时可自动恢复目录，只有草案时改用 spec_ref。"
+        "内含 project.json 和可编辑 .qgz/.qgs。"
+        "只交 PNG/PDF 而无真实工程会被拒绝，不能把图片当等价工程。"
+        "传准确返回路径，不是 exports 父目录；工程用于后续在 QGIS 中继续修复。"
+        "纯粹的非地图图片/PDF附件才可显式设置 allow_report_only=true。"
+    ))
+    spec_ref: str = Field(default='', description=(
+        '可选，实际geo_qgis_project spec返回的qgis-spec:引用；工程尚未生成时提供此字段，'
+        '交付工具先按已保存图层/样式/布局生成真实QGIS工程和预览，再打包。'
+        '与project_dir二选一；不会从PNG反推或伪造工程，生成失败保留诊断。'))
+    allow_report_only: bool = Field(default=False, description=(
+        "可选，默认 false。仅用于明确不存在地图的可编辑性要求的数据/报告包"
+        "（例如 CSV/JSON/Markdown 分析结果）。只要交付含 primary_map、已登记地图任务或工程预览，"
+        "就不能用该字段绕过工程要求。"
+    ))
     primary_map: str = Field(
         default="",
         validation_alias=AliasChoices("primary_map", "map_path"),
         description=(
-            "Actual main map to deliver (map_path alias). When a project is included, its "
-            "preview must have the same SHA256. Inferred from matching selected maps when omitted."
+            "可选。实际主地图路径（兼容别名 map_path）；应由出图工具返回，不要重新导出或猜路径。"
+            "包含 project_dir 时，其预览与该地图必须 SHA256 完全一致；"
+            "省略时从已登记地图或工程预览推断。"
         ),
     )
     review_path: str = Field(
         default="",
-        description="Optional recorded map-review JSON; passed requires the actual image SHA256.",
+        description=(
+            "可选。已登记审图报告 JSON 的准确路径，会作为证据一起复制。"
+            "只有 image_sha256 与交付主图一致时 passed 才被采信；其他图的报告保持 unverified。"
+        ),
     )
     name: str = Field(
         default="delivery",
         min_length=1,
         max_length=80,
         pattern=r'^[^\\/:*?"<>|.][^\\/:*?"<>|]*$',
-        description="User-facing delivery folder name; existing files are preserved.",
+        description=(
+            "可选，默认 delivery。用户可见的交付文件夹名称；不能含路径分隔符或非法字符。"
+            "已有交付不会被覆盖，工具会创建新目录并保留旧结果。"
+        ),
     )
+
 
 
 def _source(path: Path, roots: list[Path], *, check_producer=True) -> Path:
@@ -99,12 +144,11 @@ def _source(path: Path, roots: list[Path], *, check_producer=True) -> Path:
 class GeoDeliverTool(BaseTool):
     name = "geo_deliver"
     description = (
-        "Copy selected maps, data, reports and an editable map project into workspace exports. "
-        "Use this after Python/native analysis; scripts must not write outside RUN_DIR. "
-        "Returns the actual user-facing delivery folder and files; preserves prior deliveries."
-        " A selected primary map must match the included project's preview. "
-        "Quality is passed only with data, layout and visual checks for the same image; "
-        "the delivered project must also match its recorded snapshot."
+        '把真实产物复制到工作区exports，保留历史交付。地图必须带可编辑QGIS工程：'
+        '已有project_dir自动打包；仅有spec_ref时先按草案生成工程再交付；'
+        '只有PNG/PDF而无工程/草案时返回missing_project，不伪造工程。'
+        '主图必须匹配工程预览；分析地图须绑定已发布事实包。CSV/JSON/Markdown等纯数据包兼容。'
+        '返回delivery_dir、qgis_project和质量状态；草稿也包含工程，文件存在不代表视觉通过。'
     )
     input_model = GeoDeliverInput
 
@@ -236,6 +280,33 @@ class GeoDeliverTool(BaseTool):
                     project_directory = packaged.get("project_dir") or ""
             if primary is not None and primary.suffix.lower() not in _MAP_SUFFIXES:
                 raise ValueError("Primary map must be a PNG/JPEG/WebP/PDF/SVG/HTML map artifact.")
+            # A map delivery must carry the editable project that produced the image.
+            # Reports/data alone remain deliverable; only a map artifact activates this
+            # requirement. Prefer_checked may recover the project from the receipt, but a
+            # bare PNG must never silently become the whole deliverable.
+            if (primary is not None or selection_source is not None) and not project_directory:
+                receipt_for_project = initial_receipt
+                packaged = receipt_for_project.get("stages", {}).get("packaged", {}) if isinstance(
+                    receipt_for_project, dict) else {}
+                recovered = packaged.get("project_dir") if isinstance(packaged, dict) else None
+                if recovered:
+                    project_directory = recovered
+            recorded_map_job = bool(
+                arguments.map_id or (initial_receipt.get("job_id") if isinstance(
+                    initial_receipt, dict) else None)
+            )
+            map_like = primary is not None or bool(selected_maps) or recorded_map_job
+            if arguments.allow_report_only and (primary is not None or recorded_map_job):
+                raise ValueError('allow_report_only不能绕过指定主地图或已登记地图的工程要求')
+            if map_like and not project_directory and not arguments.allow_report_only:
+                raise ValueError(
+                    "missing_project: the delivery contains a map but no editable QGIS project. "
+                    "Render with geo_qgis_project build (or geo_cartography with native QGIS), "
+                    "then pass its returned project_dir, or pass an existing spec_ref to build "
+                    "the project at delivery. A PNG/PDF alone is not a complete map "
+                    "deliverable and cannot be converted back into an editable project. "
+                    "For a genuinely non-map evidence bundle, set allow_report_only=true."
+                )
             if primary is not None and primary not in files:
                 files.append(primary)
             report_file = (resolve(arguments.review_path)
@@ -336,6 +407,19 @@ class GeoDeliverTool(BaseTool):
             from geoharness.analysis.result_package import delivery_packages
 
             files = delivery_packages(context.metadata, files, recorded_project, resolve)
+            if (map_like or project_directory) and context.metadata.get(
+                    'geo_task_record', {}).get('analysis_requirement') == 'required':
+                from geoharness.analysis.result_package import verify_package
+
+                attached = set(files)
+                relevant = [Path(value).resolve() for value in context.metadata.get(
+                    'geo_task_record', {}).get('analysis_packages', [])
+                    if Path(value).resolve() in attached]
+                if not relevant:
+                    raise ValueError('missing_analysis_package: 分析地图交付前需publish_analysis；'
+                                     'facts.json文件名或手写报告不能代替已发布、选集绑定的事实包')
+                for package in relevant:
+                    verify_package(package)
             if not files and not project_files:
                 raise ValueError("Select at least one artifact or a portable project.")
             if primary is None:
@@ -548,6 +632,14 @@ class GeoDeliverTool(BaseTool):
                                 "map ledger before retrying registration; quality is unverified.",
                 )
             from geoharness.cartography.delivery_summary import write_delivery_summary
+            from geoharness.cartography.review_findings import pending_findings
+
+            pending = pending_findings(context.metadata, cwd=workspace,
+                map_ids={arguments.map_id, receipt.get('job_id'), receipt.get('map_id')})
+            if pending:
+                payload['quality_status'] = 'draft'
+                payload['remaining_issues'] = [*payload.get('remaining_issues', []), *pending]
+                payload['finding_status'] = 'needs_explicit_disposition'
 
             payload.update(write_delivery_summary(
                 destination, payload, receipt,
@@ -558,6 +650,17 @@ class GeoDeliverTool(BaseTool):
             return {**payload, "manifest_path": str(manifest)}
 
         try:
+            if arguments.spec_ref:
+                if arguments.project_dir:
+                    raise ValueError('spec_ref与project_dir二选一；已有工程直接传project_dir')
+                from geoharness.cartography.delivery_project import materialize_project
+
+                generated = await materialize_project(context, arguments.spec_ref)
+                if arguments.map_id and arguments.map_id != generated.get('map_id'):
+                    raise ValueError('生成的工程与指定map_id不一致；使用同一地图的真实spec_ref')
+                arguments = arguments.model_copy(update={
+                    'project_dir': generated['project_dir'],
+                    'map_id': generated.get('map_id', arguments.map_id)})
             publication = asyncio.create_task(asyncio.to_thread(publish))
             try:
                 result = await asyncio.shield(publication)
@@ -578,7 +681,32 @@ class GeoDeliverTool(BaseTool):
                     pass
                 raise
         except (OSError, ValueError) as exc:
-            return ToolResult(output=f"Error: artifact delivery failed: {exc}", is_error=True)
+            message = str(exc)
+            code = message.split(":", 1)[0] if message.startswith((
+                'missing_project:', 'missing_analysis_package:', 'project_build_failed:')) else (
+                "delivery_contract"
+            )
+            payload = {
+                "status": "failed", "code": code,
+                "error_summary": message,
+                "failure": {"code": code, "category": code,
+                            "retry_without_change": False, "field": "project_dir"},
+                "recovery": (
+                    "已有草案时传spec_ref由交付工具生成工程；或先用geo_qgis_project build，"
+                    "把返回project_dir与同一主图一起传入。"
+                    "不要把 PNG/PDF 当作等价工程，也不要猜测 project_dir。"
+                    if code == "missing_project" else
+                    '先对实际已成功分析产物调用geo_task publish_analysis，'
+                    '明确唯一键、选集、统计字段、单位和真实方法，然后继续交付。'
+                    if code == 'missing_analysis_package' else
+                    "按错误信息修正实际文件/参数后重试；不要重复未变化的失败调用。"
+                ),
+            }
+            return ToolResult(
+                output=json.dumps(payload, ensure_ascii=False),
+                is_error=True,
+                metadata={**payload, "execution_status": "failed", "delivery_executed": False},
+            )
         return ToolResult(output=json.dumps(result, ensure_ascii=False, indent=2), metadata=result)
 
     def is_read_only(self, arguments: BaseModel) -> bool:

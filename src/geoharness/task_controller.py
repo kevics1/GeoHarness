@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from geoharness.data.artifacts import assert_usable_artifact, sha256_file
-from geoharness.task_store import connect, execution_lock, read_evidence, task_directory
+from geoharness.task_store import connect, execution_lock, task_directory
 
 _TOOLS = Literal['geo_qgis', 'geo_python', 'geo_analysis', 'geo_accessibility',
                  'geo_qgis_project', 'geo_map_review', 'geo_deliver', 'geo_task']
@@ -25,10 +25,13 @@ _TOOLS = Literal['geo_qgis', 'geo_python', 'geo_analysis', 'geo_accessibility',
 
 class TaskNode(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
-    tool: _TOOLS
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    depends_on: list[str] = Field(default_factory=list, max_length=32)
+    id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$',
+                    description='任务内稳定节点名，ASCII字母数字/下划线/短横线；修改同一步保留ID。')
+    tool: _TOOLS = Field(description='实际执行工具；arguments必须符合该工具的字段契约。')
+    arguments: dict[str, Any] = Field(default_factory=dict,
+        description='目标工具的完整参数对象；引用前置结果使用{"$ref":"节点ID#/JSON/路径"}。')
+    depends_on: list[str] = Field(default_factory=list, max_length=32,
+        description='前置节点ID；可引用任务已有节点；每个$ref的节点须列入此处。')
     revision: int = Field(default=1, ge=1,
         description='实现/运行环境修正后可增加版本；不得仅为重试同一错误而递增。')
 
@@ -47,11 +50,7 @@ def execution_gate(context, tool, arguments, *, node_id=None):
         active = bool(db.execute('SELECT 1 FROM nodes LIMIT 1').fetchone())
     if not active and not context.metadata['geoharness_config'].agent.managed_workflow:
         return None
-    return {'status': 'precondition_failed', 'code': 'managed_plan_required',
-            'tool_executed': False,
-            'error_summary': ('当前任务已有受管理依赖计划；不能直接修改其结果。' if active else
-                              '当前任务使用受管理执行；先提交依赖计划，再执行。'),
-            'next_action': 'geo_task inspect查看节点；plan修订节点；run执行并保留有效前置结果。'}
+    return {'managed_dispatch_required': True}
 
 
 def _directory(context):
@@ -83,7 +82,7 @@ def _environment(node, context):
         'geo_accessibility': ('analysis', 'data'),
         'geo_qgis_project': ('qgis', 'cartography'),
         'geo_map_review': ('map_review', 'model', 'base_url', 'api_key'),
-        'geo_deliver': ('delivery', 'cartography'),
+        'geo_deliver': ('delivery', 'cartography', 'qgis'),
         'geo_task': ('analysis',),
     }[node.tool]
     values = {'implementation': _implementation_identity()}
@@ -111,25 +110,31 @@ def _references(value):
             yield from _references(item)
 
 
-def submit_plan(context, nodes: list[TaskNode]):
+def submit_plan(context, nodes: list[TaskNode], *, replace=False):
     with execution_lock(_directory(context)):
-        return _submit_plan(context, nodes)
+        return _submit_plan(context, nodes, replace=replace)
 
 
-def _submit_plan(context, nodes: list[TaskNode]):
-    """Validate before replacement; unchanged definitions retain their evidence."""
+def _submit_plan(context, nodes: list[TaskNode], *, replace=False):
+    """Upsert by default; deleting omitted nodes requires explicit replacement."""
     directory = _directory(context)
     if not nodes or len(nodes) > 64:
         raise ValueError('计划必须包含1到64个有稳定ID的节点')
     definitions = {node.id: node for node in nodes}
     if len(definitions) != len(nodes):
         raise ValueError('计划节点ID不能重复')
+    with connect(directory) as db:
+        previous = {row['id']: dict(row) for row in db.execute('SELECT * FROM nodes')}
+    if not replace:
+        definitions = {**{key: TaskNode.model_validate_json(row['definition'])
+                           for key, row in previous.items()}, **definitions}
+    nodes = list(definitions.values())
     for node in nodes:
         if node.tool == 'geo_task' and node.arguments.get('action') not in {
                 'publish_analysis', 'score'}:
             raise ValueError('计划中的geo_task只允许publish_analysis/score，禁止递归计划/执行')
         if set(node.depends_on) - definitions.keys() or node.id in node.depends_on:
-            raise ValueError('依赖必须为当前计划中的其他节点')
+            raise ValueError('依赖必须为当前任务已有或本次新增的其他节点；plan默认增量更新')
         if set(_references(node.arguments)) - set(node.depends_on):
             raise ValueError('每个$ref必须声明对应depends_on，禁止隐式依赖')
     visited, visiting = set(), set()
@@ -156,7 +161,6 @@ def _submit_plan(context, nodes: list[TaskNode]):
     with connect(directory) as db:
         if db.execute("SELECT 1 FROM nodes WHERE status='running'").fetchone():
             raise ValueError('有运行中或未恢复的节点，先查看evidence，不能覆盖计划')
-        previous = {row['id']: dict(row) for row in db.execute('SELECT * FROM nodes')}
         changed = set(previous) ^ definitions.keys()
         for node in nodes:
             definition = json.dumps(node.model_dump(mode='json'), ensure_ascii=False,
@@ -223,6 +227,12 @@ def _inventory(arguments, context):
                     inventory.pop(key)
 
     walk(arguments)
+    if arguments.get('spec_ref'):
+        from geoharness.qgis.specification import load_spec
+
+        spec = load_spec(arguments['spec_ref'], cwd=context.cwd,
+                         settings=context.metadata['geoharness_config'].qgis)
+        walk(spec, '/spec')
     # Literal Python reads can be auto-bound by the legacy entry point. Include
     # those measured inputs in the controller fingerprint as well.
     if isinstance(arguments.get('code'), str) and arguments.get('backend', 'python') == 'python':
@@ -338,16 +348,12 @@ def plan_status(context):
 def _load_result(row, context):
     if not row.get('operation_id'):
         raise ValueError('前置节点没有可恢复的结果证据')
-    evidence = read_evidence(context.metadata, cwd=context.cwd,
-                             operation_id=row['operation_id'], section='output', limit=1)
-    # Read full JSON only internally; model evidence reads remain bounded.
-    directory = _directory(context)
-    with connect(directory) as db:
-        op = db.execute('SELECT evidence FROM operations WHERE id=?',
-                        (row['operation_id'],)).fetchone()
-    if evidence['status'] != 'succeeded':
+    from geoharness.task_store import committed_result
+
+    operation, document = committed_result(context.metadata, cwd=context.cwd,
+                                           operation_id=row['operation_id'])
+    if operation['status'] != 'succeeded':
         raise ValueError('前置节点证据没有成功提交')
-    document = json.loads(Path(op['evidence']).read_text(encoding='utf-8'))
     try:
         result, _ = json.JSONDecoder().raw_decode(document['output'].lstrip())
         if not isinstance(result, dict):
@@ -358,6 +364,38 @@ def _load_result(row, context):
     # Preserve that public JSON shape and expose exact registered metadata too.
     result['_metadata'] = document.get('metadata', {})
     return result
+
+
+async def execute_direct(context, tool, arguments):
+    """Preserve native tool calls while the system owns durable single-step dispatch."""
+    from openharness.tools.base import ToolResult
+
+    from geoharness.task_store import committed_result
+
+    values = arguments.model_dump(mode='json')
+    identity = 'auto_' + tool.name + '_' + _hash(values)[:16]
+    node = TaskNode(id=identity, tool=tool.name, arguments=values)
+    try:
+        submit_plan(context, [node])
+        state = await run_plan(context, node_id=identity)
+        selected = next(item for item in state['nodes'] if item['id'] == identity)
+        if selected['status'] == 'interrupted' or not selected['operation_id']:
+            raise ValueError(selected.get('error') or '节点尚未完成，先查看inspect/arguments证据')
+        operation, document = committed_result(context.metadata, cwd=context.cwd,
+                                               operation_id=selected['operation_id'])
+        return ToolResult(output=document.get('output') or selected.get('error') or '',
+            is_error=selected['status'] != 'succeeded', metadata={
+                **document.get('metadata', {}), 'managed_node_id': identity,
+                'managed_operation_id': operation['id'],
+                'reused': identity in state['reused_nodes'],
+            })
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return ToolResult(output=json.dumps({'status': 'precondition_failed',
+            'code': 'managed_dispatch_failed', 'tool_executed': False,
+            'error_summary': str(exc), 'next_action': '修正当前输入，保留已成功产物；'
+            '用geo_task inspect查看节点，evidence查看具体失败。'}, ensure_ascii=False),
+            is_error=True,
+            metadata={'script_executed': False})
 
 
 def _resolve(value, rows, directory, context):
@@ -535,9 +573,51 @@ async def run_plan(context, *, node_id=''):
                     raise
                 if node_id:
                     break
-            return {**plan_status(context), 'executed': completed, 'reused_nodes': reused,
+            state = plan_status(context)
+            with connect(directory) as db:
+                rows = {r['id']: dict(r) for r in db.execute('SELECT * FROM nodes')}
+            for item in state['nodes']:
+                if item['status'] in {'succeeded', 'failed'} and item['operation_id']:
+                    item['evidence_call'] = {'action': 'evidence',
+                                             'operation_id': item['operation_id']}
+                    if item['status'] == 'succeeded' and (not node_id or item['id'] == node_id):
+                        item['result'] = _visible_result(_load_result(rows[item['id']], context),
+                            limit=context.metadata['geoharness_config'].agent.context_result_max_chars)
+            chosen = next((item for item in reversed(state['nodes']) if item.get('result')
+                           and (not node_id or item['id'] == node_id)), None)
+            # The last/target business result must survive model-context trimming
+            # even when a multi-node status listing is long.
+            front = {'result_node': chosen['id'], 'result': chosen['result']} if chosen else {}
+            return {**front, **state, 'executed': completed, 'reused_nodes': reused,
                     'reused': not completed and bool(reused),
-                    'next_action': '检查失败节点的evidence并修改相应输入或实现；保留有效前置结果'}
+                    'next_action': ('执行已完成；直接使用nodes[].result的业务结果和产物引用。'
+                                    if state['complete'] else
+                                    '只修正失败节点或补齐前置条件；成功结果已保留，无需重做。')}
+
+
+def _visible_result(result, *, limit):
+    """Business results precede provenance; oversized values remain in evidence."""
+    fields = ('status', 'result', 'files', 'outputs', 'paths', 'map_id', 'project_dir',
+              'project_file', 'qgis_project', 'project_manifest', 'preview_path',
+              'report_path', 'manifest_path', 'summary_path', 'analysis_status',
+              'analysis_correctness', 'facts', 'policy_ref', 'stdout', 'stderr')
+    visible, omitted = {}, []
+    metadata = result.get('_metadata', {})
+    for key in fields:
+        if key not in result and key not in metadata:
+            continue
+        value = result.get(key, metadata.get(key))
+        if key in {'stdout', 'stderr'} and isinstance(value, str) and len(value) > 1000:
+            value = value[-1000:]
+            visible[key + '_truncated'] = True
+        candidate = {**visible, key: value}
+        if len(json.dumps(candidate, ensure_ascii=False)) <= limit:
+            visible[key] = value
+        else:
+            omitted.append(key)
+    if omitted:
+        visible['omitted_sections'] = omitted
+    return visible
 
 
 def _resume_task(context, identity):

@@ -69,6 +69,7 @@ def package(root, image):
     (root / "project.json").write_text(
         json.dumps(
             {
+                "backend": "qgis",
                 "project_file": "map.qgz",
                 "preview": "preview.png",
                 "preview_sha256": digest(image),
@@ -165,10 +166,16 @@ async def test_delivery_by_id_and_explicit_draft_preserve_selection_intent(tmp_p
     good, bad, edited = [tmp_path / name for name in ("good.png", "bad.png", "edited.png")]
     for image in (good, bad, edited):
         image.write_bytes(image.name.encode())
-    record(job_id, metadata, tmp_path, good, preflight=preflight(), layout=native_layout(good))
-    failed = native_layout(bad)
-    failed.update(status="issues", clipped_figure_text=[{"text": "clipped"}])
-    record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=failed)
+    good_project = tmp_path / "good-project"
+    good_layout = package(good_project, good)
+    bad_project = tmp_path / "bad-project"
+    bad_layout = package(bad_project, bad)
+    bad_layout["status"] = "issues"
+    bad_layout["clipped_figure_text"] = [{"text": "clipped"}]
+    record(job_id, metadata, tmp_path, good, preflight=preflight(), layout=good_layout,
+           project_dir=good_project)
+    record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=bad_layout,
+           project_dir=bad_project)
     context = ToolExecutionContext(cwd=tmp_path, metadata={**metadata, "geoharness_config": config})
     tool = GeoDeliverTool()
     by_id = await tool.execute(GeoDeliverInput(map_id=job_id), context)
@@ -185,16 +192,16 @@ async def test_delivery_by_id_and_explicit_draft_preserve_selection_intent(tmp_p
     assert Path(explicit_id.metadata["primary_map"]).read_bytes() == bad.read_bytes()
     assert explicit_id.metadata["quality_status"] == "draft"
     assert explicit_id.metadata["selection"]["selected_version"] == 2
-    # An unrelated/new user edit must not be silently replaced just because an ID is supplied.
+    # A bare PNG cannot be delivered as a map: it has no editable project.
     unregistered = await tool.execute(GeoDeliverInput(
         map_id=job_id, primary_map=str(edited)), context)
-    assert not unregistered.is_error, unregistered.output
-    assert Path(unregistered.metadata["primary_map"]).read_bytes() == edited.read_bytes()
-    assert unregistered.metadata["quality_status"] == "draft"
-    assert unregistered.metadata["selection"]["changed"] is False
-    bad.write_bytes(b"user edited the existing file")
+    assert unregistered.is_error
+    assert "missing_project" in unregistered.output
+    assert unregistered.metadata.get("failure", {}).get("code") == "missing_project"
+    # The same primary map with its actual project remains an explicit draft.
     edited_in_place = await tool.execute(GeoDeliverInput(
-        map_id=job_id, primary_map=str(bad)), context)
+        map_id=job_id, primary_map=str(bad), project_dir=str(bad_project),
+        version_policy="selected"), context)
     assert not edited_in_place.is_error, edited_in_place.output
     assert Path(edited_in_place.metadata["primary_map"]).read_bytes() == bad.read_bytes()
     assert edited_in_place.metadata["quality_status"] == "draft"
@@ -231,16 +238,24 @@ async def test_delivery_fallback_uses_older_visual_report_after_restart(
     good, bad = tmp_path / "checked.png", tmp_path / "new.png"
     good.write_bytes(b"checked")
     bad.write_bytes(b"new")
-    record(job_id, metadata, tmp_path, good, preflight=preflight(), layout=native_layout(good))
+    good_project = tmp_path / "checked-project"
+    package(good_project, good)
+    good_layout = native_layout(good)
+    bad_project = tmp_path / "new-project"
+    package(bad_project, bad)
+    bad_layout = native_layout(bad)
+    bad_layout["status"] = "issues"
+    bad_layout["clipped_figure_text"] = [{"text": "clipped"}]
+    record(job_id, metadata, tmp_path, good, preflight=preflight(), layout=good_layout,
+           project_dir=good_project)
     review = {"status": "passed", "summary": "Checked actual image", "issues": [],
               "layout_patch": {}, "image_sha256": digest(good)}
     review_path = tmp_path / "checked.review.json"
     review_path.write_text(json.dumps(review), encoding="utf-8")
     record_map_review(job_id, metadata, cwd=tmp_path, config=config, image_path=good,
                       review={**review, "review_path": str(review_path)})
-    failed = native_layout(bad)
-    failed.update(status="issues", clipped_figure_text=[{"text": "clipped"}])
-    record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=failed)
+    record(job_id, metadata, tmp_path, bad, preflight=preflight(), layout=bad_layout,
+           project_dir=bad_project)
     context = ToolExecutionContext(cwd=tmp_path, metadata={"geoharness_config": config})
     if changed_during_copy:
         copy = shutil.copy2

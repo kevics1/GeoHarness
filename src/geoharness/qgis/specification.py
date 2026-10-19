@@ -218,13 +218,24 @@ def contract_help(section: str) -> dict:
 
     result = {"section": section, "contract": "geo_qgis_project",
         "cautions": section_cautions(section),
-        "workflow": ["先 spec 一次 -> build(spec_ref, edits)；验证与导出共用一个原生作业",
-                     "旧版：preflight(spec_ref) -> create(plan_ref)"],
-        "rules": ["冻结的 create 只接受 action+plan_ref。",
-                  "图框引用只接受准确的 layer_key 或 0 基索引，不要猜测名称。",
-                  "每个图框的显式 extent 与 focus_layers 互斥。",
-                  "dpi/map_extent/title 是工程字段；style.field/renderer 是嵌套字段。",
-                  "视觉缩放建议使用 advisory；保留声明的图框覆盖要求。"]}
+        "workflow": [
+            "新建：spec(action=spec, layers=[...], title, crs, layout?) -> 返回 spec_ref；"
+            "再用 build(action=build, spec_ref, edits) 一次验证、渲染、打包。",
+            "修订：对同一 spec_ref 提交局部 typed edits；成功后使用返回的 latest_spec_ref。",
+            "旧版兼容：preflight(spec_ref) -> create(action+plan_ref)；新变更不要走这条旧路径。",
+        ],
+        "rules": [
+            "create 只接受 action+plan_ref；spec_ref 只能用于 build/spec/preflight/inspect。",
+            "图框引用只接受准确的 layer_key 或同一次调用的 0 基索引，不要猜名称。",
+            "每个图框的显式 extent 与 focus_layers 互斥；"
+            "detail_extent 与 detail_frame.focus_layers 互斥。",
+            "style.renderer/field/categories/ranges 是嵌套字段；layer.file_path 是源，"
+            "layer.name 是图例名，layer_name 是 GPKG 内部图层名，layer_key 是修订身份。",
+            "title 是可见地图标题；layout.name 是布局名；detail_title 才是可见详图标题。",
+            "table_only 只能做为名单源，不能出现在 render_layers/focus_layers/label_layers。",
+            "最终地图交付必须把成功 build 返回的 project_dir 交给 geo_deliver；"
+            "只交 PNG/PDF 不构成可继续修复的工程交付。",
+        ]}
     if section == 'workflow':
         result['action_forms'] = action_forms()
         result['ledger'] = {'inspect': {'action': 'inspect', 'map_id': 'returned-map-id'},
@@ -238,23 +249,68 @@ def contract_help(section: str) -> dict:
             QgisStyleEdit, QgisLabelEdit, QgisFrameEdit, QgisLayerEdit, QgisRosterEdit)]
         result["examples"] = {
             "style": {"operation": "style", "layer_key": "returned-key", "style": {
-                "color": "#d73027"}},
+                "renderer": "categorized", "field": "actual_field", "categories": [
+                    {"value": "actual_value", "label": "显示名称", "color": "#d73027"}]}},
             "roster": {"operation": "roster", "table": None},
             "extent": {"operation": "frame", "frame": "main", "extent": {
                 "xmin": 0, "ymin": 0, "xmax": 10, "ymax": 10},
                 "settings": {"purpose": "主体总览", "requirements": [
                     {"layer_index": "returned-key", "coverage": "complete"}]}},
         }
-    result.setdefault("examples", {
-        "style": {"operation": "style", "layer_key": "returned-key", "style": {
-            "renderer": "categorized", "field": "actual_field", "categories": [
-                {"value": "actual_value", "label": "显示名称", "color": "#d73027"}]}},
-        "frame": {"operation": "frame", "frame": "detail", "settings": {
-            "purpose": "火场详图", "focus_layers": ["returned-key"], "requirements": [
-                {"layer_index": "returned-key", "coverage": "complete"}]},
-            "minimum_zoom": 2, "zoom_policy": "advisory"},
-    } if section == "workflow" else {})
+    if section == "workflow":
+        result["examples"] = {
+            "new_spec": {"action": "spec", "title": "实际标题", "crs": "EPSG:4547",
+                "layers": [{"file_path": "<actual inspected path>", "name": "主体",
+                            "layer_key": "subject", "style": {
+                                "renderer": "categorized", "field": "<actual field>",
+                                "categories": [{"value": "<actual value>", "color": "#d73027"}]}}],
+                "layout": {"width_mm": 420, "height_mm": 297, "legend": True}},
+            "build_from_spec": {"action": "build", "spec_ref": "qgis-spec:<returned>"},
+            "typed_edit": {"action": "build", "spec_ref": "qgis-spec:<returned>",
+                "edits": [{"operation": "style", "layer_key": "subject", "style": {
+                    "renderer": "single", "color": "#4c78a8"}}]},
+        }
+    elif section == "layer":
+        result["examples"] = {"layer": {
+            "file_path": "<actual inspected path>", "kind": "vector", "name": "居民点",
+            "layer_key": "points", "show_in_legend": True,
+            "style": {"renderer": "categorized", "field": "<actual field>",
+                      "categories": [{"value": "<actual value>", "color": "#d73027"}]},
+            "label_field": "<actual label field>",
+            "label_style": {"size_pt": 9, "placement": "auto"},
+        }}
+    elif section == "frame":
+        result["examples"] = {"fit_frame": {"purpose": "总览", "focus_layers": ["points"],
+            "render_layers": ["county", "points"], "label_layers": ["points"],
+            "requirements": [{"layer_index": "points", "coverage": "intersects",
+                              "minimum_visible_features": 1}]},
+            "explicit_detail": {"purpose": "局部放大", "render_layers": ["points"],
+                "label_layers": ["points"], "requirements": [
+                    {"layer_index": "points", "coverage": "complete"}]}}
+    elif section == "style":
+        result["examples"] = {"single": {"renderer": "single", "color": "#4c78a8",
+            "size_mm": 4, "width_mm": 0.3}, "categorized": {"renderer": "categorized",
+            "field": "<actual field>", "categories": [{"value": "<actual value>",
+                "label": "显示名称", "color": "#d73027"}]}, "graduated": {
+            "renderer": "graduated", "field": "<actual numeric field>", "ranges": [
+                {"lower": 0, "upper": 500, "label": "0–500 m", "color": "#fee08b"},
+                {"lower": 500, "upper": 1000, "label": "500–1000 m", "color": "#fdae61"}]}}
+    elif section == "roster":
+        result["examples"] = {"roster": {"layer_index": "watch_points", "key_field": "id",
+            "fields": ["rank", "name", "distance_m"],
+            "headers": {"distance_m": "距火场距离（米）"}, "title": "重点居民点名单",
+            "placement": "auto", "columns": 1}}
+    elif section == "layout":
+        result["examples"] = {"layout": {"name": "Main", "width_mm": 420,
+            "height_mm": 297, "margin_mm": 12, "legend": True, "scale_bar": True,
+            "main_frame": {"purpose": "总览", "focus_layers": ["points"],
+                           "render_layers": ["county", "points"],
+                           "requirements": [{"layer_index": "points",
+                                             "coverage": "intersects"}]},
+            "detail_placement": "page", "detail_title": "重点点位详图"}}
     return result
+
+
 
 def recent_specs(*, cwd, settings, limit=4) -> list[dict]:
     """Discover hash-verified drafts after continuation/restart; no parallel mutable state."""

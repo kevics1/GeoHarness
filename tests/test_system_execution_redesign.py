@@ -13,14 +13,15 @@ from geoharness.performance import MeasuredTool
 from geoharness.task_store import execution_lock, read_evidence, task_directory
 
 
-async def test_managed_tools_cannot_skip_plan_and_evidence_precedes_compression(tmp_path):
+async def test_direct_tools_are_managed_automatically_and_cannot_bypass_schema(tmp_path):
     from geoharness.tools.geo_python import GeoPythonInput, GeoPythonTool
 
     context, _ = setup_context(tmp_path)
     result = await MeasuredTool(GeoPythonTool(), context.metadata).execute(
         GeoPythonInput(code='print(42)'), context)
-    assert result.is_error and 'managed_plan_required' in result.output
-    assert not list(tmp_path.glob('.geoharness/runs/*/analysis.py'))
+    assert not result.is_error, result.output
+    assert result.metadata['managed_node_id']
+    assert list(tmp_path.glob('.geoharness/runs/*/analysis.py'))
 
     class Input(BaseModel):
         pass
@@ -34,9 +35,9 @@ async def test_managed_tools_cannot_skip_plan_and_evidence_precedes_compression(
         async def execute(self, args, context):
             return ToolResult(output=json.dumps({'stdout': 'x'*5000, 'status': 'succeeded',
                 'execution_contract': {'large': 'preserved-contract'}}))
-    # Managed node dispatch authorizes only this exact internal execution.
+    # Dispatch still validates against the actual registered tool schema.
     result = await MeasuredTool(Tool(), context.metadata, node_id=None).execute(Input(), context)
-    assert result.is_error  # Still cannot bypass a missing plan with another schema.
+    assert result.is_error
 
 
 def test_task_execution_lease_prevents_second_owner_and_releases(tmp_path):

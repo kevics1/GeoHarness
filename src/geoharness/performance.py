@@ -24,10 +24,11 @@ class MeasuredRegistry:
         return MeasuredTool(tool, self.metadata) if tool is not None else None
 
 class MeasuredTool:
-    def __init__(self, tool, metadata, *, node_id=None):
+    def __init__(self, tool, metadata, *, node_id=None, internal_dispatch=False):
         self.tool = tool
         self.metadata = metadata
         self.node_id = node_id
+        self.internal_dispatch = internal_dispatch
         metadata.setdefault('geo_tool_metrics', [])
         metadata.setdefault('geo_current_state', {})
         metadata.setdefault('geo_render_reuse', {})
@@ -46,12 +47,12 @@ class MeasuredTool:
         try:
             from geoharness.task_controller import execution_gate
 
-            blocked = execution_gate(context, self.tool, arguments, node_id=self.node_id)
+            blocked = (None if self.internal_dispatch else execution_gate(
+                context, self.tool, arguments, node_id=self.node_id))
             if blocked:
-                from openharness.tools.base import ToolResult
+                from geoharness.task_controller import execute_direct
 
-                result = ToolResult(output=json.dumps(blocked, ensure_ascii=False), is_error=True,
-                                    metadata={'execution_status': 'failed'})
+                result = await execute_direct(context, self.tool, arguments)
             else:
                 result = await self.tool.execute(arguments, context)
         except BaseException as exc:
@@ -93,24 +94,51 @@ class MeasuredTool:
             evidence = finish_operation(handle, self.metadata, result=result, error=error)
             if evidence and result is not None:
                 result.metadata.update(evidence)
-                call = {'action': 'evidence', 'operation_id': evidence['operation_id']}
+                execution_id = evidence['operation_id']
+                call = {'action': 'evidence', 'operation_id': execution_id}
                 try:
-                    packet = json.loads(result.output)
+                    packet, packet_end = json.JSONDecoder().raw_decode(result.output.lstrip())
                     if isinstance(packet, dict):
+                        suffix = result.output.lstrip()[packet_end:]
                         if self.tool.name == 'geo_python':
                             # The full packet was committed above; repeated API help
                             # belongs in evidence rather than every model response.
                             packet.pop('execution_contract', None)
+                            versions = packet.pop('input_versions', {})
+                            packet['input_version_count'] = len(versions)
                             for key in ('stdout', 'stderr'):
                                 if isinstance(packet.get(key), str) and len(packet[key]) > 2000:
                                     packet[key] = packet[key][-2000:]
                                     packet[key + '_truncated'] = True
-                        packet.update(operation_id=evidence['operation_id'], evidence_call=call)
-                        result = replace(result, output=json.dumps(packet, ensure_ascii=False))
+                            # Upstream keeps a bounded model-visible result. Put
+                            # the actual return and artifacts before provenance,
+                            # so a successful inspection needs no evidence read.
+                            first = ('status', 'error_summary', 'recovery_hints', 'backend',
+                                     'result', 'files', 'manifest_path', 'run_dir',
+                                     'stdout', 'stderr', 'inputs', 'expected_outputs')
+                            packet = {**{key: packet[key] for key in first if key in packet},
+                                      **packet}
+                        # Never overwrite the identity of the operation whose evidence was
+                        # requested. A read is a new execution, but its subject is the original
+                        # page/result. Overwriting operation_id made offset=N read this read's
+                        # tiny record and produced empty content on the next page.
+                        target_id = packet.get('operation_id')
+                        if not isinstance(target_id, str) or not target_id:
+                            target_id = execution_id
+                        packet['operation_id'] = target_id
+                        packet['target_operation_id'] = target_id
+                        packet['execution_id'] = execution_id
+                        if (self.tool.name != 'geo_task'
+                                or getattr(arguments, 'action', None) != 'evidence'):
+                            packet.setdefault('evidence_call', call)
+                        packet.setdefault('execution_evidence_call', call)
+                        result = replace(result, output=json.dumps(
+                            packet, ensure_ascii=False) + suffix)
                 except (TypeError, ValueError):
                     pass
                 self.metadata.setdefault('geo_current_state', {})['last_operation'] = {
-                    'tool': self.tool.name, **evidence, 'evidence_call': call}
+                    'tool': self.tool.name, **evidence, 'execution_id': execution_id,
+                    'evidence_call': call}
             save_record(self.metadata, cwd=context.cwd)
         return result
 

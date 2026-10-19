@@ -73,61 +73,59 @@ class GeoAccessibilityInput(BaseModel):
 
     action: Literal["route", "compare"] = Field(
         default="route",
-        description="route: one scenario. compare: baseline and hazards on one "
-        "frozen original-road access candidate graph, with per-resident transitions.",
+        description='默认route计算单场景；compare使用同一冻结道路图比较基线和危险场景。',
     )
     objective: Literal["distance", "time"] = Field(
         default="distance",
-        description="Optimize total metres or total estimated minutes, "
-        "including road and endpoint connector costs. Keep the same objective across scenarios.",
+        description='默认distance最小总米数；time最小估计分钟数，均含端点连接段，各场景保持一致。',
     )
-    roads: SpatialSource = Field(description="Existing road lines with stable unique IDs.")
-    residents: SpatialSource = Field(description="Point assets; keep original ID/geometry binding.")
-    shelters: SpatialSource = Field(description="Point destinations; capacity is not allocated.")
+    roads: SpatialSource = Field(description='必填，道路线来源，须有稳定唯一业务ID。')
+    residents: SpatialSource = Field(description='必填，居民点来源，保留实体ID与原始几何对应。')
+    shelters: SpatialSource = Field(description='必填，避难点来源；本工具不分配容量。')
     road_id_field: str = Field(
-        min_length=1, description="Existing unique non-null string/integer ID."
+        min_length=1, description='必填，道路中实际存在、非空唯一的字符串或整数ID字段。'
     )
-    resident_id_field: str = Field(min_length=1, description="Existing unique non-null asset ID.")
+    resident_id_field: str = Field(min_length=1,
+        description='必填，居民点中实际存在、非空唯一的实体ID字段。')
     shelter_id_field: str = Field(
-        min_length=1, description="Existing unique non-null destination ID."
+        min_length=1, description='必填，避难点中实际存在、非空唯一的实体ID字段。'
     )
     direction_mode: Literal["bidirectional", "field"] = Field(
-        description="Explicit assumption. field REQUIRES direction_field plus direction_values, "
-        "e.g. direction_field='oneway', direction_values={'B':'both','F':'forward'}; "
-        "forward/reverse follow each source line's coordinate order.",
+        description='必填，明确双向bidirectional或按字段field；field须声明字段和代码映射，正反按源线坐标顺序。',
     )
-    speed_kmh: float = Field(gt=0, description="Explicit constant road speed for estimated time.")
+    speed_kmh: float = Field(gt=0, description='必填，正数，道路恒定速度，单位km/h，用于估计时间。')
     max_snap_distance_m: float = Field(
         ge=0,
-        description="Maximum safe straight connector to a road segment; 0 means on-road only.",
+        description='必填，非负，端点到道路的最大直线连接距离，单位米；0仅允许路上点。',
     )
     connector_speed_kmh: float = Field(
         default=5,
         gt=0,
-        description="Constant endpoint connector speed, distinct from road speed.",
+        description='默认5，正数，端点连接段速度km/h，与道路速度分开。',
     )
     target_crs: str = Field(
         default="",
-        description="Projected metre CRS. Required when neither roads nor the configured "
-        "analysis.metric_crs provides a metre projection.",
+        description='默认空；目标投影CRS须以米为单位，源/配置无合适投影时必填。',
     )
     direction_field: str = Field(
         default="",
-        description="REQUIRED nonempty existing road field when direction_mode='field', "
-        "e.g. 'oneway'. Empty only in bidirectional mode. Never guess direction codes.",
+        description='默认空；direction_mode=field时必须为实际道路方向字段，双向模式省略。',
     )
     direction_values: dict[str, Literal["forward", "reverse", "both", "closed"]] = Field(
         default_factory=dict,
         max_length=64,
-        description='Exact source codes, e.g. {"B":"both","F":"forward"}; never infer meanings.',
+        description='默认空；源代码到forward/reverse/both/closed的明确映射，不能猜含义。',
     )
     hazards: SpatialSource | None = Field(
         default=None,
-        description="Exact selected polygon hazards; no automatic forecast-time choice.",
+        description='默认null；准确选择的面状危险范围，不自动选择预报时次。',
     )
-    hazard_buffer_m: float = Field(default=0, ge=0)
-    routes_per_resident: int = Field(default=1, ge=1, le=10)
-    output_name: str = Field(default="", description="Stem for a new analysis job directory.")
+    hazard_buffer_m: float = Field(default=0, ge=0,
+        description='危险区外扩距离，单位米；非0时必须提供hazards；0使用原范围。')
+    routes_per_resident: int = Field(default=1, ge=1, le=10,
+        description='每个居民点保留的候选避难路线数，1..10；不代表避难场所容量分配。')
+    output_name: str = Field(default="",
+        description='新分析目录的文件名主体，默认空自动生成，不传目录路径。')
 
     @model_validator(mode="after")
     def method_contract(self) -> GeoAccessibilityInput:
@@ -149,22 +147,20 @@ class GeoAccessibilityInput(BaseModel):
 class GeoAccessibilityTool(BaseTool):
     name: str = "geo_accessibility"
     description: str = (
-        "Native road accessibility: one result/status for every resident, nearest safe shelter "
-        "routes and estimated times. Requires explicit stable IDs, direction mode, road speed "
-        "and maximum snap distance. Uses existing shared road XY vertices as junctions; crossings "
-        "without a shared vertex do not connect. Supply correctly noded road data. Snaps points "
-        "to all eligible original-road segment projections before hazard filtering; "
-        "checks endpoint connectors and removes hazard-intersecting road "
-        "segments. Honors explicitly mapped one-way codes. Reports disconnected/too-far/blocked "
-        "cases instead of silently dropping residents. Routes include both connectors and "
-        "verified geometry lengths. Output is atomic CRS-safe GeoJSON/CSV plus method manifest "
-        "under analysis.outputs_dir. Select forecast time/scenario with hazards.filters. "
-        "action=compare shares baseline/hazard access candidates and reports transitions, access "
-        "changes and deletion-only objective monotonicity. objective=distance|time is explicit. "
-        "snap_too_far is a data/threshold limit, not real physical inaccessibility. "
-        "Requires explicit 2D geometry. No capacity "
-        "allocation, traffic or turn restrictions; no "
-        "population estimation or validated risk score is provided. Read method assumptions."
+        (
+        '原生道路可达性：为每个居民点返回结果或失败状态，包含安全避难路线及两端连'
+        '接段。需明确道路方向、速度与吸附距离，不猜业务参数，不分配避难容量。co'
+        'mpare在同一冻结道路图比较基线/危险场景；distance/time'
+        '分别优化总米数/估计分钟。返回持久结果、来源/字段契约、统计及供QGIS'
+        '使用的图层；审查失败原因，不能将不可达对象静默丢弃。'
+    )
+    )
+    description += (
+        '仅支持明确二维道路，只有共享XY顶点才连接，跨线无共享点不自动连通，须先正确建网。'
+        '先在原道路投影建立候选，再检查连接段并移除危险区相交路段；hazards.filters选择时次。'
+        '不可达/过远/阻断分别报告；snap_too_far是数据或阈值限制，不能断言物理不可达。'
+        '输出原子保存且CRS一致的GeoJSON/CSV/方法清单；路线长度包括两端连接段。'
+        '不模拟交通、转向限制、人口估计或经验证的风险分值，先读方法假设。'
     )
     input_model: type[BaseModel] = GeoAccessibilityInput
 

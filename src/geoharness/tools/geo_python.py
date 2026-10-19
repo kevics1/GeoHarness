@@ -220,55 +220,129 @@ def python_recovery_hints(code: str, stderr: str) -> list[str]:
 
 
 class InputRequirement(BaseModel):
-    """Optional explicit contract for one persisted dependency."""
+    """Call-time contract for one persisted input (checked before code runs)."""
 
     model_config = {"extra": "forbid"}
-    fields: list[str] = Field(default_factory=list, max_length=64)
-    key: str = ''
-    finite_fields: list[str] = Field(default_factory=list, max_length=64)
-    layer: str = ''
-    crs: str = ''
-    metric: bool = False
-    valid_geometry: bool = False
+    fields: list[str] = Field(default_factory=list, max_length=64, description=(
+        '必须存在的字段名列表，默认空；从实际数据检查结果选取。'
+    ))
+    key: str = Field(default="", description=(
+        '唯一且非空的业务实体ID字段，默认空表示不检查唯一性。'
+    ))
+    finite_fields: list[str] = Field(default_factory=list, max_length=64, description=(
+        '必须全部为有限数值的字段列表，拒绝空值、NaN及inf。'
+    ))
+    layer: str = Field(default="", description=(
+        '多图层数据的准确图层名，默认空使用驱动默认层。'
+    ))
+    crs: str = Field(default="", description=(
+        '预期CRS标识，例如EPSG:4326；默认空不限制，检查不重标坐标。'
+    ))
+    metric: bool = Field(default=False, description=(
+        '默认false；true要求投影且单位为米，适用于距离/面积/缓冲。'
+    ))
+    valid_geometry: bool = Field(default=False, description=(
+        '默认false；true在脚本运行前检查所有几何非空且有效。'
+    ))
 
 
 class GeoPythonInput(BaseModel):
-    code: str = Field(min_length=1, description="Complete Python script saved as analysis.py.")
+    model_config = {
+        "extra": "forbid",
+        "json_schema_extra": {
+            "title": "geo_python input",
+            "examples": [{
+                "code": ("import geopandas as gpd\n"
+                         "frame = gpd.read_file(INPUTS['source'])\n"
+                         "print(frame.crs, len(frame))\n"),
+                "name": "inspect_source",
+                "input_refs": {"source": "DATA_REF_OR_RETURNED_PATH"},
+                "input_requirements": {"source": {"fields": ["id"], "key": "id"}},
+                "expected_outputs": [],
+            }],
+        },
+    }
+
+    code: str = Field(min_length=1, description=(
+        "必填。本次调用要完整执行的 Python 脚本正文，保存为 analysis.py。"
+        "必须自包含全部 import/函数/变量；每次调用都是新进程，上一调用的名称不会保留。"
+        "不能只给片段，也不能用省略号或占位路径。读取数据用 INPUTS[alias]、read_vector(...) "
+        "或本轮实际返回的路径；写文件只用 RUN_DIR / 相对文件名。"
+        "示例：code=\"import geopandas as gpd\npts=read_vector('居民点')\n"
+        "print(pts[['id','name']])\"。"
+    ))
     name: str = Field(
         default="analysis",
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
-        description="Short ASCII name for this reproducible analysis run.",
+        description=(
+            "可选。ASCII 短名，仅用于标识本次可复现运行/产物目录，不参与空间计算。"
+            "重复名称不会自动复用旧结果；同一阶段或缺陷修订请使用相同 stage_id。"
+        ),
     )
     map_id: str = Field(
         default="",
-        description="Stable map identity shared by all versions of the same map.",
+        description=(
+            "可选。逻辑地图的稳定标识，不是 operation_id、run_dir 或文件名。"
+            "同一张图的多版本复用同一 map_id；只上传一张新图时才新生成。"
+        ),
     )
     timeout_seconds: float | None = Field(
-        default=None, gt=0, description="Optional timeout no greater than the configured maximum."
+        default=None, gt=0, description=(
+            "可选。单次脚本超时秒数，必须不超过 execution.timeout_seconds 配置上限；"
+            "它不是整体任务预算，也不会让长分析自动通过。"
+        )
     )
     input_refs: dict[str, str] = Field(default_factory=dict, max_length=64,
-        description="Named exact DATA_REFS IDs or returned artifact paths. Injected as "
-        "INPUTS[name]: Path; use for CSV/GeoPackage dependencies across fresh runs.")
+        description=(
+            "可选，跨新进程读取业务数据的唯一推荐契约：{alias: exact_ref}。"
+            "alias 是脚本里的 INPUTS['alias'] 键；值是工具实际返回的 data:... 引用、"
+            "明确路径或已登记结果路径，不能猜文件名。"
+            "脚本内的动态/绝对业务读取必须在此声明，否则执行前会以'未绑定业务输入'拒绝。"
+            "示例：{\"source\":\"data:...\",\"roster\":\"<previous file path>\"}。"
+        ))
     input_requirements: dict[str, InputRequirement] = Field(default_factory=dict, max_length=64,
-        description="Optional requirements by input_refs alias: fields, key (unique/non-null), "
-        "finite_fields, layer, crs, metric, valid_geometry. Actual files are checked before code.")
+        description=(
+            "可选但推荐。按 input_refs 的 alias 声明执行前检查：fields（实际列）、"
+            "key（唯一且非空）、finite_fields（有限数值）、layer（GPKG 图层）、crs（声明 CRS）、"
+            "metric（米制）、valid_geometry（有效几何）。检查失败不会执行脚本。"
+            "这些检查只核对 schema/几何，不证明任意方法正确。"
+        ))
     expected_outputs: list[str] = Field(default_factory=list, max_length=64,
-        description="Relative output files required for stage success; missing files fail.")
+        description=(
+            "可选。脚本必须产生的相对输出文件列表（相对 RUN_DIR），缺一即失败。"
+            "只填真正需要的最终文件，不要列出临时缓存；名称必须与脚本实际写入完全一致。"
+        ))
     stage_id: str = Field(default='', pattern=r'^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63})?$',
-        description="Stable analysis step ID, reused after fixes; stores trusted completion.")
+        description=(
+            "可选。稳定分析阶段 ID；修复同一阶段时保留原 ID，未变化的成功阶段可复用。"
+            "不要为每次试错生成新 ID，也不要用它表示审图页号或地图版本。"
+        ))
     depends_on: list[str] = Field(default_factory=list, max_length=32,
-        description="Prior successful stage IDs whose unchanged artifacts this step requires.")
-    policy_ref: str = Field(default='', description='用户已确认的评分政策引用；模型不能自签确认。')
+        description=(
+            "可选。前置 stage_id 列表，表示本阶段确实依赖其已成功产物；"
+            "只有上游指纹不变才复用。不要列出无关地图/报告步骤来堆叠依赖。"
+        ))
+    policy_ref: str = Field(default='', description=(
+        "可选。用户已经确认的评分政策引用（policy_ref），只能来自真实确认流程；"
+        "模型不能自签，普通分析不要填。"
+    ))
     backend: Literal['python', 'qgis'] = Field(default='python', description=(
-        "PyQGIS 控制台模式：在已初始化的独立 QGIS Python 解释器中运行完整脚本，"
-        "可直接 import processing/qgis.core 并使用 Project。仍需显式声明输入；"
-        "每次调用是新进程，不保留隐式全局变量。"
+        "可选，默认 python。python = GeoPandas/Shapely/pandas/numpy/rasterio/matplotlib 脚本；"
+        "qgis = 已初始化的独立 PyQGIS 控制台进程，可直接 import processing/qgis.core 并使用 "
+        "Project。标准空间算法仍优先 geo_qgis Processing；qgis 模式适合自定义原生组合。"
+        "每次调用都是新进程，不保留隐式全局变量。"
     ))
     console_state: dict[str, Any] = Field(default_factory=dict, max_length=64,
-        description="backend=qgis 时显式传入的有界 JSON 变量；不传则无跨调用状态。")
+        description=(
+            "backend=qgis 时可选。显式作为 CONSOLE_STATE 注入的有界 JSON 对象；"
+            "只放简单标量/列表/字典，不传 QGIS 对象、DataFrame 或路径授权。"
+            "不传则本次脚本没有跨调用状态。"
+        ))
     console_result: str = Field(default="CONSOLE_RESULT", max_length=80, pattern=(
         r"^[A-Za-z_][A-Za-z0-9_]{0,79}$"), description=(
-        "backend=qgis 时读取的脚本变量名；必须是 JSON 可序列化值，不能返回 QGIS 原生对象。"
+        "两个backend共用的可选返回变量名，默认 CONSOLE_RESULT；脚本可给该变量赋值，"
+        "该值必须可 JSON 序列化，不能是 QGIS 原生对象、DataFrame 或不可序列化异常。"
+        "业务结果在result.console_result返回，不必创建ok.json；print仅放少量诊断。"
     ))
 
     @field_validator('expected_outputs')
@@ -364,8 +438,8 @@ class GeoPythonTool(BaseTool):
         schema = super().to_api_schema()
         timeout = schema["input_schema"]["properties"]["timeout_seconds"]
         timeout["description"] = (
-            "Optional timeout; omit it to use the configured default. "
-            f"Maximum allowed value is {self.timeout_limit:g} seconds."
+            "可选，单次脚本超时秒数；省略使用当前 backend 的配置默认值。"
+            f"接口上限为 {self.timeout_limit:g} 秒，QGIS 还受 qgis.timeout_seconds 约束。"
         )
         for option in timeout["anyOf"]:
             if option.get("type") == "number":
@@ -591,6 +665,7 @@ class GeoPythonTool(BaseTool):
                 input_artifacts=inputs,
                 managed_inputs=bool(context.metadata.get('geo_task_record')),
                 approved_score_policy=approved_policy,
+                result_variable=arguments.console_result,
                 input_requirements={k: v.model_dump() for k, v in
                                     arguments.input_requirements.items()},
                 expected_outputs=tuple(arguments.expected_outputs),

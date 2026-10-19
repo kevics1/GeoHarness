@@ -25,24 +25,50 @@ from geoharness.tools.geo_qgis import qgis_read_roots
 class QgisCategory(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    value: str | int | float | bool | None
-    label: str = ""
-    color: str = Field(description="Use #RRGGBB, e.g. #d73027; rgba is normalized to Qt ARGB.")
+    value: str | int | float | bool | None = Field(description=(
+        "必填。分类字段中的真实取值；保留源类型（字符串、整数、浮点、布尔或 null）。"
+        "必须与数据中实际值逐项对应，不能用图例文案或行号代替。null 也是合法类别键。"
+    ))
+    label: str = Field(default="", description=(
+        "可选。图例显示文字；留空使用 value 本身。"
+        "只有在核实实际含义和单位后才翻译/改写，不要改变数值含义。"
+    ))
+    color: str = Field(description=(
+        "必填。该类别填充色，#RRGGBB（如 #d73027）；rgba 会规范化为 Qt ARGB。"
+    ))
     _color = field_validator("color")(normalize_color)
-    size_mm: float | None = Field(default=None, gt=0, le=50)
-    width_mm: float | None = Field(default=None, ge=0, le=20)
+    size_mm: float | None = Field(default=None, gt=0, le=50, description=(
+        "可选。该类别单独的符号尺寸（毫米）；省略继承 QgisVectorStyle.size_mm。"
+        "改变尺寸会改变纸面占位与重叠风险。"
+    ))
+    width_mm: float | None = Field(default=None, ge=0, le=20, description=(
+        "可选。该类别单独的描边宽度（毫米）；省略继承样式默认值。"
+    ))
 
 
 class QgisRange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    lower: float = Field(allow_inf_nan=False)
-    upper: float = Field(allow_inf_nan=False)
-    label: str = ""
-    color: str
+    lower: float = Field(allow_inf_nan=False, description=(
+        "必填。实际数值字段单位下的下端（含）；必须有限且 <= upper。"
+        "不要在这些边界里偷偷换算单位；先确认字段本身单位。"
+    ))
+    upper: float = Field(allow_inf_nan=False, description=(
+        "必填。实际数值字段单位下的上端（含）；必须有限且 >= lower。"
+        "区间必须有序且互不重叠，标签说明单位/边界含义。"
+    ))
+    label: str = Field(default="", description=(
+        "可选。图例区间的显示文字；说明单位和边界是否包含，"
+        "不要声称数据不具备的精度。"
+    ))
+    color: str = Field(description="必填。该区间填充色，#RRGGBB（如 #fee08b）。")
     _color = field_validator("color")(normalize_color)
-    size_mm: float | None = Field(default=None, gt=0, le=50)
-    width_mm: float | None = Field(default=None, ge=0, le=20)
+    size_mm: float | None = Field(default=None, gt=0, le=50, description=(
+        "可选。该区间单独的符号尺寸（毫米）；省略继承样式默认值。"
+    ))
+    width_mm: float | None = Field(default=None, ge=0, le=20, description=(
+        "可选。该区间单独的描边宽度（毫米）；省略继承样式默认值。"
+    ))
 
     @model_validator(mode="after")
     def validate_bounds(self) -> QgisRange:
@@ -54,25 +80,54 @@ class QgisRange(BaseModel):
 class QgisVectorStyle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    renderer: Literal["single", "categorized", "graduated"] = "single"
-    color: str = "#4c78a8"
-    field: str = ""
-    categories: list[QgisCategory] = Field(default_factory=list)
-    ranges: list[QgisRange] = Field(default_factory=list)
-    opacity: float = Field(default=1.0, ge=0, le=1)
-    fill_opacity: float = Field(default=1.0, ge=0, le=1, description=(
-        "Symbol fill alpha only; stroke and labels remain visible. Hollow point rings "
-        "can preserve a classified point underneath. Never use to hide required polygons."
+    renderer: Literal["single", "categorized", "graduated"] = Field(default="single", description=(
+        "必填，默认 single。single = 单一颜色；categorized = 每个精确值一个类别"
+        "（必须提供 field + categories）；graduated = 有序数值区间"
+        "（必须提供 field + ranges）。按实测字段语义选择，不能使用 Processing 参数"
+        "或 geo_cartography 的桥接样式。"
     ))
-    size_mm: float = Field(default=3, gt=0, le=50)
-    width_mm: float = Field(default=0.3, ge=0, le=20)
-    outline_color: str = "#ffffff"
+    color: str = Field(default="#4c78a8", description=(
+        "可选。renderer=single 时的填充色 #RRGGBB；categorized/graduated 时忽略，"
+        "颜色来自各自 category/range。"
+    ))
+    field: str = Field(default="", description=(
+        "可选。categorized/graduated 使用的真实属性字段名。renderer=single 时留空。"
+        "必须与 source schema 完全一致；不能使用 geometry 列、别名或图例标题。"
+    ))
+    categories: list[QgisCategory] = Field(default_factory=list, description=(
+        "renderer=categorized 时必填。每项含真实源 value 与 color，value 必须唯一。"
+        "只列准备画出并可解释的类别；图例文字必须与实际含义一致。"
+    ))
+    ranges: list[QgisRange] = Field(default_factory=list, description=(
+        "renderer=graduated 时必填。按数值下界自动排序，区间不得重叠；"
+        "标签写清单位和是否包含边界。"
+    ))
+    opacity: float = Field(default=1.0, ge=0, le=1, description=(
+        "可选，默认 1。整个图层不透明度，0 完全不可见。"
+        "若需保留描边和标注、只让填充变透明，请用 fill_opacity。"
+    ))
+    fill_opacity: float = Field(default=1.0, ge=0, le=1, description=(
+        "可选，默认 1。仅符号填充透明度；描边和标注仍可见。"
+        "空心圆可透出底层分类点，但不能借此隐藏必须呈现的面。"
+    ))
+    size_mm: float = Field(default=3, gt=0, le=50, description=(
+        "可选，默认 3。纸面上的点直径或线/符号尺寸（毫米），不是数据距离。"
+        "最终比例尺下仍可能重叠；需结合图框和实体分布检查。"
+    ))
+    width_mm: float = Field(default=0.3, ge=0, le=20, description=(
+        "可选，默认 0.3。描边宽度（毫米）；0 表示无描边。"
+    ))
+    outline_color: str = Field(default="#ffffff", description=(
+        "可选。描边颜色 #RRGGBB。选择与填充对比、而不是与页面背景对比的颜色。"
+    ))
     _colors = field_validator("color", "outline_color")(normalize_color)
     obstacle: bool | None = Field(default=None, description=(
-        "Optional PAL labeling obstacle, including unlabeled lines/polygons. None keeps "
-        "the normal behavior; True protects this geometry from other layers' labels."
+        "可选。PAL 标注障碍：None 保持默认；true 保护此几何不被其他图层标注压盖，"
+        "包括未标注的线/面。"
     ))
-    obstacle_factor: float = Field(default=1, ge=0, le=10)
+    obstacle_factor: float = Field(default=1, ge=0, le=10, description=(
+        "可选，默认 1。obstacle=true 时按符号实际范围的放大倍数；只在确有间距需求时增大。"
+    ))
 
     @model_validator(mode="after")
     def validate_categories(self) -> QgisVectorStyle:
@@ -99,90 +154,173 @@ class QgisVectorStyle(BaseModel):
         return self
 
 
+
 class QgisLabelStyle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    font_family: str = "Microsoft YaHei"
-    font_file: str = Field(default="", description=(
-        "Optional TTF/TTC/OTF file in workspace/data read roots. For installed system fonts "
-        "prefer font_family; explicit system-directory paths are not granted."
+    font_family: str = Field(default="Microsoft YaHei", description=(
+        "可选。已安装字体族；必须与布局测量使用同一字体，换字体会改变真实文字宽度。"
+        "系统已安装字体优先填此项。"
     ))
-    size_pt: float = Field(default=9, ge=5, le=40)
-    color: str = "#222222"
-    buffer_size_mm: float = Field(default=0.8, ge=0, le=5)
-    buffer_color: str = "#ffffff"
+    font_file: str = Field(default="", description=(
+        "可选。workspace/data 读取根内的 TTF/TTC/OTF 字体文件。"
+        "已安装字体优先用 font_family；系统目录的显式路径不在授权读取范围。"
+    ))
+    size_pt: float = Field(default=9, ge=5, le=40, description=(
+        "可选，默认 9。标注字号（pt），不是毫米；纸面、符号和标注必须用各自单位。"
+    ))
+    color: str = Field(default="#222222", description=(
+        "可选。标注文字颜色 #RRGGBB；选择与实际填充形成对比的颜色。"
+    ))
+    buffer_size_mm: float = Field(default=0.8, ge=0, le=5, description=(
+        "可选，默认 0.8。文字白色晕圈半径（毫米）；0 关闭。"
+    ))
+    buffer_color: str = Field(default="#ffffff", description=(
+        "可选。晕圈颜色 #RRGGBB；通常为白色或能隔开文字与底图的颜色。"
+    ))
     placement: Literal["auto", "around_point", "over_point", "parallel", "horizontal"] = Field(
-        default="auto", description="Prefer auto. around_point/over_point need Point/MultiPoint; "
-        "parallel requires LineString/MultiLineString; horizontal supports polygon labels.")
+        default="auto", description=(
+            "可选，默认 auto。auto 交由 PAL；around_point/over_point 仅用于 Point/MultiPoint；"
+            "parallel 用于 LineString/MultiLineString；horizontal 可用于面。"
+            "选择前先核对实际几何类型。"
+        ))
     _colors = field_validator("color", "buffer_color")(normalize_color)
     distance_mm: float = Field(default=1.5, ge=0, le=20, description=(
-        "Distance from the point for around_point placement; over_point ignores this value."
+        "可选，默认 1.5。around_point 放置的纸面距离（毫米）；over_point 忽略该值。"
     ))
     offset_x_mm: float = Field(default=0, ge=-20, le=20, description=(
-        "Fixed horizontal offset for over_point placement. around_point ignores X/Y offsets; "
-        "use distance_mm for around_point, or explicitly choose over_point for fixed offsets."
+        "可选。over_point 的固定水平偏移（毫米）；around_point 忽略 X/Y 偏移。"
+        "around_point 用 distance_mm，确需固定偏移时显式改 over_point。"
     ))
     offset_y_mm: float = Field(default=0, ge=-20, le=20, description=(
-        "Fixed vertical offset for over_point placement; around_point uses distance_mm instead."
+        "可选。over_point 的固定垂直偏移（毫米）；around_point 用 distance_mm 代替。"
     ))
-    priority: int = Field(default=5, ge=0, le=10,
-                          description="PAL label priority: 0 lowest, 10 highest.")
+    priority: int = Field(default=5, ge=0, le=10, description=(
+        "可选，默认 5。PAL 标注优先级，0 最低，10 最高；用于决定冲突时谁先放置。"
+    ))
+
 
 
 class QgisRasterStyle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    renderer: Literal["default", "hillshade"] = "default"
-    band: int = Field(default=1, ge=1)
-    azimuth: float = Field(default=315, ge=0, le=360)
-    altitude: float = Field(default=45, gt=0, le=90)
+    renderer: Literal["default", "hillshade"] = Field(default="default", description=(
+        '默认default按标准拉伸显示波段；hillshade按高程波段计算阴影。'
+    ))
+    band: int = Field(default=1, ge=1, description=(
+        '默认1，从1开始的波段号；先检查波段真实含义，不能默认第一波段是高程。'
+    ))
+    azimuth: float = Field(default=315, ge=0, le=360, description=(
+        '默认315，光源方位角，北向起顺时针角度0..360，315为西北。'
+    ))
+    altitude: float = Field(default=45, gt=0, le=90, description=(
+        '默认45，光源高度角，单位度，须大于0且不超过90。'
+    ))
 
 
 class QgisLeaderBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    source_layer: Annotated[int, Field(strict=True, ge=0)] | str
-    labels_layer: Annotated[int, Field(strict=True, ge=0)] | str
-    key_field: str = Field(min_length=1)
-    metric_crs: str = Field(min_length=1)
-    tolerance_m: float = Field(default=.01, ge=0)
-    source_gap_m: float = Field(default=0, ge=0)
-    target_gap_m: float = Field(default=0, ge=0)
+    source_layer: Annotated[int, Field(strict=True, ge=0)] | str = Field(description=(
+        '真实要素锚点的层索引（从0开始）或准确layer_key，不用编号层代替。'
+    ))
+    labels_layer: Annotated[int, Field(strict=True, ge=0)] | str = Field(description=(
+        '移动后标签锚点的层索引（从0开始）或layer_key。'
+    ))
+    key_field: str = Field(min_length=1, description=(
+        '两层均存在且各自唯一的业务键，按实体连接引线，不按行序。'
+    ))
+    metric_crs: str = Field(min_length=1, description=(
+        '必填，单位米的投影CRS，用于量测引线间隙，不能用经纬度。'
+    ))
+    tolerance_m: float = Field(default=.01, ge=0, description=(
+        '默认0.01，端点校验容差，单位米，非负。'
+    ))
+    source_gap_m: float = Field(default=0, ge=0, description=(
+        '默认0，源点与引线起点间隙，单位米，非负。'
+    ))
+    target_gap_m: float = Field(default=0, ge=0, description=(
+        '默认0，引线终点与标签锚点间隙，单位米，非负。'
+    ))
 
 
 class QgisProjectLayer(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    role: Literal["map", "table_only"] = Field(default="map",
-        description="table_only validates/packages vector records for a roster "
-                    "without drawing them.")
+    role: Literal["map", "table_only"] = Field(default="map", description=(
+        "图层角色。map = 正常绘制到地图；table_only = 仅登记/校验矢量记录供名单表使用，"
+        "永不参与地图绘制，也不能出现在任何图框的 render/focus/label 列表。"
+    ))
     _normalized_style_fields: tuple[str, ...] = PrivateAttr(default=())
 
-    file_path: str = Field(min_length=1, description="Existing local vector/raster source.")
-    kind: Literal["vector", "raster"] = "vector"
+    file_path: str = Field(min_length=1, description=(
+        "必填。数据检查返回的实际本地矢量/栅格路径，或前置工具产物的准确路径。"
+        "不能传目录、URL、模糊的 catalog 名称或猜测文件名；"
+        "同一工程尽量复用同一来源以保证 layer_key 稳定。"
+    ))
+    kind: Literal["vector", "raster"] = Field(default="vector", description=(
+        "必填，默认 vector。vector = GeoPackage/Shapefile/GeoJSON；raster = GeoTIFF/DEM/影像。"
+        "它决定可用的样式字段：vector 用 style/label_*，raster 用 raster_style；"
+        "不要把矢量样式字段写到栅格图层。"
+    ))
     show_in_legend: bool | None = Field(default=None, description=(
-        "是否在图例中显示。空值时矢量/单波段显示，RGB影像默认隐藏；"
-        "辅助编号和引线可显式设为false，不改变地图中的绘制。"))
-    name: str = ""
+        "可选。是否在图例中显示。空值时矢量/单波段栅格显示，RGB 影像默认隐藏；"
+        "辅助编号、引线、底图可显式设 false，但仍会绘制。"
+    ))
+    name: str = Field(default="", description=(
+        "可选。图例/诊断中的用户可见名称；不负责选择数据源。"
+        "GeoPackage 内部图层选择请用 layer_name，二者不要混淆。"
+    ))
     layer_key: str = Field(default="", max_length=128, description=(
-        "Stable business layer identity across versions. Keep when replacing a derived file; "
-        "otherwise generated from original source, layer selector, kind and name."
+        "可选但强烈推荐。跨版本稳定的业务图层身份；同一图层替换文件时保留原 key。"
+        "后续 edits 的 layer_key、图框的 focus/render/label 引用和 leader_binding 都应使用它。"
+        "不要用显示名称、图例文字或 0 基索引代替。"
     ))
-    layer_name: str = Field(default="", description="Optional source GeoPackage layer name.")
+    layer_name: str = Field(default="", description=(
+        "可选。多图层 GeoPackage 内部的准确源图层名；单图层文件或来源唯一时留空。"
+        "它不是图例显示名称（name）。"
+    ))
     style: QgisVectorStyle | None = Field(default=None, description=(
-        "Vector symbol settings. Put renderer, field and categories inside this style object."
+        "矢量符号设置。renderer、field、categories/ranges、size_mm、颜色等必须放在此对象内；"
+        "按实际字段语义选择 single/categorized/graduated，不能照搬 geo_cartography 的桥接字段。"
     ))
-    raster_style: QgisRasterStyle | None = None
-    label_field: str = ""
-    leader_binding: QgisLeaderBinding | None = Field(default=None,
-        description="Straight callouts: exact source/anchor layer keys and business key. "
-                    "Preflight checks current anchor endpoints, never visual approval alone.")
-    label_style: QgisLabelStyle | None = None
-    required: bool = True
-    expected_feature_count: int | None = Field(default=None, ge=0)
-    minimum_visible_features: int = Field(default=1, ge=0)
+    raster_style: QgisRasterStyle | None = Field(default=None, description=(
+        "栅格显示设置，仅 kind='raster' 时使用：default 或 hillshade、band、azimuth、altitude。"
+        "band 是 1 基索引且必须先核实波段含义。"
+    ))
+    label_field: str = Field(default="", description=(
+        "可选。实际存在的属性字段或已验证的 number_field，其值会作为可见标注。"
+        "留空表示只画符号不标注。业务 ID 与显示编号不同；有序编号请用派生 number_field。"
+    ))
+    leader_binding: QgisLeaderBinding | None = Field(default=None, description=(
+        "可选。直线引线契约：把真实源要素与移动后的标注锚点按业务键绑定。"
+        "source_layer 必须是真实点位、labels_layer 必须是锚点层，key_field 在两层唯一；"
+        "preflight 会检查当前端点，视觉审查不能替代几何证据。"
+    ))
+    label_style: QgisLabelStyle | None = Field(default=None, description=(
+        "可选。label_field 的字体、字号、缓冲、放置方式和偏移。"
+        "字号使用 pt；placement 必须匹配实际几何类型。"
+    ))
+    required: bool = Field(default=True, description=(
+        "可选，默认 true。true 表示每个实际渲染图框都要看到该图层要素；"
+        "仅当背景/上下文图层缺失不会删除已声明主体时才设 false。"
+        "系统会拒绝从未进入任何图框的 required 图层。"
+    ))
+    expected_feature_count: int | None = Field(default=None, ge=0, description=(
+        "可选。加载后必须精确匹配的源要素数。只有独立已知该数量时才填；"
+        "不要为了通过校验猜一个数。"
+    ))
+    minimum_visible_features: int = Field(default=1, ge=0, description=(
+        "可选，默认 1。图框内至少可见的要素数；上下文图层可设 0。"
+        "需要对具名主体要求完整覆盖时，应在图框 requirements 中明确写出，而不是只调大这个数。"
+    ))
     derivation: MapDerivation | None = Field(
         default=None,
-        description="Verified map subset/field selection/new annotations of file_path.",
+        description=(
+            "可选。对 file_path 的已验证地图子集/字段选择/新增注记（feature_indices、keep_fields、"
+            "annotations）。几何保留，新增注记不能覆盖源字段；不要用它伪造不存在的源属性。"
+        ),
     )
+
+
 
     @model_validator(mode="wrap")
     @classmethod
@@ -226,10 +364,10 @@ class QgisExtent(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    xmin: float
-    ymin: float
-    xmax: float
-    ymax: float
+    xmin: float = Field(description='范围最小X，单位为工程CRS单位；与xmax共同确定东西边界。')
+    ymin: float = Field(description='范围最小Y，单位为工程CRS单位；与ymax共同确定南北边界。')
+    xmax: float = Field(description='范围最大X，必须大于xmin；不是纸面mm。')
+    ymax: float = Field(description='范围最大Y，必须大于ymin；不是纸面mm。')
 
     @model_validator(mode="after")
     def validate_area(self) -> QgisExtent:
@@ -243,11 +381,26 @@ LayerReference = Annotated[int, Field(strict=True, ge=0)] | Annotated[str, Field
 
 class QgisFrameRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    layer_index: LayerReference
-    minimum_visible_features: int = Field(default=1, ge=0)
-    coverage: Literal["intersects", "complete"] = "intersects"
-    key_field: str = ""
-    feature_keys: list[str | int | float] | None = None
+    layer_index: LayerReference = Field(description=(
+        "必填。主体图层，使用同一调用中的精确 layer_key，或 0 基源图层索引。"
+        "图层顺序变化后不要沿用旧索引；优先用稳定 layer_key。"
+    ))
+    minimum_visible_features: int = Field(default=1, ge=0, description=(
+        "可选，默认 1。该主体在此图框内至少可见的要素数量。"
+        "数值应来自声明的业务对象，不得为了通过校验而调小。"
+    ))
+    coverage: Literal["intersects", "complete"] = Field(default="intersects", description=(
+        "可选，默认 intersects。intersects = 至少一个要素与图框相交；"
+        "complete = 所有选中几何都必须完整落在图框内。具名且不能裁切的主体用 complete。"
+    ))
+    key_field: str = Field(default="", description=(
+        "可选。与 feature_keys 配对使用的业务键字段；有 feature_keys 时必填，"
+        "且键在源中必须唯一、非空。"
+    ))
+    feature_keys: list[str | int | float] | None = Field(default=None, description=(
+        "可选。此图框要核对的精确业务键值集合；用于具名子集。"
+        "不要用行号、显示编号或猜测的标签列表代替真实键。"
+    ))
 
     @model_validator(mode="after")
     def validate_keys(self):
@@ -260,29 +413,42 @@ class QgisMapFrameSpec(BaseModel):
     """Choose an extent's subject separately from the layers drawn in that frame."""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    purpose: str = Field(default="", max_length=500)
+    purpose: str = Field(default="", max_length=500, description=(
+        "可选。内部说明此图框承担什么职责（总览/详图/名单等），不会绘制成可见文字。"
+        "可见详图标题用 layout.detail_title。"
+    ))
     requirements: list[QgisFrameRequirement] = Field(default_factory=list, max_length=64,
-        description="Per-frame required subjects; complete preserves every selected geometry. "
-                    "layer_index also accepts a unique stable layer_key in a project call.")
+        description=(
+            "可选。声明必须在此图框内保持可见的主体及覆盖要求；"
+            "complete 表示选中几何不能裁切。layer_index 可写精确 layer_key。"
+        ))
 
     label_layers: list[LayerReference] | None = Field(
         default=None, max_length=64, description=(
-            "Layers allowed to label in this frame. [] hides labels here while keeping symbols; "
-            "use a detail frame and label_table to retain dense names. None preserves labels."
+            "可选。允许在此图框内标注的图层。[] = 隐藏本页标注但保留符号；"
+            "密集名称应交给详图或名单页。None = 沿用图层原有标注。"
         ))
 
     focus_layers: list[LayerReference] | None = Field(
         default=None, min_length=1, max_length=64,
-        description="FIT mode: 0-based subject layer indices; excludes backgrounds. Omit when "
-                    "using EXPLICIT mode (map_extent for main, detail_extent for detail).",
+        description=(
+            "FIT 模式主体层：用于自动拟合图框范围的图层，排除背景层；优先写 layer_key。"
+            "与显式 extent 互斥：主图用 map_extent，详图用 detail_extent 时不要再填本字段。"
+        ),
     )
     render_layers: list[LayerReference] | None = Field(
         default=None, min_length=1, max_length=64,
-        description="0-based selected layers; original bottom-to-top drawing order is preserved.",
+        description=(
+            "可选。此图框实际渲染的图层集合；必须包含 focus_layers 与 label_layers。"
+            "工具会按原始从下到上顺序绘制，不会因列出的顺序改变叠放。"
+        ),
     )
     padding_ratio: float | None = Field(
         default=None, ge=0, le=1,
-        description="Symmetric padding per side for focus bounds; defaults to cartography config.",
+        description=(
+            "可选。FIT 主体范围每侧的对称留白比例；省略使用 cartography 配置。"
+            "只影响拟合，不改变真实要素坐标。"
+        ),
     )
 
     @model_validator(mode="after")
@@ -311,67 +477,113 @@ class QgisMapFrameSpec(BaseModel):
         return self
 
 
+
 class QgisLayoutPlan(BaseModel):
     """An unchanged plan returned by native preflight, not a caller-authored layout."""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    schema_version: Literal[1]
-    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    runtime_identity: dict[str, str]
-    font_identities: dict[str, dict[str, Any]]
-    source_identities: list[dict[str, Any]] = Field(default_factory=list)
-    parameters: dict[str, Any]
-    regions: dict[str, list[int | float]]
-    frames: dict[str, dict[str, Any]]
-    content_metrics: dict[str, Any]
-    adaptations: list[dict[str, Any]]
+    schema_version: Literal[1] = Field(description=(
+        '原生预检返回的计划版本，必须原样传回，不手写。'
+    ))
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$", description=(
+        '输入/样式/字体的SHA256，数据改变应重新预检，不编辑摘要。'
+    ))
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$", description=(
+        '实测计划本身的SHA256，不截断、不重算、不挪用。'
+    ))
+    runtime_identity: dict[str, str] = Field(description=(
+        '产生量测的QGIS/运行时版本，只作来源记录，不是可调参数。'
+    ))
+    font_identities: dict[str, dict[str, Any]] = Field(description=(
+        '实测字体身份，改字体后量测失效，需重新预检。'
+    ))
+    source_identities: list[dict[str, Any]] = Field(default_factory=list, description=(
+        '本计划实际量测的来源路径/摘要，不附加无关分析。'
+    ))
+    parameters: dict[str, Any] = Field(description=(
+        '实测有效布局参数，作为计划整体原样传回。'
+    ))
+    regions: dict[str, list[int | float]] = Field(description=(
+        '实测纸面区域坐标，单位以返回计划为准，不手动移动。'
+    ))
+    frames: dict[str, dict[str, Any]] = Field(description=(
+        '实测图框参数和适配结果，随计划原样传回。'
+    ))
+    content_metrics: dict[str, Any] = Field(description=(
+        '文字/表格等实测内容尺寸，不是用户设定。'
+    ))
+    adaptations: list[dict[str, Any]] = Field(description=(
+        '原生预检已执行的适配记录，保留完整返回值。'
+    ))
 
 
 class QgisLabelTable(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    layer_index: LayerReference = Field(description="Exact layer_key or 0-based source index.")
+    layer_index: LayerReference = Field(description=(
+        "必填。名单源图层：精确 layer_key 或同一调用中的 0 基索引。"
+        "可用 role='table_only' 图层登记名单而不绘制；但不能把它放入图框渲染列表。"
+    ))
     fields: list[str] = Field(min_length=2, max_length=8, description=(
-        "Existing fields in display order; identity is key_field or first field when omitted."
+        "必填。按显示顺序列出至少两个真实存在字段。"
+        "键身份由 key_field 决定，省略时使用第一个字段；"
+        "不要把排名/显示编号当键，除非它对完整源确实唯一且非空。"
     ))
     key_field: str = Field(default='', description=(
-        "Existing unique non-null stable source ID. May be hidden from fields; use this "
-        "when the first display field is a rank/number with nulls outside the selected roster."
+        "可选。源内唯一、非空的稳定业务键，用于绑定名单与地图符号；可不在 fields 中显示。"
+        "首个显示字段是排名/编号且子集外为空时，必须显式提供 key_field。"
     ))
-    headers: dict[str, str] = Field(default_factory=dict, max_length=8,
-                                   description="Optional display headings for existing fields.")
-    title: str = Field(default='重点对象名单', max_length=100,
-                       description='独立名单页表题；空字符串显式关闭。')
+    headers: dict[str, str] = Field(default_factory=dict, max_length=8, description=(
+        "可选。现有字段的显示表头，例如 {'name':'名称','distance_m':'距离（米）'}；"
+        "键必须是 fields 中的真实字段，单位写在表头而非凭空推断。"
+    ))
+    title: str = Field(default='重点对象名单', max_length=100, description=(
+        "可选。独立名单页的可见表题；空字符串表示显式关闭。"
+    ))
     note: str = Field(default='编号对应地图或完整名册；距离等计量单位请在列标题注明。',
-                      max_length=240, description='独立名单页说明，不自动推断业务单位。')
-    page_columns: int | None = Field(default=None, ge=1, le=4,
-        description='独立名单页并排表格数；空值沿用columns，多字段名单建议1。')
-    columns: int = Field(default=3, ge=1, le=4, description=(
-        "Number of parallel complete tables on a page, NOT the number of attribute fields. "
-        "Each parallel table repeats all fields and headings."
+                      max_length=240, description=(
+        "可选。名单页说明文字，不自动推断业务单位或质量结论。"
     ))
-    height_mm: float = Field(default=50, ge=15, le=400)
-    font_size_pt: float = Field(default=8, ge=5, le=20)
+    page_columns: int | None = Field(default=None, ge=1, le=4, description=(
+        "可选。独立名单页并排表格数量；空值沿用 columns。字段较多时建议 1。"
+    ))
+    columns: int = Field(default=3, ge=1, le=4, description=(
+        "可选，默认 3。每页并排的完整表格数量，不是属性字段数；"
+        "每个并行表格都重复全部字段和表头。"
+    ))
+    height_mm: float = Field(default=50, ge=15, le=400, description=(
+        "可选。内联名单在页面中预留的高度（毫米）；独立名单页仅作规划提示。"
+        "实际行数来自所有选中源记录，不能靠压高度丢行。"
+    ))
+    font_size_pt: float = Field(default=8, ge=5, le=20, description=(
+        "可选。名单文字字号（pt）。缩小字号不能成为丢记录的理由；"
+        "实测放不下时应分页或扩页。"
+    ))
     placement: Literal["auto", "inline", "pages"] = Field(default="auto", description=(
-        "auto keeps a fitting roster under the map and paginates overflow onto separate "
-        "editable QGIS pages. pages always uses roster pages; inline fails with measured "
-        "capacity if it cannot fit. No records are silently removed."
+        "可选，默认 auto。auto = 能放下就内联，溢出自适到独立可编辑页；"
+        "pages = 强制独立名单页；inline = 只允许内联，放不下时按实测容量失败。"
+        "任何模式都不能静默删除记录。"
     ))
     top_n: int | None = Field(default=None, ge=1, description=(
-        "Explicitly select the first N records after sort_by (required); full source roster "
-        "is retained as CSV. Omit to include every record."
+        "可选。按 sort_by 排序后显式取前 N 条；sort_by 必须同时提供。"
+        "完整源名单仍保留为 CSV。省略表示包含全部记录。"
     ))
-    sort_by: str = Field(default="", description="Existing field for deterministic roster order.")
-    descending: bool = False
+    sort_by: str = Field(default="", description=(
+        "可选。真实字段名，用于稳定名单排序；选择 top_n 时必填。"
+    ))
+    descending: bool = Field(default=False, description=(
+        "可选，默认 false。true 时反转 sort_by 顺序；只有与 top_n 结合才改变选集。"
+    ))
     keys: list[str | int | float] | None = Field(default=None, min_length=1, description=(
-        "Explicit key_field (or first field) values to include. Mutually exclusive with top_n."
+        "可选。要包含的显式 key_field（或首字段）值集合；与 top_n 互斥。"
+        "使用源业务键，不要传行号或猜测的显示编号。"
     ))
     field_widths: dict[str, float] = Field(default_factory=dict, description=(
-        "Positive relative field widths, e.g. {name:3, risk:1}; unlisted fields use 1."
+        "可选。字段相对列宽，例如 {name:3, risk:1}；未列字段按 1。"
+        "键必须是 fields 中的真实字段。"
     ))
     precision: dict[str, int] = Field(default_factory=dict, description=(
-        "Optional numeric decimal places (0..10) by field; changes display, not source values."
+        "可选。按字段设显示小数位（0..10）；只影响显示，不改变源值或统计。"
     ))
 
     @model_validator(mode="after")
@@ -381,68 +593,125 @@ class QgisLabelTable(BaseModel):
         unknown = sorted(set(self.field_widths) - set(self.fields))
         if unknown:
             raise ValueError(f"field_widths has undisplayed fields {unknown}; "
-                             f"displayed fields={self.fields}")
-        if any(not math.isfinite(value) or value <= 0 for value in self.field_widths.values()):
-            raise ValueError("field_widths requires positive finite weights for displayed fields")
-        if any(key not in self.fields or value < 0 or value > 10
-               for key, value in self.precision.items()):
-            raise ValueError("precision requires displayed numeric fields and 0..10 decimal places")
+                             "use only fields listed for display")
+        unknown = sorted(set(self.headers) - set(self.fields))
+        if unknown:
+            raise ValueError(f"headers has undisplayed fields {unknown}")
+        unknown = sorted(set(self.precision) - set(self.fields))
+        if unknown:
+            raise ValueError(f"precision has undisplayed fields {unknown}")
+        if self.sort_by and not self.fields and not self.key_field:
+            raise ValueError("sort_by needs at least one field or key_field for the source")
         return self
+
 
 
 class QgisProjectLayout(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    detail_title: str = Field(default="", max_length=500,
-                             description="Visible detail caption; frame purpose is not drawn text.")
-
-    name: str = "Map"
-    width_mm: float = Field(default=297, ge=60, le=2000)
-    height_mm: float = Field(default=210, ge=60, le=2000)
-    margin_mm: float = Field(default=12, ge=0, le=100)
-    legend: bool = True
-    scale_bar: bool = True
-    detail_extent: QgisExtent | None = Field(
-        default=None, description="Optional detail-map rectangle in the project CRS."
-    )
-    main_frame: QgisMapFrameSpec | None = None
-    detail_frame: QgisMapFrameSpec | None = None
-    detail_placement: Literal["sidebar", "page"] = Field(default="sidebar",
-        description="page places the detail on a separate editable layout page and PNG preview.")
-    label_table: QgisLabelTable | None = None
+    detail_title: str = Field(default="", description=(
+        "可选。详图页/插图实际绘制的标题文字；用真实主体和范围表述。"
+        "它是可见文字，不是 QgisMapFrameSpec.purpose（内部说明，不显示）。"
+    ))
+    name: str = Field(default="Map", description=(
+        "可选。QGIS 打印布局名称，默认 Map；跨修订保持稳定，便于 export/delivery 找到同一布局。"
+        "它不是地图标题。"
+    ))
+    width_mm: float = Field(default=297, ge=60, le=2000, description=(
+        "可选。纸张宽度（毫米），默认 A4 横向 297。工具会实测页面内容；"
+        "图例/名单/详图放不下时可能按规则扩页，不应靠裁掉主体或缩小文字硬塞。"
+    ))
+    height_mm: float = Field(default=210, ge=60, le=2000, description=(
+        "可选。纸张高度（毫米），默认 A4 210。两侧内边距后仍须给主图至少 40mm；"
+        "不要仅为让名单塞下而任意压低高度。"
+    ))
+    margin_mm: float = Field(default=12, ge=0, le=100, description=(
+        "可选。统一页边距（毫米）。是否溢出由实际文字/图例/表格矩形测量决定，而不只是这个边距。"
+    ))
+    legend: bool = Field(default=True, description=(
+        "可选，默认 true。是否绘制图例。仅在确实不需要图例时关闭；"
+        "开启时图例类别/颜色必须与当前实际图层和分类一致。"
+    ))
+    scale_bar: bool = Field(default=True, description=(
+        "可选，默认 true。是否绘制比例尺。比例尺从真实地图框和 CRS 计算，不沿用截图或旧脚本数值。"
+    ))
+    detail_extent: QgisExtent | None = Field(default=None, description=(
+        "可选，显式详图范围（EXPLICIT 模式），单位是工程 crs。"
+        "与 detail_frame.focus_layers 互斥，且要求已提供 crs。"
+        "只给确实需要放大的局部范围，不要拿主图范围冒充详图。"
+    ))
+    main_frame: QgisMapFrameSpec | None = Field(default=None, description=(
+        "可选。主图框的主体/渲染/标注契约。简单单图可省略；"
+        "提供时 render_layers 必须包含 focus_layers 和 label_layers，且不能把 table_only 放进去。"
+    ))
+    detail_frame: QgisMapFrameSpec | None = Field(default=None, description=(
+        "可选。详图框的主体/渲染/标注契约。FIT 模式用 focus_layers；"
+        "EXPLICIT 模式改用 detail_extent。详图必须有明确的范围来源。"
+    ))
+    detail_placement: Literal["sidebar", "page"] = Field(default="sidebar", description=(
+        "可选。sidebar = 详图与主图同页放在侧栏；page = 独立可编辑布局页并单独输出 PNG。"
+        "侧栏会把主图挤到不可读时应选 page，而不是强行缩小文字。"
+    ))
+    label_table: QgisLabelTable | None = Field(default=None, description=(
+        "可选。与同一源记录绑定的编号名单表。必须使用唯一非空键，不能静默丢行；"
+        "内容溢出时按规则分页。"
+    ))
     detail_minimum_zoom: float | None = Field(default=None, ge=1, le=20, description=(
-        "Require main scale/detail scale >= this value, measured after native layout fitting. "
-        "Use >1 for a real magnified detail; unset allows a locator/legacy inset."
+        "可选。原生布局拟合后要求 main_scale/detail_scale >= 此值；真正放大详图时设 >1。"
+        "不设表示允许定位图/旧式插图，不代表没有详图。"
     ))
     detail_zoom_policy: Literal["hard", "advisory"] = Field(default="hard", description=(
-        "hard enforces an explicit magnification constraint; advisory reports measured zoom "
-        "without enlarging paper or cropping subjects solely to satisfy a visual suggestion."))
-    auto_expand_max_ratio: float | None = Field(default=None, ge=1, le=10,
-        description="Optional maximum width/height expansion relative to requested paper.")
+        "可选。hard = 强制执行明确放大约束；advisory = 只报告实测缩放，"
+        "不因视觉建议放大纸张或裁切主体。"
+    ))
+    auto_expand_max_ratio: float | None = Field(default=None, ge=1, le=10, description=(
+        "可选。相对请求纸张的最大实测扩页倍率。若内容在该上限内仍放不下，"
+        "应以实测诊断失败，而不是裁切主体或删除图例/名单条目。"
+    ))
     layout_plan: QgisLayoutPlan | None = Field(default=None, description=(
-        "Unchanged preflight.layout_plan to consume; changed sources/styles/fonts are rejected."
+        "可选。preflight 返回且未变化的 layout_plan；来源/样式/字体/参数变化会被拒绝。"
     ))
     footer_text: str = Field(default="", description=(
-        "Source/context notes only. Bind native analysis_manifests for verified statistics; "
-        "use geo_analysis area for grouped time areas, sums and deduplicated coverage."
+        "可选。只放来源/上下文备注。经核实的统计应来自 analysis_manifests；"
+        "分组时次面积/汇总可用 geo_analysis area。不要把自由文字当事实来源。"
     ))
-    font_family: str = "Microsoft YaHei"
+    font_family: str = Field(default="Microsoft YaHei", description=(
+        "可选。全部实测布局文字使用的已安装字体族；检查适配时保持稳定，换字体会改变真实文字宽度。"
+    ))
     font_file: str = Field(default="", description=(
-        "Optional TTF/TTC/OTF file in workspace/data read roots. For installed fonts "
-        "prefer font_family; explicit system-directory paths are not granted."
+        "可选。workspace/data 读取根内的 TTF/TTC/OTF 文件。"
+        "已安装字体优先用 font_family；系统目录中的显式路径不在授权读取范围。"
     ))
-    title_font_size_pt: float = Field(default=18, ge=8, le=40)
-    body_font_size_pt: float = Field(default=9, ge=5, le=20)
-    legend_font_size_pt: float | None = Field(default=None, ge=5, le=20)
+    title_font_size_pt: float = Field(default=18, ge=8, le=40, description=(
+        "可选。地图标题字号（pt）。标题按预留标题带的实测宽度检查；"
+        "不要靠缩边距掩盖溢出。"
+    ))
+    body_font_size_pt: float = Field(default=9, ge=5, le=20, description=(
+        "可选。页脚/正文文字字号（pt），不控制名单表；名单字号用 QgisLabelTable font_size_pt。"
+    ))
+    legend_font_size_pt: float | None = Field(default=None, ge=5, le=20, description=(
+        "可选。图例字号（pt）；省略用渲染默认。图例实际尺寸会被测量，不能假定放得下。"
+    ))
     legend_auto_fit: bool = Field(default=True, description=(
-        "Jointly measure legend/table/footer and detail zoom, enlarging paper frames/page "
-        "as needed without cropping geographic subjects or removing entries/shrinking text. "
-        "False keeps legend/detail frame fitting fixed; use measured diagnostics."
+        "可选，默认 true。联合测量图例/名单/页脚/详图缩放，必要时扩纸张或页面，"
+        "但不裁切地理主体、不删除条目、不缩小文字。false 时保持固定图框拟合，需读取实测诊断。"
     ))
-    detail_height_ratio: float = Field(default=0.4, ge=0.1, le=0.8)
-    sidebar_width_mm: float = Field(default=60, ge=20, le=500)
-    gap_mm: float = Field(default=5, ge=1, le=30)
-    title_height_mm: float = Field(default=16, ge=8, le=60)
-    footer_height_mm: float = Field(default=18, ge=10, le=100)
+    detail_height_ratio: float = Field(default=0.4, ge=0.1, le=0.8, description=(
+        "可选。侧栏详图占可用地图高度比例（0.1..0.8）。"
+        "系统会实测图框，无法满足时报告约束而不是裁切。"
+    ))
+    sidebar_width_mm: float = Field(default=60, ge=20, le=500, description=(
+        "可选。详图在主图旁时的侧栏宽度（毫米）。"
+        "应保证主图与图例在实测比例下仍可读。"
+    ))
+    gap_mm: float = Field(default=5, ge=1, le=30, description=(
+        "可选。主图、侧栏、页脚等面板之间的间距（毫米）。"
+    ))
+    title_height_mm: float = Field(default=16, ge=8, le=60, description=(
+        "可选。顶部标题带高度（毫米）；标题文字按实际字体测量后必须放入该区域。"
+    ))
+    footer_height_mm: float = Field(default=18, ge=10, le=100, description=(
+        "可选。底部页脚高度（毫米）；页脚、来源和统计文字按实测矩形检查。"
+    ))
 
     @model_validator(mode="after")
     def validate_page(self) -> QgisProjectLayout:
@@ -471,34 +740,57 @@ class QgisProjectLayout(BaseModel):
 
 class QgisSpecPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    path: list[str | Annotated[int, Field(strict=True, ge=0)]] = Field(min_length=1)
-    operation: Literal["set", "remove"] = "set"
-    value: Any = None
-
+    path: list[str | Annotated[int, Field(strict=True, ge=0)]] = Field(min_length=1, description=(
+        'JSON路径数组，例如["layers",0,"style","color"]；列表仅可在下一个索引追加。'
+    ))
+    operation: Literal["set", "remove"] = Field(default="set", description=(
+        '默认set添加/替换值；remove删除对象字段，禁止删除列表索引导致身份偏移。'
+    ))
+    value: Any = Field(default=None, description=(
+        'set使用且必须符合目标字段类型；remove忽略，默认null。'
+    ))
 
 class QgisStyleEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    operation: Literal["style"]
-    layer_key: str
-    style: QgisVectorStyle
-
+    operation: Literal["style"] = Field(description='必填固定style，表示修改样式。')
+    layer_key: str = Field(min_length=1, description=(
+        'spec/inspect返回的稳定图层键，不是显示标题。'
+    ))
+    style: QgisVectorStyle = Field(description=(
+        '该层替换样式对象；遵循编辑合并规则，颜色微调保留未指定的分类。'
+    ))
 
 class QgisLabelEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    operation: Literal["labels"]
-    layer_key: str
-    label_field: str
-    label_style: QgisLabelStyle | None = None
-
+    operation: Literal["labels"] = Field(description='必填固定labels，表示修改标注。')
+    layer_key: str = Field(min_length=1, description=(
+        'spec/inspect返回的准确图层键。'
+    ))
+    label_field: str = Field(min_length=1, description=(
+        '必填，现存字段或派生编号字段，至少1字符，不是位置参数。'
+    ))
+    label_style: QgisLabelStyle | None = Field(default=None, description=(
+        '可选标注样式，默认null保留现有值。'
+    ))
 
 class QgisFrameEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    operation: Literal["frame"]
-    frame: Literal["main", "detail"]
-    settings: QgisMapFrameSpec
-    extent: QgisExtent | None = None
-    minimum_zoom: float | None = Field(default=None, ge=1, le=20)
-    zoom_policy: Literal["hard", "advisory"] = "advisory"
+    operation: Literal["frame"] = Field(description='必填固定frame，表示修改图框。')
+    frame: Literal["main", "detail"] = Field(description=(
+        '必填，main主图或detail详图。'
+    ))
+    settings: QgisMapFrameSpec = Field(description=(
+        '必填图框对象；适配模式用focus_layers，显式extent与之互斥。'
+    ))
+    extent: QgisExtent | None = Field(default=None, description=(
+        '可选工程CRS范围，默认null，与settings.focus_layers互斥。'
+    ))
+    minimum_zoom: float | None = Field(default=None, ge=1, le=20, description=(
+        '可选实测的详图放大倍数阈值1..20，仅detail有效。'
+    ))
+    zoom_policy: Literal["hard", "advisory"] = Field(default="advisory", description=(
+        '默认advisory仅提示比例风险；hard未满足量测约束时拒绝，不裁去声明对象。'
+    ))
 
     @model_validator(mode="after")
     def validate_mode(self):
@@ -508,25 +800,45 @@ class QgisFrameEdit(BaseModel):
             raise ValueError("minimum_zoom applies to detail only")
         return self
 
-
 class QgisLayerEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    operation: Literal["layer"]
-    layer: QgisProjectLayer
-
+    operation: Literal["layer"] = Field(description='必填固定layer，表示新增或替换图层。')
+    layer: QgisProjectLayer = Field(description=(
+        '完整图层对象；替换派生文件保留layer_key，避免后续编辑失去关联。'
+    ))
 
 class QgisRosterEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    operation: Literal["roster"]
-    table: QgisLabelTable | None = None
-
+    operation: Literal["roster"] = Field(description='必填固定roster，表示修改名单页。')
+    table: QgisLabelTable | None = Field(default=None, description=(
+        '名单定义，null移除；须使用真实字段和非空唯一键，不能静默截断。'
+    ))
 
 MapEdit = Annotated[QgisStyleEdit | QgisLabelEdit | QgisFrameEdit | QgisLayerEdit | QgisRosterEdit,
                     Field(discriminator="operation")]
 
 
 class GeoQgisProjectInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Authoritative native QGIS project contract.
+
+    Typical flow: help (optional) -> spec -> build(spec_ref, edits) -> optional
+    inspect/preflight -> geo_map_review -> geo_deliver. A successful build creates
+    the editable .qgz/.qgs project and its PNG/PDF preview in one native job.
+    """
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"action": "spec", "layers": [{
+            "file_path": "ACTUAL_VECTOR_PATH", "name": "居民点",
+            "style": {"renderer": "categorized", "field": "actual_class",
+                      "categories": [{"value": "high", "label": "高风险", "color": "#d73027"}]},
+            "label_field": "actual_id"}],
+         "crs": "EPSG:4547", "title": "实际标题",
+         "layout": {"width_mm": 297, "height_mm": 210}},
+        {"action": "build", "spec_ref": "returned-qgis-spec-ref",
+         "edits": [{"operation": "roster", "table": {
+             "layer_index": "resident-layer-key", "fields": ["actual_id", "distance_m"],
+             "key_field": "actual_id", "placement": "pages"}}]},
+    ]})
     _edit_normalizations: list[str] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="wrap")
@@ -539,63 +851,129 @@ class GeoQgisProjectInput(BaseModel):
         result._edit_normalizations = notes
         return result
 
-    action: Literal["build", "create", "inspect", "export", "preflight", "spec", "help", "recover"]
+    action: Literal[
+        "build", "create", "inspect", "export", "preflight", "spec", "help", "recover"
+    ] = Field(
+        description=(
+            "必填。build = 在一个原生作业中应用 spec_ref+edits、验证、渲染并打包，"
+            "是正常出图的首选；spec = 保存/修改草案并返回 spec_ref；preflight = 只验证；"
+            "create = 仅兼容旧冻结流程，只接受 action+plan_ref；"
+            "inspect = 只读查看返回的 spec/plan/工程/地图台账；"
+            "export = 从已有 .qgs/.qgz 重新打包，不改原工程；"
+            "help = 读取某一字段组的真实 schema；recover = 检查已登记 map_id 的台账。"
+            "不要在本工具中使用 geo_qgis Processing 的 INPUT/OUTPUT 参数。"
+        ))
     section: Literal["workflow", "layer", "roster", "style", "labels", "frame", "layout",
-                     "edits"] = "workflow"
-    detail_path: list[str | int] = Field(default_factory=list, max_length=16,
-        description="Read-only JSON path within verified spec/plan or help. Never a file path.")
-    offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=8, ge=1, le=32)
-    history_offset: int | None = Field(default=None, ge=0,
-        description="Ledger inspect window anchor from a returned read_call; preserve unchanged.")
-    history_limit: int | None = Field(default=None, ge=1, le=32,
-        description="Ledger inspect window size from a returned read_call; preserve unchanged.")
-    edits: list[MapEdit] = Field(default_factory=list, max_length=32,
-        description="Typed incremental spec operations. Use with action=build/spec + spec_ref; "
-                    "target returned layer_key, never reconstruct paths or rewrite all layers.")
+                     "edits"] = Field(default="workflow", description=(
+        "仅 action=help 时有效。选择要读取的契约组：workflow 总流程、layer 图层、"
+        "style 符号、labels 标注、frame 图框、layout 页面、roster 名单表、edits 增量编辑。"
+        "不填时返回 workflow；其他 action 忽略该字段。"
+    ))
+    detail_path: list[str | int] = Field(default_factory=list, max_length=16, description=(
+        "仅 help/inspect 的只读查看选择器。指向返回契约或已验证 spec/plan 内的 JSON 路径，"
+        "例如 ['schema','properties','focus_layers']；不是文件系统路径。"
+        "不要把它传给 spec/build/create/preflight/export。"
+    ))
+    offset: int = Field(default=0, ge=0, description=(
+        "仅 help/inspect 的只读分页起点（字符偏移）。用于查看长诊断或大 schema；"
+        "不要把它传到会修改/渲染的动作。"
+    ))
+    limit: int = Field(default=8, ge=1, le=32, description=(
+        "仅 help/inspect 的单窗展示上限（条目/字符），不是图层数量、渲染上限或质量阈值。"
+    ))
+    history_offset: int | None = Field(default=None, ge=0, description=(
+        "仅台账 inspect(map_id=...) 的分页锚点；必须原样使用返回 read_call 里的值。"
+    ))
+    history_limit: int | None = Field(default=None, ge=1, le=32, description=(
+        "仅台账 inspect(map_id=...) 的分页窗口；必须原样使用返回 read_call 里的值。"
+    ))
+    edits: list[MapEdit] = Field(default_factory=list, max_length=32, description=(
+        "可选。配合 action=spec/build 和已有 spec_ref 的类型化增量操作；"
+        "operation 只能是 style/labels/frame/layer/roster，目标用实际返回的 layer_key。"
+        "局部样式、标注、图框、名单问题只提交对应 edit，不要重写整个图层数组。"
+        "示例：{operation:'style',layer_key:'actual-key',style:{...}}。"
+    ))
     spec_ref: str = Field(default="", description=(
-        "Returned immutable qgis-spec reference. action=spec saves/edits a draft; "
-        "action=build applies edits, validates and exports in one native job. "
-        "action=preflight checks it. Use only action+spec_ref+optional edits/patches."
+        "已有不可变 qgis-spec 引用，必须原样使用工具返回的 qgis-spec:...。"
+        "action=spec 保存/编辑草案；action=build 应用 edits 并一次验证/导出；"
+        "action=preflight 只检查；action=inspect 只读取。"
+        "使用 spec_ref 时不要重复发送 layers/title/crs/layout 等已冻结字段。"
     ))
     patches: list[QgisSpecPatch] = Field(default_factory=list, max_length=64, description=(
-        "Small draft edits: [{path:[layers,0,style,color],value:#ff0000}] or "
-        "{path:[layout,detail_extent],operation:remove}. Use JSON strings for keys/colors. "
-        "Preflight the edited spec, then create with only returned action+plan_ref."
+        "高级低层草案补丁，仅在类型化 edits 不支持目标字段时使用。"
+        "path 是实际 schema 键/下标的数组，例如 "
+        "[{path:['layout','width_mm'],value:420}]；删除用 operation='remove'。"
+        "列表追加必须使用准确的下一索引；不要使用 paper_size/page_width_mm 等臆造键。"
     ))
     plan_ref: str = Field(default="", description=(
-        "Returned preflight plan_ref. create accepts only action+plan_ref; it carries checked "
-        "map_id/title/output_format already. Do not repeat those fields; sources are revalidated."
+        "旧版冻结创建返回的 plan_ref；只有 action=create 接受，且只传 action+plan_ref。"
+        "map_id/title/output_format 等已包含在检查过的 plan 中，不能重复覆盖。"
     ))
     layers: list[QgisProjectLayer] = Field(
         default_factory=list,
         max_length=64,
-        description="Create sources in drawing order, bottom first and top last.",
+        description=(
+            "新建工程/草案的图层，按从下到上绘制顺序排列（背景在前、标注/编号在后）。"
+            "spec/build/create/preflight 至少需要一个真实本地文件。"
+            "file_path 必须是已检查到的实际路径；role='table_only' 的图层只用于名单，不参与绘制。"
+            "每个 layer_key 是后续 edits 的稳定目标，不要用显示名称代替。"
+        ),
     )
-    project_path: str = Field(
-        default="", description="Existing local .qgs/.qgz for inspect/export."
-    )
-    title: str = ""
-    crs: str = Field(default="", description="Explicit project CRS, e.g. EPSG:3857.")
-    map_extent: list[float] | QgisExtent | None = Field(default=None, description=(
-        "EXPLICIT main extent [xmin,ymin,xmax,ymax] in project crs. Mutually exclusive "
-        "with layout.main_frame.focus_layers (FIT mode). QGIS preserves full coverage."
+    project_path: str = Field(default="", description=(
+        "已有本地 .qgs/.qgz 文件，仅 inspect/export 使用。"
+        "inspect/export 会保留其图层、CRS、布局；不要同时传新的 layers/crs/layout。"
+        "export 产生新的便携快照，不会原地覆盖用户工程。"
     ))
-    layout: QgisProjectLayout | None = None
-    layout_name: str = Field(
-        default="", description="Saved layout to export; required if ambiguous."
-    )
-    output_format: Literal["png", "pdf"] = "png"
-    output_path: str = Field(default="", description="Relative filename in the new run directory.")
-    project_format: Literal["qgz", "qgs"] = "qgz"
-    dpi: int = Field(default=150, ge=36, le=600)
-    map_id: str = Field(default="", description="Stable logical map ID across versions and tools.")
+    title: str = Field(default="", description=(
+        "地图上实际可见的标题文字，不是 layout.name、图层名或文件名；会按预留标题带测量。"
+    ))
+    crs: str = Field(default="", description=(
+        "工程/显示 CRS authority 字符串，如 EPSG:4547。"
+        "显式 map_extent 或 detail_extent 时必须提供。"
+        "距离/面积/纸面几何优先使用米制投影 CRS；不要把显示 CRS 当作计算 CRS 的证明。"
+    ))
+    map_extent: list[float] | QgisExtent | None = Field(default=None, description=(
+        "可选，主图显式范围 [xmin,ymin,xmax,ymax]，单位是 crs。"
+        "与 layout.main_frame.focus_layers（FIT 模式）互斥，不能同时使用。"
+        "范围必须有限、面积为正；QGIS 会保留声明的完整覆盖。"
+    ))
+    layout: QgisProjectLayout | None = Field(default=None, description=(
+        "打印布局契约：纸张、图框职责、图例、名单、页脚等。简单图可省略。"
+        "width_mm/height_mm 是毫米纸面尺寸；实际图例/文字/表格会被测量而不是假定放得下。"
+        "detail_extent 与 detail_frame.focus_layers 二选一。"
+    ))
+    layout_name: str = Field(default="", description=(
+        "仅 inspect/export 用于选择已保存的打印布局名称；工程只有一个布局时可省略。"
+        "spec/build/create 不使用该字段。"
+    ))
+    output_format: Literal["png", "pdf"] = Field(default="png", description=(
+        "与工程一起导出的预览格式：png 用于像素审查，pdf 用于打印/矢量核对；"
+        "两种情况都会产生可编辑工程。"
+    ))
+    output_path: str = Field(default="", description=(
+        "可选。仅相对文件名，位于本次原生 RUN_DIR 内；省略由工具生成。"
+        "绝不能传绝对路径或 RUN_DIR 之外的路径。"
+    ))
+    project_format: Literal["qgz", "qgs"] = Field(default="qgz", description=(
+        "可编辑工程格式：qgz 为便携压缩工程，qgs 为未压缩工程；都是真实 QGIS 工程，"
+        "不是把 PNG 改名。交付默认需要该工程。"
+    ))
+    dpi: int = Field(default=150, ge=36, le=600, description=(
+        "栅格预览 DPI。改变 DPI 会改变像素尺寸，不改变布局的毫米几何；"
+        "判断是否放得下应使用返回的布局测量，而不是只看像素。"
+    ))
+    map_id: str = Field(default="", description=(
+        "逻辑地图的稳定 ID，用于跨版本、跨工具复用同一张图；修复同一张图时保持它不变。"
+        "返回的 operation_id 是证据身份，不是 map_id。"
+    ))
     analysis_manifests: list[str] = Field(
         default_factory=list, max_length=8,
-        description="Only manifests whose original outputs (or verified layer.derivation) "
-                    "are actually mapped. Omit to infer from mapped native paths; do not attach "
-                    "unrelated statistics or Python-rewritten copies.",
+        description=(
+            "可选。只绑定其原始输出/已验证 layer.derivation 真的被绘制到当前工程的分析 manifest；"
+            "省略时从实际绘制路径推断。不要附上无关统计或 Python 重写副本。"
+        ),
     )
+
 
     @model_validator(mode="before")
     @classmethod
@@ -772,6 +1150,42 @@ class GeoQgisProjectTool(BaseTool):
         "审查前输出保持 draft；最终交付使用 geo_deliver。"
     )
     input_model = GeoQgisProjectInput
+
+    def to_api_schema(self):
+        """Progressive discovery: exact full nested contracts remain in help."""
+        from copy import deepcopy
+
+        schema = super().to_api_schema()
+        wire = deepcopy(schema['input_schema'])
+        properties = wire['properties']
+        for name, section in (('layers', 'layer'), ('layout', 'layout'),
+                              ('edits', 'edits'), ('patches', 'edits')):
+            original = properties[name]
+            description = original['description'] + (
+                f' 完整嵌套字段、类型、默认和示例使用help(section={section})按需读取；'
+                '实际执行仍按完整严格Schema校验。')
+            if name == 'layout':
+                properties[name] = {'description': description, 'default': None,
+                    'anyOf': [{'type': 'object', 'additionalProperties': True}, {'type': 'null'}]}
+            else:
+                properties[name] = {'type': 'array', 'description': description,
+                    'items': {'type': 'object', 'additionalProperties': True},
+                    **{key: original[key] for key in ('maxItems', 'default') if key in original}}
+        # Inline the few remaining small definitions (e.g. named extents), then
+        # discard the large unused style/layout tree from every model request.
+        definitions = wire.pop('$defs', {})
+
+        def inline(value):
+            if isinstance(value, dict):
+                if '$ref' in value:
+                    name = value['$ref'].rsplit('/', 1)[-1]
+                    return {**inline(definitions[name]),
+                            **{k: inline(v) for k, v in value.items() if k != '$ref'}}
+                return {k: inline(v) for k, v in value.items()}
+            return [inline(item) for item in value] if isinstance(value, list) else value
+
+        schema['input_schema'] = inline(wire)
+        return schema
 
     @guard_map_errors
     @guard_map_mutations

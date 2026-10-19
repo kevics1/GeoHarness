@@ -10,11 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class ScoreComponent(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-    field: str = Field(min_length=1, max_length=128)
-    weight: float = Field(gt=0, le=1)
-    minimum: float
-    maximum: float
-    direction: Literal['higher', 'lower']
+    field: str = Field(min_length=1, max_length=128, description='实际存在的数值指标字段名。')
+    weight: float = Field(gt=0, le=1, description='正权重比例，所有指标权重之和必须为1。')
+    minimum: float = Field(description='归一化下限，与该指标原始字段单位一致；必须小于maximum。')
+    maximum: float = Field(description='归一化上限，与原始字段单位一致；不能从外观猜测范围。')
+    direction: Literal['higher', 'lower'] = Field(
+        description='higher为原值越大得分越高；lower为原值越小得分越高。')
 
     @model_validator(mode='after')
     def valid_range(self):
@@ -25,9 +26,9 @@ class ScoreComponent(BaseModel):
 
 class ScoreBand(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-    minimum: float = Field(ge=0, le=1)
-    maximum: float = Field(ge=0, le=1)
-    label: str = Field(min_length=1, max_length=80)
+    minimum: float = Field(ge=0, le=1, description='归一化分级下界，含该值。')
+    maximum: float = Field(ge=0, le=1, description='归一化分级上界，通常不含；最后一档包含1。')
+    label: str = Field(min_length=1, max_length=80, description='经用户确认的该档中文名称。')
 
     @model_validator(mode='after')
     def valid_range(self):
@@ -38,10 +39,13 @@ class ScoreBand(BaseModel):
 
 class ScorePolicy(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    purpose: str = Field(min_length=1, max_length=1000)
-    components: list[ScoreComponent] = Field(min_length=1, max_length=32)
-    missing_policy: Literal['error', 'unknown', 'renormalize'] = 'unknown'
-    classification: list[ScoreBand] | None = Field(default=None, max_length=8)
+    purpose: str = Field(min_length=1, max_length=1000, description='评分用途及拟支持的判断。')
+    components: list[ScoreComponent] = Field(min_length=1, max_length=32,
+        description='各指标字段、权重、归一化范围和方向；字段不得重复，权重合计1。')
+    missing_policy: Literal['error', 'unknown', 'renormalize'] = Field(default='unknown',
+        description='error遇缺失失败；unknown保留未知分数；renormalize按可用指标重分权重，须用户确认。')
+    classification: list[ScoreBand] | None = Field(default=None, max_length=8,
+        description='可选0..1分数分级，连续无重叠覆盖全范围；省略只生成连续分数。')
 
     @model_validator(mode='after')
     def valid_components(self):

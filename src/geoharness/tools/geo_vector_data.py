@@ -39,9 +39,7 @@ class GeoVectorDataInput(BaseModel):
     action: Literal["list", "inspect", "load"] = Field(
         default="list",
         description=(
-            "list: list local vector files; "
-            "inspect: show geometry type/CRS/bbox/columns; "
-            "load: read features and report count/columns"
+            '默认list列出本地矢量；inspect检查几何/CRS/范围/字段；load加载并返回计数。'
         ),
     )
     name: str = Field(
@@ -53,7 +51,7 @@ class GeoVectorDataInput(BaseModel):
     )
     file_path: str = Field(
         default="",
-        description="Explicit path to a vector file; overrides 'name'.",
+        description='可选准确文件路径；默认空按name定位，不猜目录和名称。',
     )
 
     def target(self) -> str:
@@ -65,10 +63,11 @@ class GeoVectorDataTool(BaseTool):
 
     name: str = "geo_vector_data"
     description: str = (
-        "Load local vector data (Shapefile/GeoJSON/GPKG/CSV). "
-        "Actions: list (vector files), inspect (CRS/bbox/columns), "
-        "load (read features). Use this for local vector files, e.g. "
-        "shapefiles in a workspace folder."
+        (
+        'geo_vector_data：发现并读取本地矢量文件Shapefile/GeoJSON/GPKG/CS'
+        'V。list列文件，inspect返回实测CRS/范围/字段/几何，lo'
+        'ad加载并登记引用；不访问数据库或网络。'
+    )
     )
     input_model: type[BaseModel] = GeoVectorDataInput
 

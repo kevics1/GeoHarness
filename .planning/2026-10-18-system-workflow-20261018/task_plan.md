@@ -24,3 +24,13 @@
 实施C（partially_implemented）：稳定图片契约和持久缓存、页面增量及保守几何检查已验证；完整confirmed/dismissed/fix_verified处置状态机和精确文字/任意符号检测未实现，不能记complete。
 实施D（engineering_checked / business_acceptance_pending）：交付复算、中文文档、原生QGIS与安装核对推进完成；独立审查无有效报告，真实模型对话质量/性能未验收。
 所有complete仅按实际证据记录；保留主模型high、不修改用户密钥，不采用20分钟强制截停。
+
+2026-10-19 最新西昌测试整改（用户已授权实施，字段说明属于交付要求）：
+E1 engineering_checked：修复证据目标身份覆盖；稳定引用、结构化结果和错误，回放翻页失败。
+E2 engineering_checked：控制器增量计划/自动单步登记/成功回执含业务结果，减少plan-run-evidence往返。
+E3 engineering_checked：Python/QGIS字段中文语义、默认/格式/适用backend、完整示例及精确恢复提示。
+E4 engineering_checked：QGIS可编辑工程交付要求，真实图层/布局/相对路径；草稿也不静默漏工程。
+E5 partially_implemented：复用已有分析/页面依赖机制；本轮补齐持久问题处置和交付未解决问题传播。精确全部文字/符号检查、真实业务关联准确率与收敛仍待验收。
+E6 engineering_checked / business_acceptance_pending：1637项完整回归1636通过，1项续跑问题修复后20项相关复验通过；最终wheel43项、实际安装42项、真实原生工程整链/迁移、126模块+34技能文件一致性及CLI17工具通过。独立审查无有效报告，真实业务质量/效率仍待验收。
+
+收尾新增回归发现执行证据ID被自动续跑误判为进展，离线复现相同结果100次调用；忽略仅回执身份变化后20项相关回归通过，真实业务耗时不据此推断达标。

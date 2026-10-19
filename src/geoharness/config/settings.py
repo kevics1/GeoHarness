@@ -115,15 +115,19 @@ class MapLayout(BaseModel):
     """Presentation parameters that a map reviewer may safely adjust."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    width: float = Field(default=10, ge=4, le=24)
-    height: float = Field(default=8, ge=4, le=24)
-    dpi: int = Field(default=150, ge=72, le=300)
-    legend_outside: bool = False
-    title_font_size: float = Field(default=14, ge=8, le=32)
-    legend_font_size: float = Field(default=9, ge=6, le=20)
-    point_size: float = Field(default=18, ge=2, le=150)
-    line_width: float = Field(default=1.8, ge=0.2, le=8)
-    polygon_alpha: float = Field(default=0.75, ge=0.1, le=1)
+    width: float = Field(default=10, ge=4, le=24,
+        description='Matplotlib纸面宽度，单位英寸；不是地图坐标范围，QGIS布局用width_mm。')
+    height: float = Field(default=8, ge=4, le=24,
+        description='Matplotlib纸面高度，单位英寸；不能用于米制地图extent。')
+    dpi: int = Field(default=150, ge=72, le=300, description='输出分辨率，单位像素/英寸。')
+    legend_outside: bool = Field(default=False, description='图例是否放在主图框外。')
+    title_font_size: float = Field(default=14, ge=8, le=32, description='标题字号，单位pt。')
+    legend_font_size: float = Field(default=9, ge=6, le=20, description='图例字号，单位pt。')
+    point_size: float = Field(default=18, ge=2, le=150,
+        description='Matplotlib散点符号面积，单位pt平方；不是QGIS的毫米直径。')
+    line_width: float = Field(default=1.8, ge=0.2, le=8, description='线宽，单位pt。')
+    polygon_alpha: float = Field(default=0.75, ge=0.1, le=1,
+        description='面填充不透明度，0全透明、1不透明；仅改变显示。')
 
 
 class MapReviewConfig(BaseModel):

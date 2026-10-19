@@ -20,13 +20,22 @@ from geoharness.execution.contracts import artifact_facts, write_analysis_report
 
 class FactRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    key: str = Field(min_length=1, max_length=256)
-    numeric_fields: list[str] = Field(default_factory=list, max_length=64)
-    group_by: list[str] = Field(default_factory=list, max_length=16)
-    predicates: list[dict] = Field(default_factory=list, max_length=64)
-    scope_name: str = Field(default='当前完整结果集', min_length=1, max_length=256)
-    units: dict[str, str] = Field(default_factory=dict, max_length=64)
-    method: dict = Field(min_length=1)
+    key: str = Field(min_length=1, max_length=256,
+        description='源文件内实际存在、唯一且非空的实体ID字段；系统用其冻结成员集合。')
+    numeric_fields: list[str] = Field(default_factory=list, max_length=64,
+        description='需要复算统计的实际数值字段；缺失单独计数，类别代码不应当作连续数值求均值。')
+    group_by: list[str] = Field(default_factory=list, max_length=16,
+        description='分别计算各类别数量的字段名；不改变源文件和当前结果选集。')
+    predicates: list[dict] = Field(default_factory=list, max_length=64,
+        description='条件计数列表：每项严格为{name,field,op,value}；op为<、<=、>、>=、==、!=。'
+        '例如{name:"near",field:"distance_m",op:"<=",value:500}，不等同于空间包含。')
+    scope_name: str = Field(default='当前完整结果集', min_length=1, max_length=256,
+        description='明确命名当前文件的完整成员范围，例如“全体234处”或“重点13处”；分母不跨选集混用。')
+    units: dict[str, str] = Field(default_factory=dict, max_length=64,
+        description='numeric_fields内字段到单位的映射，例如{distance_m:"m",population:"人"}。')
+    method: dict = Field(min_length=1,
+        description='实际方法/参数/规则/缺失政策；距离面积方法注明metric_crs。方法是声明，'
+        '不因统计核对通过而获得科学认证；未知业务阈值须明确假设或询问用户。')
 
 
 def _members(source, key):

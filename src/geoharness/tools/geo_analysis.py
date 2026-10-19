@@ -20,15 +20,19 @@ class SpatialSource(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    source_type: Literal["", "file", "postgis"] = ""
-    file_path: str = ""
-    source_name: str = ""
-    geojson: str | dict[str, Any] = ""
-    crs: str = Field(default="", description="Declare unknown CRS, or inline coordinate CRS.")
+    source_type: Literal["", "file", "postgis"] = Field(default='',
+        description='数据来源：file本地文件、postgis数据库表；空值按唯一填写的定位字段识别。')
+    file_path: str = Field(default='',
+        description='本地文件的实际返回路径或data:引用；与source_name/geojson三选一。')
+    source_name: str = Field(default='',
+        description='已发现的数据集名称或PostGIS表名；与file_path/geojson三选一，不猜名称。')
+    geojson: str | dict[str, Any] = Field(default='',
+        description='完整GeoJSON对象或一次JSON编码字符串；与其他定位字段三选一，注明真实坐标CRS。')
+    crs: str = Field(default="",
+        description='未知来源CRS或内联坐标的明确声明，默认空；不改变已有坐标。')
     filters: dict[str, str | int | float | bool | None] = Field(
         default_factory=dict, max_length=16, description=(
-            "Exact existing attribute selections, e.g. a forecast time. No SQL/expressions. "
-            "An unmatched selection stays empty; it never falls back to all scenarios."
+            '默认空；字段名到准确值的等值筛选对象，不是SQL。未匹配保持空选集。'
         ),
     )
 
@@ -60,19 +64,22 @@ class GeoAnalysisInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["buffer", "clip", "intersection", "distance", "count", "impact", "area"]
+    action: Literal[
+        "buffer", "clip", "intersection", "distance", "count", "impact", "area"
+    ] = Field(
+        description='buffer缓冲、clip裁剪、intersection相交、distance最近距离、count空间计数、'
+        'impact影响筛选、area面积统计；标准复杂分析优先geo_qgis已安装算法。')
     source: SpatialSource = Field(
-        description='Object describing assets/features, e.g. {"file_path": "returned path"}; '
-                    "prefer an object over JSON text. Original data is read-only."
+        description='必填，资产/要素的数据来源对象；原始数据只读，建议直接传对象。'
     )
     reference: SpatialSource | None = Field(
-        default=None, description="Hazards or overlay/mask layer."
+        default=None, description='叠加/掩膜/危险区域的来源对象；默认null，按action要求提供。'
     )
-    zones: SpatialSource | None = Field(default=None, description="Optional counting zones.")
-    distance_m: float = Field(default=0, ge=0, allow_inf_nan=False)
+    zones: SpatialSource | None = Field(default=None, description='计数分区的来源对象，默认null。')
+    distance_m: float = Field(default=0, ge=0, allow_inf_nan=False,
+        description='缓冲或影响距离，单位米；0表示不增加外部缓冲，正距离不能被解释为包含。')
     distance_breaks_m: list[float] = Field(default_factory=list, max_length=32, description=(
-        "distance/impact only: positive ascending thresholds for native distance_class. "
-        "Containment/intersection are separate from external distance bands."
+        '默认空；distance/impact的正数严格升序距离阈值，单位米，不代替包含判定。'
     ))
 
     @field_validator("distance_breaks_m")
@@ -86,10 +93,10 @@ class GeoAnalysisInput(BaseModel):
             raise ValueError("distance_breaks_m must be positive, finite and strictly ascending")
         return values
     group_field: str = Field(default="", max_length=128, description=(
-        "area only: optional existing attribute, e.g. a time field. Reports each group's "
-        "union and sum separately; cumulative/overlapping time ranges are not additive coverage."
+        '默认空；仅area使用的真实分组字段，例如时次；重叠时次面积不可直接相加。'
     ))
-    output_name: str = Field(default="", description="Plain stem for a new output directory.")
+    output_name: str = Field(default="",
+        description='新输出目录的文件名主体，默认空自动生成，不传目录路径。')
 
     @model_validator(mode="after")
     def validate_operation(self) -> GeoAnalysisInput:
@@ -117,21 +124,22 @@ class GeoAnalysisInput(BaseModel):
 class GeoAnalysisTool(BaseTool):
     name: str = "geo_analysis"
     description: str = (
-        "Native vector GIS: buffer, clip, intersection, nearest distance, zone counts, "
-        "and impact (asset distance to hazards, affected flag, optional zone totals). "
-        "Accept file/PostGIS/inline GeoJSON sources. Metric analysis reprojects input CRS "
-        "to configured metre CRS or local UTM. Writes GeoJSON/CSV plus provenance manifest "
-        "and layer specs for geo_cartography; does not alter original data. "
-        "Zone counts use intersects including boundaries and count each asset in every "
-        "matching zone. impact distance_m=0 means exact intersection. "
-        "area measures polygon area_m2, union coverage, feature-area sum and overlap in a "
-        "metre CRS; group_field optionally groups time/category ranges. Overlapping ranges "
-        "must not be summed as total coverage. Use its result layer and analysis_manifests "
-        "for automatically verified map notes rather than handwritten area totals. "
-        "source/reference.filters selects exact time/scenario attributes before analysis. "
-        "distance/impact return reference_relation (covered_by/intersects/outside); "
-        "distance_breaks_m adds distance_class with external bands. Never label a positive "
-        "distance threshold as inside; use these fields and their reference_scope."
+        (
+        '原生矢量分析兼容入口：缓冲、裁剪、相交、最近距离、分区计数、影响与面积；'
+        '标准复杂分析优先geo_qgis。读取真实来源，原数据只读，返回新结果/'
+        '清单/字段与统计；距离以米计。source/reference.filt'
+        'ers明确选择时次场景；distance/impact返回referen'
+        'ce_relation区分covered_by/intersects/o'
+        'utside，distance_breaks_m生成外部distance'
+        '_class。正距离阈值不等于落在危险区内，按reference_sco'
+        'pe解释结果。'
+    )
+    )
+    description += (
+        '支持file/PostGIS/内联GeoJSON；按配置米制CRS或本地UTM重投影，输出GeoJSON/CSV和来源清单。'
+        'count按intersects含边界计数，一对象可计入多个匹配区；impact距离0为精确相交。'
+        'area区分area_m2、合并覆盖、要素面积和与重叠；重叠分组不可相加冒充总覆盖。'
+        '使用结果图层和analysis_manifests绑定图注，不能手写面积统计代替验证。'
     )
     input_model: type[BaseModel] = GeoAnalysisInput
 
