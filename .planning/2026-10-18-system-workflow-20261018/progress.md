@@ -81,3 +81,5 @@
 2026-10-20 M轮已安装：源码扩大快照142通过、1测试构造错误修复后31项复验；实际安装143通过（78.80s），普通回合/批末停止2项通过（9.47s，重叠不相加）；Ruff、17工具dry-run及136模块+34资源一致性通过。真实失败响应只离线重放，不新发视觉，不改业务数据/历史报告/用户配置/.env.example既有修改。真实主模型完整业务效率与质量待新会话验收。
 
 O轮 urgent_runtime_checked / user_business_test_pending（2026-10-20）：用户要求最快修改、可只检查运行。已安装工程浮点尾差/细化差异、日期分类统一、失败候选引用返回、Python标量标准化与超长结果自动文件化、授权字面路径与已登记动态助手绑定、当前提示词契约纠正。原失败行政区只读比较、QGIS日期API、真实隔离Python文件化、绑定与安装后失败引用运行检查通过；Ruff/compileall/dry-run17工具通过，136模块+34资源一致、配置不变。未跑完整pytest/真实视觉/业务交付；完整实际测试由用户执行。报告diagnostics/2026-10-20-urgent-runtime-hotfix.md。
+
+P轮 urgent_registration_checked（2026-10-20）：用户报告retained_previous_evidence触发OperationOutcome异常终止。已修observe_operation证据状态到登记提交状态映射，兼容reused/unregistered并保守处理未知值；未升级视觉结论。定向9项通过，更新安装/CLI一致性，不跑完整业务。

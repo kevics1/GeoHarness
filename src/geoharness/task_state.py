@@ -70,6 +70,15 @@ def observe_operation(metadata, *, tool, action, result):
     details = result.metadata
     execution = details.get('execution_status') or ('failed' if result.is_error else 'completed')
     registration = details.get('registration_status', 'not_applicable')
+    # Producer evidence states are richer than the task's commit outcome.
+    # Retaining old evidence is not a fresh commit; verified reuse refers to
+    # an already committed observation. Never let telemetry abort the query.
+    registration = ({'reused': 'committed',
+                     'retained_previous_evidence': 'not_applicable',
+                     'unregistered': 'not_applicable'}.get(registration, registration)
+                    if isinstance(registration, str) else 'failed')
+    if registration not in {'committed', 'failed', 'not_applicable'}:
+        registration = 'failed'
     assessment = details.get('review_status', 'not_applicable') if tool == 'geo_map_review' else (
         'unverified' if tool == 'geo_deliver' else 'not_applicable')
     owner = {'geo_python': 'python', 'geo_task': 'python', 'geo_map_review': 'review',

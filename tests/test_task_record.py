@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from openharness.api.usage import UsageSnapshot
 from openharness.engine.messages import ConversationMessage
 from openharness.tools.base import ToolResult
@@ -7,6 +8,24 @@ from openharness.tools.base import ToolResult
 from geoharness.config.settings import GeoConfig
 from geoharness.session_state import GeoSessionBackend, restore_geo_session_state
 from geoharness.task_state import begin_task, observe_operation, task_snapshot
+
+
+@pytest.mark.parametrize('producer,expected', [
+    ('retained_previous_evidence', 'not_applicable'),
+    ('reused', 'committed'), ('unregistered', 'not_applicable'),
+    ('committed', 'committed'), ('failed', 'failed'),
+    ('unexpected_new_state', 'failed'), (None, 'failed'),
+])
+def test_review_registration_states_do_not_abort_observation(tmp_path, producer, expected):
+    metadata = {}
+    begin_task(metadata, cwd=tmp_path, goal='审图继续')
+    observe_operation(metadata, tool='geo_map_review', action=None, result=ToolResult(
+        output='原审图结果保留', metadata={'registration_status': producer,
+            'review_status': 'unverified'}))
+    state = task_snapshot(metadata, cwd=tmp_path)['operations']['geo_map_review:execute']
+    assert state['registration'] == expected
+    assert state['assessment'] == 'unverified'
+    assert state['execution'] == 'completed'
 
 
 def test_task_outcome_separates_execution_assessment_and_registration_and_restores(

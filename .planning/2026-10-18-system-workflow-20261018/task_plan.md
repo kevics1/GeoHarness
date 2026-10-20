@@ -70,3 +70,5 @@ L轮 engineering_checked / model_retest_pending（2026-10-20用户要求两个�
 M轮 engineering_checked / model_retest_pending（2026-10-20用户要求最新问题写提示词及修复无内容问答）：改5保存片段27调用5错；封顶由待回答问题改为独立停止状态，保留额度/草稿，旧会话迁移与显式原任务整理，人工提高配置后有额度才恢复。兼容误放issues.basis为severity_reason，真实保留passed/info响应离线复放成功；不改原任务通过状态。实际安装143项及两种停止路径2项通过（重叠不合计），136模块+34资源一致、CLI17工具通过、配置SHA保持。报告diagnostics/2026-10-20-review-stop-and-schema-repair.md。
 
 O轮 urgent_runtime_checked / user_business_test_pending（2026-10-20）：用户要求最快修改、可只检查运行。已安装工程浮点尾差/细化差异、日期分类统一、失败候选引用返回、Python标量标准化与超长结果自动文件化、授权字面路径与已登记动态助手绑定、当前提示词契约纠正。原失败行政区只读比较、QGIS日期API、真实隔离Python文件化、绑定与安装后失败引用运行检查通过；Ruff/compileall/dry-run17工具通过，136模块+34资源一致、配置不变。未跑完整pytest/真实视觉/业务交付；完整实际测试由用户执行。报告diagnostics/2026-10-20-urgent-runtime-hotfix.md。
+
+P轮 urgent_registration_checked（2026-10-20）：用户报告retained_previous_evidence触发OperationOutcome异常终止。已修observe_operation证据状态到登记提交状态映射，兼容reused/unregistered并保守处理未知值；未升级视觉结论。定向9项通过，更新安装/CLI一致性，不跑完整业务。

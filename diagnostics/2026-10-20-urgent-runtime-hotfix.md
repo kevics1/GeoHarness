@@ -32,3 +32,7 @@
 
 未修改用户配置、high思考强度、审图模型或3/12上限。未重跑真实视觉服务、未变更旧任务
 视觉状态，也没有把历史失败报告改写为通过。完整业务链及错误率由用户本轮实测确认。
+
+## 登记状态紧急补丁 P
+
+用户报告OperationOutcome拒绝retained_previous_evidence使整轮异常。根因是performance在工具执行后记录观察时，将生产者的证据状态直接传给只接受committed/failed/not_applicable的任务模型。现于边界统一映射：reused→committed（已登记复用）、retained_previous_evidence/unregistered→not_applicable（没有本次提交）、未知状态→failed；不更改像素结论，unverified仍保留。9项task_record定向检查通过（8.37秒），不跑完整回归。已安装，dry-run通过；136模块+34资源源码/wheel/实际安装零差异，用户配置SHA不变。wheel SHA256为7bbf2f5b63af5125a62e5d0f1637f5b895db021261b8c976240d7289ad82ee98。
