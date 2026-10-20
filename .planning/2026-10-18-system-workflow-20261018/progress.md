@@ -63,3 +63,10 @@
 - 实际视觉合成单页1请求passed，将条带分布留白和轻微符号贴近作为info，不触发返修。预检先发现可选避难所标签未放置，未发送请求；合成总览不要求逐点标签，移除该可选要求并保留真实坐标后才完成实际检查。没有用该结果认证完整分析/业务对话速度。
 - 简单20点/3避难所/2重点，复杂120点/4避难所/4重点/人口缺3/DEM缺1；Shapely逐实体复核140条距离，已生成F:/Desktop/Project/GeoHarness/example/审图验收案例_20261020，完整提示词与独立答案齐全。生成栅格初次被宿主PostGIS旧PROJ_DATA影响，改用输入CRS的WKT创建，无修改用户环境。
 - 用户配置原来只有CR换行，保留其格式只插入max_review_requests_per_page=3和max_review_requests_per_task=12；before SHA0387e9eb3e05291ef236ae6c05189abba74317415f1aac93e9eadda64bf3d2ca，after SHA9ef6ec325f390d529524a0874ac6ab62856cd8a9982a30d0580490f06ca51c5a，其余解析键值严格相等，main high及视觉配置不变。独立审查代理未执行工具，返回泛化确认，不计有效审查；完整主模型业务耗时仍待验收。
+
+## K轮紧急交付修复
+
+- 带真实GeoHookExecutor复现三字段契约错误；内部编译误用公开geo_qgis_project身份，旧测试没有真实钩子。现改用所属geo_deliver真实契约，内部元信息不混入tool_input，钩子明确拒绝仍生效；内部失败分类不再指向用户project_dir参数。
+- 真实业务第一次恢复发现KeyError '#222222'：定位框自动图例未进palette。新计划收集页面颜色，旧冻结计划按显式HEX无损补本地RGBA，不改用户冻结文件。核对具体失败原生request/result的动作、计划路径/SHA、failed状态及无qgz后，保留原日志并恢复一次；非盲目清日志。
+- 定向11项通过45.29秒，最终实际安装3项通过26.09秒；源码/wheel/实际安装136模块+34资源零差异，wheel SHA606429de050cd2d7e1a70acd4443fb39faffd5a34005b45e455c6d9d83ff0296。配置SHA保持9ef6ec325f390d529524a0874ac6ab62856cd8a9982a30d0580490f06ca51c5a。
+- 真实森林火灾改3已有v2交付成功：exports/西昌市330森林火灾威胁评估-t99y1zs7/project/map.qgz；49文件、11页PDF，11张PNG SHA与既有已审源完全一致。工程实际重开验证passed。没有额外分析/图片请求，不重做人口/道路/预测方法验收；业务已知限制保留。

@@ -121,11 +121,37 @@ async def test_bad_entity_contract_reports_actual_fields(tmp_path, changes):
 
 @pytest.mark.parametrize('with_raster', [False, True])
 async def test_reviewed_native_scene_generates_editable_project_once(tmp_path, with_raster):
+    from dataclasses import replace
+
+    from openharness.hooks.executor import HookExecutionContext
+    from openharness.hooks.loader import HookRegistry
+    from openharness.hooks.types import AggregatedHookResult, HookResult
+
     from geoharness.cartography.jobs import map_job_receipt, record_map_review
+    from geoharness.hooks.executor import GeoHookExecutor
     from geoharness.qgis.discovery import discover_qgis
     from geoharness.tools.geo_deliver import GeoDeliverInput, GeoDeliverTool
 
     context, scene = setup(tmp_path, enabled=True)
+    from geoharness.cartography.scene import Page
+
+    scene.pages.insert(1, Page(id='detail', role='detail', layers=['places'],
+                              extent=[-200, -200, 1200, 1000]))
+    scene.pages[0].locator_pages = ['detail']
+    class DeliveryHooks(GeoHookExecutor):
+        deny = False
+
+        async def execute(self, event, payload):
+            assert payload['tool_name'] == 'geo_deliver'
+            assert payload['internal_operation'] == 'native_scene_export'
+            GeoDeliverInput.model_validate(payload['tool_input'])
+            if self.deny:
+                return AggregatedHookResult(results=[HookResult(hook_type='test_guard',
+                    success=False, blocked=True, reason='test_export_denied')])
+            return await super().execute(event, payload)
+
+    context = replace(context, hook_executor=DeliveryHooks(HookRegistry(),
+        HookExecutionContext(cwd=tmp_path, api_client=None, default_model='test')))
     scene.layers[0].symbol.color = 'none'
     if with_raster:
         import numpy as np
@@ -172,6 +198,13 @@ async def test_reviewed_native_scene_generates_editable_project_once(tmp_path, w
         assert reserve_review_request(context.metadata, config, page=0)[0]
     assert review_limit_status(context.metadata, config)['automatic_review_stopped']
     args = GeoDeliverInput(project_dir=str(root))
+    context.hook_executor.deny = True
+    denied = await GeoDeliverTool().execute(args, context)
+    assert denied.is_error and denied.metadata['code'] == 'project_build_failed'
+    assert denied.metadata['failure']['field'] == 'internal_project_export'
+    assert not (root / 'scene-materialization.json').exists()
+    assert not list(tmp_path.rglob('*.qgz'))
+    context.hook_executor.deny = False
     first = await GeoDeliverTool().execute(args, context)
     assert not first.is_error, first.output
     assert Path(first.metadata['qgis_project']).is_file()
@@ -181,13 +214,13 @@ async def test_reviewed_native_scene_generates_editable_project_once(tmp_path, w
     assert doc['render_backend'] == 'matplotlib'
     assert doc['project_validation']['pixel_equivalence'] == 'not_claimed'
     from geoharness.tools.geo_map_review import _verified_render_evidence
-    old_roster = root / 'page-2.png'
+    old_roster = root / 'page-3.png'
     receipt = map_job_receipt(context.metadata, cwd=tmp_path, config=config,
                               map_id=receipt['job_id'])
     proof = _verified_render_evidence(old_roster,
         hashlib.sha256(old_roster.read_bytes()).hexdigest(), receipt, [tmp_path])
     assert proof['review_binding']['version'] == receipt['selected_version']
-    assert proof['review_page_index'] == 1
+    assert proof['review_page_index'] == 2
     assert len(receipt['versions']) == 1
 
     fresh = ToolExecutionContext(cwd=tmp_path, metadata={'geoharness_config': config})

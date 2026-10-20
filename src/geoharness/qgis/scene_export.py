@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 
@@ -16,6 +17,21 @@ def _sha(path):
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             value.update(block)
     return value.hexdigest()
+
+
+def frozen_palette(plan):
+    """Older reviewed plans omitted generated locator legend outline colors."""
+    colors = dict(plan['colors'])
+    for page in plan['pages']:
+        for entry in page.get('legend_items', []):
+            for color in (entry['color'], entry['symbol']['outline']):
+                if color in colors:
+                    continue
+                if not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
+                    raise ValueError('Missing frozen legend RGBA: ' + str(color))
+                colors[color] = ','.join([*(str(int(color[i:i+2], 16))
+                                           for i in (1, 3, 5)), '255'])
+    return colors
 
 
 def dispatch(action, payload, context):
@@ -52,6 +68,7 @@ def dispatch(action, payload, context):
     if _sha(plan_path) != payload['plan_sha256']:
         raise ValueError('Frozen native scene changed before project export')
     plan = json.loads(plan_path.read_text('utf-8'))
+    plan['colors'] = frozen_palette(plan)
     if plan_path.stat().st_size > 4 * 1024 * 1024:
         raise ValueError('Native scene plan too large')
     for locator, expected in plan['source_inventory'].items():

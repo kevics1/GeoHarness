@@ -753,6 +753,8 @@ def _render(scene, scene_ref, context):
             'font': {'family': font, 'path': str(font_path), 'sha256': _sha(font_path)}}
         colors = {value for layer in layers for value in [layer['symbol']['color'],
             layer['symbol']['outline'], *(c['color'] for c in layer['symbol']['categories'])]}
+        colors.update(value for page in plan['pages'] for entry in page.get('legend_items', [])
+                      for value in (entry['color'], entry['symbol']['outline']))
         plan['colors'] = {color: ','.join(str(round(v * 255)) for v in _rgba(color))
                           for color in colors}
         (folder / 'scene-plan.json').write_text(json.dumps(plan, ensure_ascii=False), 'utf-8')

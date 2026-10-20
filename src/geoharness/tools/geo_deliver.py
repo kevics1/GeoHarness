@@ -819,8 +819,13 @@ class GeoDeliverTool(BaseTool):
                 "status": "failed", "code": code,
                 "error_summary": message,
                 "failure": {"code": code, "category": code,
-                            "retry_without_change": False, "field": "project_dir"},
+                            "retry_without_change": False,
+                            "field": ('internal_project_export' if code == 'project_build_failed'
+                                      else 'project_dir')},
                 "recovery": (
+                    '内部工程导出失败，保留已审图片和分析；不要轮换project_dir/map_id/spec_ref'
+                    '重试同一错误。根据原生运行记录修复工具或环境后继续交付。'
+                    if code == 'project_build_failed' else
                     "先用geo_cartography原生制图并完成全部页面审查，"
                     "把实际返回的project_dir与同一主图传入，交付时一次生成工程。"
                     "不要把 PNG/PDF 当作等价工程，也不要猜测 project_dir。"

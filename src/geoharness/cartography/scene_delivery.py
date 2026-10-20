@@ -65,7 +65,9 @@ async def materialize_scene(context, preview_dir):
                 raise ValueError('最终工程记录不属于当前冻结候选')
             generated = saved.get('generated')
             if not generated:
-                raise ValueError('上次工程生成尚无确定结果；检查原生运行记录，不能盲目重建')
+                raise ValueError('上次工程生成已失败，先检查原生运行记录并修复后恢复；不能盲目重建'
+                    if saved.get('status') == 'failed' else
+                    '上次工程生成尚无确定结果；检查原生运行记录，不能盲目重建')
             final = Path(generated['project_dir'])
         else:
             if not config.qgis.enabled:
@@ -87,30 +89,41 @@ async def materialize_scene(context, preview_dir):
                 raise ValueError('当前权限不允许最终工程导出')
             from openharness.hooks import HookEvent
 
-            invocation = {'action': 'native_scene_export', 'plan_path': str(plan_path),
-                          'candidate': candidate}
+            from geoharness.tools.geo_deliver import GeoDeliverInput
+
+            # This is delivery's internal compilation, not an invocation of the
+            # public QGIS inspection/build tool. Hooks receive the owning tool's
+            # real input contract; worker-only fields stay outside tool_input.
+            invocation = GeoDeliverInput(project_dir=str(root), map_id=identity).model_dump(
+                mode='json', exclude_defaults=True)
+            hook_payload = {'tool_name': 'geo_deliver', 'tool_input': invocation,
+                            'internal_operation': 'native_scene_export', 'candidate': candidate}
             if context.hook_executor:
                 outcome = await context.hook_executor.execute(HookEvent.PRE_TOOL_USE,
-                    {'tool_name': 'geo_qgis_project', 'tool_input': invocation,
-                     'event': HookEvent.PRE_TOOL_USE.value})
+                    {**hook_payload, 'event': HookEvent.PRE_TOOL_USE.value})
                 if outcome.blocked:
-                    raise ValueError(outcome.reason or '最终工程导出被钩子拒绝')
+                    raise ValueError('project_build_failed: ' + (
+                        outcome.reason or '最终工程导出被钩子拒绝'))
             atomic_write_text(journal, json.dumps({'candidate': candidate, 'status': 'running',
                 'generated': None}, ensure_ascii=False))
             result = await execute_qgis('native_scene_export', {'plan_path': str(plan_path),
                 'plan_sha256': _sha(plan_path)}, cwd=context.cwd, settings=config.qgis,
                 read_roots=[*qgis_read_roots(config, context.cwd), root, plan_path.parent,
                             Path(plan['font']['path']).parent])
+            if result.get('status') != 'succeeded':
+                atomic_write_text(journal, json.dumps({'candidate': candidate, 'status': 'failed',
+                    'generated': None, 'worker_run_dir': result.get('run_dir'),
+                    'error_summary': result.get('error_summary')}, ensure_ascii=False))
             if context.hook_executor:
                 await context.hook_executor.execute(HookEvent.POST_TOOL_USE,
-                    {'tool_name': 'geo_qgis_project', 'tool_input': invocation,
+                    {**hook_payload,
                      'tool_output': json.dumps(result.get('result') or {
                          'error_summary': result.get('error_summary')}, ensure_ascii=False),
                      'tool_is_error': result.get('status') != 'succeeded',
                      'event': HookEvent.POST_TOOL_USE.value})
             if result.get('status') != 'succeeded':
-                raise ValueError('最终工程编译失败，原生图片/分析保留：' + str(
-                    result.get('error_summary')))
+                raise ValueError('project_build_failed: 最终工程编译失败，原生图片/分析保留：'
+                                 + str(result.get('error_summary')))
             final = Path(result['result']['project_file']).parent
             # Native images remain authoritative. No falsely inherited visual
             # approval is attached to an independently rendered QGIS image.
