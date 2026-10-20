@@ -30,6 +30,10 @@ class _AwaitingUserAnswer(BaseException):
     """Control flow, kept outside upstream API-error/retry handling."""
 
 
+class _ReviewStopped(BaseException):
+    """An operational stop has no question for the user to answer."""
+
+
 class _QuestionGateClient:
     def __init__(self, client, metadata):
         self.client, self.metadata = client, metadata
@@ -40,12 +44,85 @@ class _QuestionGateClient:
     async def stream_message(self, request):
         if self.metadata.get('geo_clarification', {}).get('pending'):
             raise _AwaitingUserAnswer()
+        if self.metadata.get('geo_review_stop'):
+            raise _ReviewStopped()
         async with aclosing(self.client.stream_message(request)) as stream:
             async for event in stream:
                 yield event
 
 
 class GeoQueryEngine(QueryEngine):
+    def _review_stop_notice(self):
+        stop = self.tool_metadata.get('geo_review_stop', {})
+        count = stop.get('review_requests_used')
+        limit = stop.get('review_request_limit')
+        details = (f'本任务已请求{count}/{limit}次。' if count is not None else '')
+        page_count = stop.get('page_review_requests_used')
+        if page_count is not None:
+            details += f"当前页已请求{page_count}/{stop.get('page_review_request_limit')}次。"
+        summary = stop.get('summary', '')
+        paths = stop.get('paths', [])
+        pages = stop.get('pending_pages', [])
+        return ('已达到自动审图上限，自动改图和新增审查已停止。' + details
+                + (f'最近审查：{summary}。' if summary else '')
+                + (f'未完成页面索引（从0起）：{pages}。' if pages else '')
+                + '现有图片和报告已保留；严重缺陷或未完成检查仍保持草稿。'
+                + ('已有文件：' + '；'.join(paths) + '。' if paths else '')
+                + '这是一条停止通知，无需回答问题。“继续”不会重置次数或重启审图。'
+                '可输入“整理草稿和问题清单”，继续整理已有成果；'
+                '需要新增审图时，请人工检查后在config.yaml调整审图上限并重启恢复原会话。')
+
+    def _migrate_review_stop(self):
+        pending = self.tool_metadata.get('geo_clarification', {}).get('pending')
+        if (isinstance(pending, dict) and not pending.get('policy_ref')
+                and str(pending.get('question', '')).startswith('已达到自动审图上限')):
+            self.tool_metadata['geo_clarification'].pop('pending')
+            self.tool_metadata.setdefault('geo_review_stop', {'reason': 'review_limit'})
+        # Older snapshots omitted the pending notice; the actual final tool
+        # result still contains the stop evidence. Do not replay that tool.
+        if (not self.tool_metadata.get('geo_review_stop', {}).get('review_requests_used')
+                and self._messages):
+            for block in self._messages[-1].content:
+                if not isinstance(block, ToolResultBlock) or block.is_error:
+                    continue
+                try:
+                    body, _ = json.JSONDecoder().raw_decode(block.content.lstrip())
+                    diagnostic = body.get('diagnostics', {})
+                    if body.get('status') != 'passed' and (
+                            body.get('automatic_review_stopped') or
+                            diagnostic.get('automatic_review_stopped')):
+                        self._set_review_stop(body)
+                except (ValueError, TypeError, AttributeError):
+                    continue
+        stop = self.tool_metadata.get('geo_review_stop', {})
+        config = self.tool_metadata.get('geoharness_config')
+        if config and self.tool_metadata.get('geo_task_record') and (
+                (isinstance(stop.get('review_request_limit'), int) and
+                 config.map_review.max_review_requests_per_task > stop['review_request_limit']) or
+                (isinstance(stop.get('page_review_request_limit'), int) and
+                 config.map_review.max_review_requests_per_page >
+                 stop['page_review_request_limit'])):
+            from geoharness.cartography.review_limits import review_limit_status
+
+            if not review_limit_status(self.tool_metadata, config)['automatic_review_stopped']:
+                self.tool_metadata.pop('geo_review_stop', None)
+
+    def _set_review_stop(self, review):
+        diagnostic = review.get('diagnostics', {})
+        self.tool_metadata['geo_review_stop'] = {
+            'reason': 'review_limit',
+            'summary': str(review.get('summary', ''))[:500],
+            'pending_pages': (review.get('pending_pages') or [])[:64],
+            **{key: diagnostic.get(key, review.get(key))
+               for key in ('review_requests_used', 'review_request_limit',
+                           'page_review_requests_used', 'page_review_request_limit')},
+            'paths': list(dict.fromkeys(
+                str(page[key])
+                for page in [review, *(review.get('pages') or []),
+                             *(review.get('partial_pages') or [])]
+                if isinstance(page, dict)
+                for key in ('image_path', 'report_path') if page.get(key)))[:16]}
+
     async def submit_message(self, prompt: str | ConversationMessage) -> AsyncIterator[StreamEvent]:
         user_message = (
             prompt if isinstance(prompt, ConversationMessage)
@@ -54,6 +131,16 @@ class GeoQueryEngine(QueryEngine):
         continuation = user_message.text.strip().strip("。.!！").lower() in {
             "继续", "接着做", "continue", "resume",
         }
+        self._migrate_review_stop()
+        review_stop = self.tool_metadata.get('geo_review_stop')
+        if review_stop and continuation:
+            yield StatusEvent(message=self._review_stop_notice())
+            return
+        if review_stop:
+            # Explicit follow-up can inspect/summarize the same task. Never start
+            # a new task merely to reset its durable review usage.
+            self.tool_metadata.pop('geo_review_stop', None)
+            self._tool_metadata['_suppress_next_user_goal'] = True
         pending = self.tool_metadata.get('geo_clarification', {}).get('pending')
         if pending:
             if (continuation or not user_message.text.strip()
@@ -75,7 +162,7 @@ class GeoQueryEngine(QueryEngine):
             return
         # Only a new task starts fresh budgets and recovery policy. A pending
         # continuation does not append a user message or replace the task goal.
-        fresh_task = not pending and not (
+        fresh_task = not pending and not review_stop and not (
             continuation and self.tool_metadata.get('geo_task_record'))
         if fresh_task:
             self._query_recovery_state = None
@@ -91,7 +178,7 @@ class GeoQueryEngine(QueryEngine):
 
                 begin_task(self.tool_metadata, cwd=self._cwd, goal=user_message.text)
             begin_map_request(self.tool_metadata, cwd=self._cwd, config=config,
-                              continuation=continuation or bool(pending))
+                              continuation=continuation or bool(pending) or bool(review_stop))
         if not continuation and user_message.text.strip() and not self._tool_metadata.pop(
             "_suppress_next_user_goal", False,
         ):
@@ -137,6 +224,10 @@ class GeoQueryEngine(QueryEngine):
             self._settle_usage()
 
     async def continue_pending(self, *, max_turns: int | None = None) -> AsyncIterator[StreamEvent]:
+        self._migrate_review_stop()
+        if self.tool_metadata.get('geo_review_stop'):
+            yield StatusEvent(message=self._review_stop_notice())
+            return
         context = QueryContext(
             api_client=self._api_client, tool_registry=self._tool_registry,
             permission_checker=self._permission_checker, cwd=self._cwd,
@@ -202,15 +293,11 @@ class GeoQueryEngine(QueryEngine):
                                     stopped = review.get('automatic_review_stopped') or review.get(
                                         'diagnostics', {}).get('automatic_review_stopped')
                                     if stopped and review.get('status') != 'passed':
-                                        from geoharness.cartography.review_limits import (
-                                            STOP_MESSAGE,
-                                        )
-
-                                        self.tool_metadata['geo_clarification']['pending'] = {
-                                            'question': STOP_MESSAGE}
+                                        self._set_review_stop(review)
                                     progress = review.get('diagnostics', {}).get(
                                         'repair_progress', {})
-                                    if progress.get('requires_user_decision') is True:
+                                    if (not stopped
+                                            and progress.get('requires_user_decision') is True):
                                         self.tool_metadata['geo_clarification']['pending'] = {
                                             'question': '多轮审图仍报告同组问题，尚不能确认继续'
                                             '改图的收益。请选择局部放大、保留当前草稿，'
@@ -224,6 +311,10 @@ class GeoQueryEngine(QueryEngine):
                                 successful.add(fingerprint)
                         yield event, usage
                 return
+            except _ReviewStopped:
+                self._messages[:] = messages
+                yield StatusEvent(message=self._review_stop_notice()), None
+                return
             except _AwaitingUserAnswer:
                 self._messages[:] = messages
                 question = self.tool_metadata['geo_clarification']['pending']['question']
@@ -233,6 +324,9 @@ class GeoQueryEngine(QueryEngine):
                 # run_query appends its tool results after yielding the final
                 # ToolExecutionCompleted; preserve that final mutation as well.
                 self._messages[:] = messages
+                if self.tool_metadata.get('geo_review_stop'):
+                    yield StatusEvent(message=self._review_stop_notice()), None
+                    return
                 if self.tool_metadata.get('geo_clarification', {}).get('pending'):
                     question = self.tool_metadata['geo_clarification']['pending']['question']
                     yield StatusEvent(message=f"等待用户回答：{question}"), None

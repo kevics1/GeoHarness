@@ -304,6 +304,11 @@ async def test_service_failure_binds_secondary_page_and_stops_batch(tmp_path):
         file_path=rendered.metadata['preview_path'], all_pages=True), context)
     assert not batch.is_error, batch.output
     assert batch.metadata['completed_page_count'] == 1
+    visible = json.loads(batch.output)
+    assert visible['batch_status'] == 'unverified'
+    assert visible['pending_pages']
+    assert visible['image_path']
+    assert 'partial_pages' in visible
     assert client.calls == 1  # shared service cooldown, no per-page blind retries
     receipt = map_job_receipt(context.metadata, cwd=tmp_path,
         config=context.metadata['geoharness_config'], map_id=batch.metadata['map_id'])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -396,7 +397,13 @@ class GeoMapReviewTool(BaseTool):
                 result.metadata['pending_pages'] = [n for n, _, _, _ in pages
                                                      if n not in {p['page_index']
                                                                   for p in summary}]
-                return result
+                # The visible result must carry the same partial evidence as
+                # metadata; otherwise a stopped batch looks like an empty prompt.
+                body.update(map_id=identity, page_index=page_index,
+                    image_path=str(page_path), report_path=result.metadata.get('review_path'),
+                    partial_pages=summary, pending_pages=result.metadata['pending_pages'],
+                    batch_status='unverified')
+                return replace(result, output=json.dumps(body, ensure_ascii=False))
             issues = body.get("issues", [])
             status = ("issues" if any(i.get("severity") == "error"
                                       for i in issues) else

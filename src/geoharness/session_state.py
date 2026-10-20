@@ -505,6 +505,7 @@ def _checkpoint(metadata: dict[str, Any], cwd: Path, config: GeoConfig) -> dict[
         "geo_query_recovery": _query_mode(metadata.get("geo_query_recovery"), config),
         "analysis_workflow_state": _analysis_stages(
             metadata.get("analysis_workflow_state"), secrets),
+        'geo_review_stop': _review_stop(metadata.get('geo_review_stop'), secrets),
     }
     serialized = json.dumps(result, ensure_ascii=False, allow_nan=False)
     if any(secret in serialized for secret in secrets):
@@ -513,6 +514,26 @@ def _checkpoint(metadata: dict[str, Any], cwd: Path, config: GeoConfig) -> dict[
         raise ValueError("Geo checkpoint contains a credential in an identity")
     if len(serialized.encode()) > MAX_CHECKPOINT_BYTES:
         raise ValueError("Geo session checkpoint exceeds its size limit")
+    return result
+
+
+def _review_stop(raw: Any, secrets: tuple[str, ...]) -> dict:
+    if not isinstance(raw, dict) or raw.get('reason') != 'review_limit':
+        return {}
+    result = {'reason': 'review_limit'}
+    if isinstance(raw.get('summary'), str):
+        result['summary'] = _safe_json(raw['summary'][:500], secrets)
+    for key in ('review_requests_used', 'review_request_limit',
+                'page_review_requests_used', 'page_review_request_limit'):
+        value = raw.get(key)
+        if type(value) is int and 0 <= value <= _MAX_COUNTER:
+            result[key] = value
+    paths = raw.get('paths')
+    result['paths'] = [_safe_json(p, secrets) for p in paths[:16] if isinstance(p, str)] if (
+        isinstance(paths, list)) else []
+    pages = raw.get('pending_pages')
+    result['pending_pages'] = [p for p in pages[:64] if type(p) is int and p >= 0] if (
+        isinstance(pages, list)) else []
     return result
 
 
@@ -583,6 +604,9 @@ def restore_geo_session_state(
     metadata["geo_request_failures"] = failures
     metadata["geo_query_recovery"] = recovery
     metadata['analysis_workflow_state'] = analysis_stages
+    stop = _review_stop(checkpoint.get('geo_review_stop'), secrets)
+    if stop:
+        metadata['geo_review_stop'] = stop
     if task is not None:
         metadata.setdefault('geo_task_record', {}).update(task)
         from geoharness.analysis.policy import PolicyDecision, policy_question

@@ -114,6 +114,26 @@ async def test_pixel_request_keeps_images_max_and_excludes_engineering_and_repai
     assert closed and stream.closed
 
 
+@pytest.mark.parametrize('severity,status', [('info', 'passed'), ('error', 'issues')])
+async def test_misplaced_basis_is_preserved_without_another_request(
+    image, monkeypatch, severity, status,
+):
+    raw = json.dumps({'status': status, 'summary': '检查完成', 'issues': [{
+        'severity': severity, 'description': '关键标题被裁断',
+        'basis': '当前页关键内容无法完整读取', 'reading_impact': 'clipped',
+        'affected_content': '主标题'}]})
+    requests, _, _ = install_transport(monkeypatch, Stream([
+        chunk(name='record_map_review', args=raw, finish='tool_calls')]))
+    result = await quality.review_map(image, config=GeoConfig(api_key='test'),
+        task='审图', evidence={'backend': 'matplotlib'}, pixel_only=True)
+    assert len(requests) == 1
+    assert result.status == status
+    assert result.issues[0].severity == severity
+    assert result.issues[0].severity_reason == '当前页关键内容无法完整读取'
+    assert result.diagnostics['compatibility_applied'] == [
+        'issues.0.basis_to_severity_reason']
+
+
 @pytest.mark.parametrize("events,error,stage,kind", [
     ([chunk(reasoning="secret", finish="length")], None, "budget", "output_budget"),
     ([chunk(args='{"status":')], None, "response", "incomplete_stream"),

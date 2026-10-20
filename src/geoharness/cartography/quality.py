@@ -995,8 +995,11 @@ async def review_map(
             diagnostics["compatibility_applied"] = ["layout_patch_null_to_empty"]
         diagnostics["stage"] = "schema"
         if pixel_only:
-            from geoharness.cartography.pixel_review import PixelReview
+            from geoharness.cartography.pixel_review import PixelReview, normalize_pixel_payload
 
+            payload, normalized = normalize_pixel_payload(payload)
+            if normalized:
+                diagnostics.setdefault('compatibility_applied', []).extend(normalized)
             pixels = PixelReview.model_validate(payload)
             result, ignored = MapReview.model_validate(pixels.model_dump(
                 exclude={'finding_assessments'})), []

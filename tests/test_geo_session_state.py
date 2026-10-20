@@ -81,6 +81,17 @@ def _restore(backend, tmp_path, metadata, *, config=None):
     return restored
 
 
+def test_review_stop_survives_restart_without_becoming_a_question(backend, tmp_path):
+    metadata = _metadata()
+    metadata['geo_review_stop'] = {'reason': 'review_limit', 'summary': '当前页未完成',
+        'review_requests_used': 9, 'review_request_limit': 12,
+        'page_review_requests_used': 3, 'page_review_request_limit': 3,
+        'paths': [str(tmp_path / 'preview.png')], 'pending_pages': []}
+    restored = _restore(backend, tmp_path, metadata)
+    assert restored['geo_review_stop'] == metadata['geo_review_stop']
+    assert not restored.get('geo_clarification', {}).get('pending')
+
+
 def test_repair_attempts_survive_restart_without_runtime_authority(backend, tmp_path):
     metadata = _metadata()
     metadata["geoharness_permission_checker"] = object()

@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from openharness.api.client import ApiMessageCompleteEvent
 from openharness.api.usage import UsageSnapshot
 from openharness.config.settings import PermissionSettings
@@ -115,7 +116,8 @@ class ProbeClient:
         )
 
 
-async def test_review_limit_pauses_before_another_main_model_request(tmp_path):
+@pytest.mark.parametrize('turns', [1, 40])
+async def test_review_limit_pauses_before_another_main_model_request(tmp_path, turns):
     class ReviewTool(ProbeTool):
         name = 'geo_map_review'
 
@@ -133,10 +135,93 @@ async def test_review_limit_pauses_before_another_main_model_request(tmp_path):
                 usage=UsageSnapshot(), stop_reason='tool_calls')
 
     client, tool = ReviewClient(), ReviewTool()
-    runtime = engine(tmp_path, client, tool, turns=1)
+    runtime = engine(tmp_path, client, tool, turns=turns)
     events = [event async for event in runtime.submit_message('检查地图')]
     assert client.calls == tool.calls == 1
     assert any(isinstance(e, StatusEvent) and '已达到自动审图上限' in e.message for e in events)
+    assert not runtime.tool_metadata.get('geo_clarification', {}).get('pending')
+    continued = [e async for e in runtime.submit_message('继续')]
+    assert client.calls == tool.calls == 1
+    assert any('整理草稿和问题清单' in e.message for e in continued
+               if isinstance(e, StatusEvent))
+    assert not any('需要先回答' in e.message or '等待用户回答' in e.message
+                   for e in events + continued if isinstance(e, StatusEvent))
+
+
+async def test_legacy_review_limit_question_is_an_operational_stop(tmp_path):
+    from geoharness.cartography.review_limits import STOP_MESSAGE
+
+    client = ProbeClient()
+    runtime = engine(tmp_path, client, ProbeTool())
+    runtime.tool_metadata['geo_clarification'] = {'pending': {'question': STOP_MESSAGE}}
+    events = [e async for e in runtime.submit_message('继续')]
+    assert client.calls == 0
+    assert not runtime.tool_metadata['geo_clarification'].get('pending')
+    assert any('整理草稿和问题清单' in e.message for e in events
+               if isinstance(e, StatusEvent))
+
+
+async def test_real_business_question_still_requires_an_answer(tmp_path):
+    client = ProbeClient()
+    runtime = engine(tmp_path, client, ProbeTool())
+    runtime.tool_metadata['geo_clarification'] = {
+        'pending': {'question': '人口空值是否按未知单列？'}}
+    events = [e async for e in runtime.submit_message('继续')]
+    assert client.calls == 0
+    assert any('需要先回答：人口空值' in e.message for e in events
+               if isinstance(e, StatusEvent))
+
+
+async def test_legacy_stopped_tool_result_is_not_replayed(tmp_path):
+    runtime = engine(tmp_path, ProbeClient(), ProbeTool())
+    runtime._messages = [ConversationMessage(role='user', content=[ToolResultBlock(
+        tool_use_id='old-review', content=json.dumps({'status': 'unverified',
+            'image_path': str(tmp_path / 'map.png'), 'pending_pages': [2, 3],
+            'diagnostics': {'automatic_review_stopped': True,
+                'review_requests_used': 9, 'review_request_limit': 12,
+                'page_review_requests_used': 3, 'page_review_request_limit': 3}}))])]
+    events = [e async for e in runtime.submit_message('继续')]
+    assert runtime._api_client.calls == 0
+    notice = ' '.join(e.message for e in events if isinstance(e, StatusEvent))
+    assert '9/12' in notice and '3/3' in notice and '[2, 3]' in notice
+    assert str(tmp_path / 'map.png') in notice
+    events = [e async for e in runtime.continue_pending()]
+    assert runtime._api_client.calls == 0
+
+
+async def test_explicit_followup_keeps_task_identity_and_usage(tmp_path):
+    from geoharness.cartography.review_limits import reserve_review_request, review_limit_status
+
+    runtime = engine(tmp_path, ProbeClient(tool_turns=0), ProbeTool())
+    [e async for e in runtime.submit_message('原任务')]
+    task_id = runtime.tool_metadata['geo_task_record']['task_id']
+    config = runtime.tool_metadata['geoharness_config']
+    reserve_review_request(runtime.tool_metadata, config, page=0)
+    runtime.tool_metadata['geo_review_stop'] = {'reason': 'review_limit'}
+    [e async for e in runtime.submit_message('整理草稿和问题清单')]
+    assert runtime.tool_metadata['geo_task_record']['task_id'] == task_id
+    assert review_limit_status(runtime.tool_metadata, config)['review_requests_used'] == 1
+
+
+async def test_manually_raised_limit_resumes_without_resetting_usage(tmp_path):
+    from dataclasses import replace
+
+    from geoharness.cartography.review_limits import reserve_review_request, review_limit_status
+
+    client = ProbeClient(tool_turns=0)
+    runtime = engine(tmp_path, client, ProbeTool())
+    [e async for e in runtime.submit_message('原任务')]
+    config = runtime.tool_metadata['geoharness_config']
+    for _ in range(3):
+        reserve_review_request(runtime.tool_metadata, config, page=0)
+    runtime.tool_metadata['geo_review_stop'] = {'reason': 'review_limit',
+        'review_request_limit': 12, 'page_review_request_limit': 3}
+    config = replace(config, map_review=config.map_review.model_copy(
+        update={'max_review_requests_per_page': 4}))
+    runtime.tool_metadata['geoharness_config'] = config
+    [e async for e in runtime.submit_message('继续')]
+    assert client.calls == 2
+    assert review_limit_status(runtime.tool_metadata, config)['review_requests_used'] == 3
 
 
 def engine(tmp_path, client, tool, *, turns=1):

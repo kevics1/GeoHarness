@@ -26,6 +26,12 @@ PYTHON_CAUTIONS = (
     "距离/面积原值保留完整精度，不在分析字段round取整，显示格式交给制图；缓冲/叠置后先查"
     "is_valid，出现自交须核实并修复几何再写输出，保留来源，不用忽略错误代替修复。"
     "同任务geo_python/发布/制图写操作串行；锁冲突先读状态，不新建任务或重复执行分析。",
+    "最新实测：动态循环读取前把全部文件逐项放input_refs；从时间索引生成t0/t1等列后，"
+    "在筛列/merge后的实际对象检查columns，不能假定这些列仍存在。数值索引可能因赋值变成"
+    "float，f't{0.0}'得到t0.0而非t0；确认整数语义后统一int再生成/读取列名。"
+    "JSON序列化前执行json.dumps(CONSOLE_RESULT,allow_nan=False)自检；浮点列直接where(None)"
+    "可能仍保留NaN，表格先astype(object).where(pd.notna(df),None)再转记录；"
+    "嵌套数组/标量中的NaN、Infinity也须转None，不以0填补未知。",
 )
 
 NATIVE_CARTOGRAPHY_CAUTIONS = (
@@ -54,6 +60,12 @@ NATIVE_CARTOGRAPHY_CAUTIONS = (
     "{row_end}/{total_rows}/{page_number}/{page_count}，不把业务字段写成模板占位符。",
     "查已有计划用inspect(scene_ref)，不要用未绑定的Python读取scene-plan.json或glob审图报告。"
     "analysis_refs只用实际analysis_ref/package_path或原生manifest_path，不用Markdown报告路径。",
+    "Scene.analysis_refs只列本候选确实使用的结果包，每个包的原生产物必须实际入图；"
+    "仅作报告/名册的其他产物不要无差别加入。若为新增编号复制key_numbered等矢量，"
+    "它不会自动继承原文件的事实绑定；优先直接使用已发布源和已有主键标注，确需派生时"
+    "重新发布该文件并核实来源关系，不把旧包强绑新文件。",
+    "审图达到上限是停止通知，不是待回答问题；停止自动改图/重审，整理现有草稿与严重问题，"
+    "明确哪些页未完成，不反复要求用户回答通知或用继续重置次数。格式校验失败不同于网络超时。",
 )
 
 QGIS_CAUTIONS = (

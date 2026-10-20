@@ -66,3 +66,5 @@ J轮 engineering_checked / full_business_acceptance_pending：严重error唯一�
 K轮 engineering_checked / real_delivery_completed（2026-10-20紧急修复）：真实HookExecutor拒绝内部native_scene_export被冒用为geo_qgis_project参数的缺陷已精确复现并修复，事件归属geo_deliver且沿用公开契约，仍遵守钩子拒绝。真实业务进一步暴露定位框图例色未冻结，补新计划调色板及旧计划精确HEX兼容。11项定向回归45.29秒、最终实际安装3项26.09秒通过，136模块+34资源一致。恢复森林火灾改3的既有v2/11页交付成功，49文件/11页PDF/11PNG哈希不变，未重做分析或审图；工程校验passed。配置和业务源数据不变。细节diagnostics/2026-10-20-delivery-hook-hotfix.md。
 
 L轮 engineering_checked / model_retest_pending（2026-10-20用户要求两个目录汇总写入提示词）：已对森林火灾保存片段42调用14错和改4多个已捕获任务错误归类，汇总为Python名称/JSON/时间/输入引用/几何/精度与制图来源/事实绑定/主键/互斥字段/模板规则，前置到主提示词、两个工具描述/help和对应Scene字段Schema。并修复同批浅复制metadata产生私有任务锁的真实缺陷，测试先复现maximum=2再修为1。源码54项39.08秒、实际安装15项8.67秒通过，136模块+34资源零差异，配置SHA保持；未重跑业务或审图，不声明实际模型错误率已下降。报告diagnostics/2026-10-20-python-cartography-prompt-cautions.md。
+
+M轮 engineering_checked / model_retest_pending（2026-10-20用户要求最新问题写提示词及修复无内容问答）：改5保存片段27调用5错；封顶由待回答问题改为独立停止状态，保留额度/草稿，旧会话迁移与显式原任务整理，人工提高配置后有额度才恢复。兼容误放issues.basis为severity_reason，真实保留passed/info响应离线复放成功；不改原任务通过状态。实际安装143项及两种停止路径2项通过（重叠不合计），136模块+34资源一致、CLI17工具通过、配置SHA保持。报告diagnostics/2026-10-20-review-stop-and-schema-repair.md。

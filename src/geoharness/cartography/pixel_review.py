@@ -62,6 +62,30 @@ class PixelReview(BaseModel):
         description='只评估给定review_targets：明确已解决/仍存在/无法判断；未提及不算解决。')
 
 
+def normalize_pixel_payload(payload):
+    """Accept one observed explanatory alias without relaxing finding validation."""
+    if not isinstance(payload, dict) or not isinstance(payload.get('issues'), list):
+        return payload, []
+    payload = {**payload, 'issues': [dict(i) if isinstance(i, dict) else i
+                                   for i in payload['issues']]}
+    normalized = []
+    for index, issue in enumerate(payload['issues']):
+        if not isinstance(issue, dict) or 'basis' not in issue:
+            continue
+        basis = issue['basis']
+        reason = issue.get('severity_reason', '')
+        if not isinstance(basis, str) or not isinstance(reason, str):
+            continue
+        combined = reason if not basis or basis == reason else (
+            reason + '；' + basis if reason else basis)
+        if len(combined) > 300:
+            continue
+        issue.pop('basis')
+        issue['severity_reason'] = combined
+        normalized.append(f'issues.{index}.basis_to_severity_reason')
+    return payload, normalized
+
+
 def page_scope(evidence: dict[str, Any]) -> dict:
     """只使用已绑定当前页的用途元数据，不能凭页码猜测页面类型。"""
     metadata = evidence.get("render_metadata") or {}
@@ -136,6 +160,7 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
         "只有能从当前图片明确确认原缺陷已消除才填resolved，并给具体可见依据；"
         "仍存在填persists，缺少局部或无法判断填unassessable，不因没再提及就当解决。"
         "若旧意见本来就不是当前页像素缺陷，明确填not_a_defect并给basis和当前图中可核实的reason；"
+        "basis仅属于finding_assessments；issues中的严重性依据使用severity_reason，不能混用字段。"
         "不能仅因当前未再报告就驳回旧意见，也不能把真实遮挡说成偏好。"
         "返回status、简短summary、issues及limitations。明确问题写具体位置及issue_code；"
         "能可靠定位时填写frame_id、roi_ref及该ROI内归一化bbox，不能定位可留空。"
