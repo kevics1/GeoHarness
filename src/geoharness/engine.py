@@ -74,6 +74,13 @@ class GeoQueryEngine(QueryEngine):
 
     def _migrate_review_stop(self):
         pending = self.tool_metadata.get('geo_clarification', {}).get('pending')
+        config = self.tool_metadata.get('geoharness_config')
+        if config and config.map_review.workflow == 'single_pass':
+            self.tool_metadata.pop('geo_review_stop', None)
+            if (isinstance(pending, dict) and not pending.get('policy_ref')
+                    and str(pending.get('question', '')).startswith('已达到自动审图上限')):
+                self.tool_metadata['geo_clarification'].pop('pending')
+            return
         if (isinstance(pending, dict) and not pending.get('policy_ref')
                 and str(pending.get('question', '')).startswith('已达到自动审图上限')):
             self.tool_metadata['geo_clarification'].pop('pending')
@@ -292,11 +299,14 @@ class GeoQueryEngine(QueryEngine):
                                     review, _ = json.JSONDecoder().raw_decode(event.output.lstrip())
                                     stopped = review.get('automatic_review_stopped') or review.get(
                                         'diagnostics', {}).get('automatic_review_stopped')
+                                    once = config and config.map_review.workflow == 'single_pass'
+                                    if once:
+                                        stopped = False
                                     if stopped and review.get('status') != 'passed':
                                         self._set_review_stop(review)
                                     progress = review.get('diagnostics', {}).get(
                                         'repair_progress', {})
-                                    if (not stopped
+                                    if (not once and not stopped
                                             and progress.get('requires_user_decision') is True):
                                         self.tool_metadata['geo_clarification']['pending'] = {
                                             'question': '多轮审图仍报告同组问题，尚不能确认继续'

@@ -83,3 +83,7 @@
 O轮 urgent_runtime_checked / user_business_test_pending（2026-10-20）：用户要求最快修改、可只检查运行。已安装工程浮点尾差/细化差异、日期分类统一、失败候选引用返回、Python标量标准化与超长结果自动文件化、授权字面路径与已登记动态助手绑定、当前提示词契约纠正。原失败行政区只读比较、QGIS日期API、真实隔离Python文件化、绑定与安装后失败引用运行检查通过；Ruff/compileall/dry-run17工具通过，136模块+34资源一致、配置不变。未跑完整pytest/真实视觉/业务交付；完整实际测试由用户执行。报告diagnostics/2026-10-20-urgent-runtime-hotfix.md。
 
 P轮 urgent_registration_checked（2026-10-20）：用户报告retained_previous_evidence触发OperationOutcome异常终止。已修observe_operation证据状态到登记提交状态映射，兼容reused/unregistered并保守处理未知值；未升级视觉结论。定向9项通过，更新安装/CLI一致性，不跑完整业务。
+
+Q轮（2026-10-20）：已提取最新9项实际失败并补共享中文调用注意事项/json_ready；默认single_pass全册一轮、最多一次修图后按真实质量交付。定向真实三页原生渲染→模拟审查→真实QGIS交付1项通过，配置未改，不跑完整业务。详见diagnostics/2026-10-20-single-pass-review-policy.md。
+
+安装完成：wheel SHA256 9c2051964c44910127eaafb8acb532191586599600a1b51c4e2a3b78ab6b40e7；137模块+34技能资源源码/包/实际安装零差异。Ruff、compileall、CLI dry-run（17工具）通过。用户config.yaml SHA保持9ef6ec325f390d529524a0874ac6ab62856cd8a9982a30d0580490f06ca51c5a。重启geoh run生效。

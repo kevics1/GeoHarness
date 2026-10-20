@@ -89,7 +89,7 @@ class GeoNativeMapTool(BaseTool):
         '非QGIS原生制图。数据审查/空间分析后，用scene保存一次页面与真实图层计划，'
         '以后render(scene_ref,edits)合并修图。仅输出PNG/PDF/页面清单，不生成工程。'
         '返回实际页面路径、稳定ID、字段/布局诊断；geo_map_review(all_pages=true)只读审图；'
-        '全部必要页面通过后geo_deliver(project_dir)才一次生成可编辑QGIS工程。'
+        '默认单轮审图、最多修图一轮后geo_deliver直接交付图片与一次生成的QGIS工程。'
         '图例categories使用实际字段值；名册自动续页。不会通过移动真实对象修复标注。'
         'Page.layout自动求解图框/图例；label_offsets_mm可调整文字并自动生成引线，'
         'locator_pages自动绘制实际详图范围框，不要用Python重复造标签点、引线或测PNG图框。'
@@ -153,9 +153,8 @@ class GeoNativeMapTool(BaseTool):
                         '分类值未声明、key不唯一/为空、标注字段不存在。',
                         '把纸张英寸当mm，或把QGIS符号面积当Matplotlib点数。',
                         '重复传完整scene而不是scene_ref+edits，导致页面文件漂移。'],
-                    'workflow': '数据审查→分析/结果验证→geo_cartography render→'
-                        '处理layout确定缺陷→geo_map_review(all_pages=true，自动沿用未变页)→全部通过且问题'
-                        '处置后geo_deliver一次生成可编辑工程。',
+                    'workflow': '默认single_pass：数据审查→分析→初次render→全册审一轮→'
+                        '最多合并修图一轮→直接geo_deliver一次生成工程和交付；不复审。',
                     'no_qgis': '普通制图、修图、预览、审图阶段不要调用geo_qgis_project。',
                     'call_time_cautions': invocation_guide('geo_cartography'),
                 }, ensure_ascii=False))
@@ -167,6 +166,21 @@ class GeoNativeMapTool(BaseTool):
             scene = arguments.scene or load_scene(arguments.scene_ref, context)
             scene = edit_scene(scene, arguments.edits)
             config = context.metadata['geoharness_config']
+            from geoharness.cartography.review_policy import (
+                next_action,
+                remember_render,
+                render_reuse,
+                single_pass,
+            )
+
+            if arguments.action == 'render' and single_pass(config):
+                previous = render_reuse(context.metadata)
+                if previous:
+                    return ToolResult(output=json.dumps({**previous,
+                        'status': 'render_reused_by_policy', 'render_executed': False,
+                        'review_workflow': 'single_pass',
+                        'next_action': next_action(context.metadata)}, ensure_ascii=False),
+                        metadata={**previous, 'render_executed': False})
             if arguments.action == 'inspect':
                 identity, reference = scene.map_id, arguments.scene_ref
             else:
@@ -254,6 +268,10 @@ class GeoNativeMapTool(BaseTool):
                     if problems else
                     '对全部页面执行geo_map_review(file_path=preview_path,all_pages=true)；'
                     '不要生成QGIS工程。'))
+            if single_pass(config):
+                remember_render(context.metadata, visible)
+                visible.update(review_workflow='single_pass',
+                    layout_advisory=True, next_action=next_action(context.metadata))
             return ToolResult(output=json.dumps(visible, ensure_ascii=False), metadata={
                 **result, 'map_id': identity, 'map_receipt': receipt})
         except (ValueError, OSError, KeyError, TypeError) as exc:

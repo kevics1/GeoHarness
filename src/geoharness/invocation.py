@@ -3,6 +3,17 @@
 from __future__ import annotations
 
 PYTHON_CAUTIONS = (
+    "最新实测：drop(columns='geometry')后不能再取该表['geometry']；先保存GeoSeries及其index/CRS，"
+    "拼接属性后用同索引GeoSeries重建GeoDataFrame。GeoSeries(gdf)或list(gdf)得到列名，"
+    "须用gdf.geometry/list(gdf.geometry)，不能把DataFrame当几何序列。",
+    "每次调用都重新声明input_refs别名；fire_cur/res等自定义别名不是全局持久名称。"
+    "data:ID和operation_id逐字复制工具返回完整值，不编造、不截成12位；"
+    "取证用返回的evidence_call/next_call，不猜ID。",
+    "脚本自己的json.dumps/写JSON发生在返回前，不能依赖CONSOLE_RESULT事后转换；"
+    "用json.dumps(json_ready(value),ensure_ascii=False,allow_nan=False)。"
+    "to_markdown依赖tabulate，不能假定已安装；用to_csv或简单Markdown拼接，不为报告安装包。",
+    "发布事实先检查将要导出的实际文件字段：在投影表算出的area_km2/cum_area_km2不会自动"
+    "出现在原表；按sid等稳定键把结果写入实际输出，再publish_analysis声明字段。",
     "每次调用都是新进程和新 RUN_DIR：必须重新 import/定义所有名称；前序文件通过 "
     "input_refs/INPUTS 或返回的准确路径绑定。",
     "使用中间结果前核对实际列名、CRS 和库函数签名；input_requirements 不会对任意代码"
@@ -41,6 +52,9 @@ PYTHON_CAUTIONS = (
 )
 
 NATIVE_CARTOGRAPHY_CAUTIONS = (
+    "当前默认single_pass：初次render后立即全册审图一次，最多合并修改render一次，然后"
+    "直接geo_deliver交付图片/PDF和QGIS工程；不复审、不反复修布局。局部标签碰撞作为交付备注，"
+    "不要用Python手算22个标签纸面坐标、反复聚类拆页或随机试偏移。修改后未复审如实注明。",
     "geo_cartography 只做原生渲染，不启动 QGIS、不生成 .qgs/.qgz；普通制图、修图和"
     "审图都走这里。不要调用 geo_qgis_project 构建普通地图。",
     "纸面坐标单位是毫米(mm)，字体单位是 pt；extent 使用 Scene.crs 的坐标单位。"
@@ -48,9 +62,10 @@ NATIVE_CARTOGRAPHY_CAUTIONS = (
     "页面从底到顶声明 layer id；extent 与 focus_layers 二选一。table.layer 必须是"
     "实际 Layer.id；分类图例 categories 必须覆盖实际字段值，不能写占位符。",
     "首次传完整 scene；之后用返回的 scene_ref + edits 按稳定 id 合并修改，不要重复"
-    "整套 scene。渲染返回 layout.problems 与 page_previews，先修确定缺陷再审图。",
-    "geo_map_review(all_pages=true) 只读取实际页面像素并登记审查；不改图。"
-    "全部必要页面通过且没有待处置问题后，geo_deliver 才生成一次可编辑工程。",
+    "整套 scene。渲染返回 layout.problems 与 page_previews。"
+    "single_pass直接审图一轮后合并处理严重问题；strict才先修确定缺陷再审图。",
+    "geo_map_review(all_pages=true)只读图片并登记审查，不改图。默认single_pass只做一轮，"
+    "最多修图一轮后直接交付；strict模式才要求全部页面通过并处置问题后生成工程。",
     "Page.layout自动编译图框/图例；label_offsets_mm与locator_pages处理文字/引线/范围框，"
     "不需要Python测图或复制辅助业务数据。验收职责写purpose/review_requirements，修复进度写repair_notes。",
     "首次render前一次核对所有Layer的实际字段/key/分类值/选集与事实绑定：子集不继承假想字段；"
@@ -70,7 +85,7 @@ NATIVE_CARTOGRAPHY_CAUTIONS = (
     "仅作报告/名册的其他产物不要无差别加入。若为新增编号复制key_numbered等矢量，"
     "它不会自动继承原文件的事实绑定；优先直接使用已发布源和已有主键标注，确需派生时"
     "重新发布该文件并核实来源关系，不把旧包强绑新文件。",
-    "审图达到上限是停止通知，不是待回答问题；停止自动改图/重审，整理现有草稿与严重问题，"
+    "strict模式审图达到上限是停止通知，不是待回答问题；停止自动改图/重审，整理现有草稿与严重问题，"
     "明确哪些页未完成，不反复要求用户回答通知或用继续重置次数。格式校验失败不同于网络超时。",
     "render失败也会返回包含本次edits的新scene_ref；下一次从该引用修正，不能退回旧引用"
     "撤销前次来源/字段修改。日期对象与日期字符串由工具统一比较，原始字段不改写。"
@@ -100,7 +115,7 @@ def invocation_guide(tool_name: str) -> str:
     rules = (PYTHON_CAUTIONS if tool_name == "geo_python" else
              NATIVE_CARTOGRAPHY_CAUTIONS if tool_name == "geo_cartography" else
              ("geo_qgis_project仅inspect读取用户已有或交付后的工程；project_path为真实.qgs/.qgz路径。",
-              "没有build/create/export动作。制图使用geo_cartography；审图通过后geo_deliver一次生成工程。"))
+              "没有build/create/export动作。制图使用geo_cartography；完成当前审图策略后geo_deliver一次生成工程。"))
     return "调用前注意事项（CALL-TIME CAUTIONS）：" + " ".join(rules)
 
 def section_cautions(section: str) -> list[str]:

@@ -1,0 +1,11 @@
+# 单轮审图及调用提示紧急修复（2026-10-20）
+
+当前任务SQLite的9项失败已去除包装操作重复计数：几何列丢失两次；跨调用别名失效；编造未登记data引用；缺少tabulate导致to_markdown失败；脚本json.dumps不能转换Timestamp；发布字段不在实际导出文件中；截短operation_id导致取证失败；把GeoDataFrame当作几何序列。
+
+对应中文规则已写入invocation.py共享调用指南，主系统提示与工具帮助均引用。Python控制台新增json_ready供脚本自行写JSON前转换。
+
+默认map_review.workflow=single_pass。工具以任务SQLite持久记录审查一轮、每页最多一次图片请求、最多一次集中修图。重复render复用产物，重复review不发请求。不再以布局碰撞阻塞首次像素检查，不因单轮上限设置无内容的用户待答问题。交付只放宽布局和视觉门槛，保留真实issues/unverified、剩余问题与修改后未复审；数据绑定、文件哈希、QGIS编译及重开检查保留。strict配置保留原多轮严格流程。
+
+极简验证：tests/test_single_pass_delivery.py通过（1项，20.39秒），真实原生三页渲染、模拟图片模型一轮、一次修图、重复拦截、重启读取SQLite状态、真实QGIS工程编译和交付。模拟审查不证明真实地图质量。未运行全套回归或真实视觉服务，业务测试由用户执行。
+
+安装完成：wheel SHA256 9c2051964c44910127eaafb8acb532191586599600a1b51c4e2a3b78ab6b40e7；137模块+34技能资源源码/包/实际安装零差异。Ruff、compileall、CLI dry-run（17工具）通过。用户config.yaml SHA保持9ef6ec325f390d529524a0874ac6ab62856cd8a9982a30d0580490f06ca51c5a。重启geoh run生效。

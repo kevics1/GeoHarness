@@ -39,12 +39,17 @@ async def materialize_scene(context, preview_dir):
         if receipt['selected_version'] != version:
             raise ValueError('准备交付期间候选版本已变化')
         stages = receipt['stages']
+        from geoharness.cartography.review_policy import delivery_authorization, state
+
+        policy_delivery = delivery_authorization(context.metadata, config, receipt)
+        required_stages = ('data_checked', 'rendered') if policy_delivery else (
+            'data_checked', 'layout_checked', 'visual_checked')
         if any(stages.get(k, {}).get('status') != 'passed'
-               for k in ('data_checked', 'layout_checked', 'visual_checked')):
+               for k in required_stages):
             raise ValueError('delivery_not_ready: 数据/布局/全部页面图片审查必须通过；'
                              '本次未启动QGIS、未生成工程')
         findings = pending_findings(context.metadata, cwd=context.cwd, map_ids={identity})
-        if findings:
+        if findings and not policy_delivery:
             raise ValueError('delivery_not_ready: 仍有待处置审图问题；用geo_task review_issues核实')
         plan_path = guard.read_path(str(root / 'scene-plan.json'))
         if _sha(plan_path) != manifest['scene_plan_sha256']:
@@ -147,6 +152,12 @@ async def materialize_scene(context, preview_dir):
                 'image_origin': 'reviewed_native_scene',
                 'project_validation': check, 'native_layers': check['layers'],
                 'files': sorted(set([*files, 'project.json']))}
+            if policy_delivery:
+                document.update(review_workflow='single_pass',
+                    delivery_authorization='user_requested_one_review',
+                    post_repair_visual_review='not_performed' if state(
+                        context.metadata).get('repair_rendered') else 'no_repair',
+                    image_origin='native_scene_single_pass_delivery')
             (final / 'project.json').write_text(json.dumps(document, ensure_ascii=False), 'utf-8')
             generated = {'project_dir': str(final), 'map_id': identity,
                 'selected_version': version, 'candidate': candidate}

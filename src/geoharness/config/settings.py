@@ -139,8 +139,11 @@ class MapLayout(BaseModel):
 
 
 class MapReviewConfig(BaseModel):
-    """Image-based review. Empty model/provider fields reuse the main model."""
+    """Image-based review. Empty provider fields reuse the main model."""
 
+    workflow: Literal['single_pass', 'strict'] = Field(default='single_pass',
+        description='single_pass：全册审查一轮、最多修图一轮后直接交付，保留真实质量状态；'
+                    'strict：逐页通过后才交付。')
     model_config = ConfigDict(frozen=True, extra="forbid")
     enabled: bool = True
     model: str = ""

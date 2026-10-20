@@ -117,7 +117,8 @@ async def review_pixels(path, *, arguments, context, identity, evidence):
         retry_invalid_response=arguments.retry_invalid_response)
     stage = result.diagnostics.get('failure_stage')
     # Recover the response contract here, without another main-model turn or any redraw.
-    if (stage in {'json', 'schema'} and config.map_review.recover_invalid_response
+    if (config.map_review.workflow != 'single_pass'
+            and stage in {'json', 'schema'} and config.map_review.recover_invalid_response
             and 'retry_invalid_response' not in arguments.model_fields_set
             and not flags.get('invalid_response_retry')):
         first_sent = bool(flags.get('request_sent'))
@@ -278,9 +279,9 @@ class GeoMapReviewTool(BaseTool):
         '直接复用，仅无有效证据页发给图片模型。page_checks按真实page_id持久修改验收要求。服务失败保持unve'
         'rified；先读request_sent和diagnostics再决定'
         '恢复，缓存/冷却命中不算新服务请求。'
-        '仅严重error阻止交付并允许返修；warning/info仅建议，不为留白或轻微拥挤反复重审。'
-        '默认每任务每页位3次、全任务12次实际请求，失败也计数，持久跨重启。'
-        'automatic_review_stopped=true必须停止自动改图/审图，报告现有成果和剩余问题。'
+        '默认single_pass：全册只审一轮，每页最多一次请求，最多合并修图一轮后直接交付。'
+        '不复审，局部标签碰撞不触发无限改图；保留真实issues/unverified及修改后未复审说明。'
+        'strict模式才按配置的逐页/全任务上限重审并要求通过。'
     )
     )
     input_model = GeoMapReviewInput
@@ -289,14 +290,53 @@ class GeoMapReviewTool(BaseTool):
         return True
 
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
+        from geoharness.cartography.review_policy import (
+            finish_review,
+            next_action,
+            single_pass,
+            state,
+        )
         from geoharness.cartography.workflow import repair_loop_lock
 
         # Serialize batch reports and ledger writes; no map mutation lock is acquired.
         async with repair_loop_lock(context.metadata, "pixel-review"):
+            once = single_pass(context.metadata['geoharness_config'])
+            if once and state(context.metadata).get('review_started'):
+                return ToolResult(output=json.dumps({'status': 'unverified',
+                    'review_workflow': 'single_pass', 'request_sent': False,
+                    'summary': '本任务已执行一轮审查，按用户策略不再复审；已有报告保留。',
+                    'delivery_authorized_by_policy': True,
+                    'next_action': next_action(context.metadata)}, ensure_ascii=False),
+                    metadata={'request_sent': False, 'review_status': 'unverified',
+                              'registration_status': 'not_applicable'})
+            if once:
+                arguments = arguments.model_copy(update={'all_pages': True,
+                    'review_layout_draft': True, 'retry_invalid_response': False,
+                    'retry_service_failure': False})
             if arguments.all_pages:
                 try:
-                    return await self._review_all_pages(arguments, context)
+                    result = await self._review_all_pages(arguments, context)
+                    if once and state(context.metadata).get('review_started'):
+                        try:
+                            body, _ = json.JSONDecoder().raw_decode(result.output.lstrip())
+                        except (ValueError, TypeError):
+                            body = {'status': 'unverified', 'summary': result.output[:500]}
+                        finish_review(context.metadata, status=body.get('status', 'unverified'))
+                        body.update(review_workflow='single_pass',
+                            delivery_authorized_by_policy=True,
+                            next_action=next_action(context.metadata))
+                        result = replace(result, output=json.dumps(body, ensure_ascii=False))
+                    return result
                 except (OSError, ValueError) as exc:
+                    if once and state(context.metadata).get('review_started'):
+                        finish_review(context.metadata, status='unverified')
+                        return ToolResult(output=json.dumps({
+                            'status': 'unverified', 'summary': str(exc)[:500],
+                            'review_workflow': 'single_pass',
+                            'delivery_authorized_by_policy': True,
+                            'next_action': next_action(context.metadata)}, ensure_ascii=False),
+                            metadata={'review_status': 'unverified',
+                                      'registration_status': 'not_applicable'})
                     return ToolResult(output=f"Batch review stopped ({type(exc).__name__}); "
                         "completed reports retained. Inspect the returned project/report files.",
                         is_error=True, metadata={"render_executed": False})
@@ -376,6 +416,12 @@ class GeoMapReviewTool(BaseTool):
         if unknown:
             raise ValueError("page_checks引用未知页面：" + ", ".join(unknown))
         single = arguments.model_copy(update={"all_pages": False, "auto_repair": False})
+        from geoharness.cartography.review_policy import claim_review, single_pass
+
+        if single_pass(config) and not claim_review(context.metadata, map_id=identity,
+                                                   pages=[n for n, _, _, _ in pages]):
+            return ToolResult(output=json.dumps({'status': 'unverified',
+                'summary': '本任务的单轮审查已使用，不再重审，继续交付。'}, ensure_ascii=False))
         summary, results = [], {}
         # Entries are visited in declared order. Existing evidence is checked
         # before any provider call; a service outage still stops later pages

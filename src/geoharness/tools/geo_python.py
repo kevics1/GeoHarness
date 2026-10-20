@@ -347,6 +347,7 @@ class GeoPythonInput(BaseModel):
         "业务结果在result.console_result返回，不必创建ok.json；print仅放少量诊断。"
         "Python后端自动转换NumPy/日期/Path和缺失值；超长JSON自动另存console-result.json，"
         "返回offloaded/file_path，不因返回内容过长重做分析。"
+        "自己print/写JSON时用json.dumps(json_ready(value),ensure_ascii=False,allow_nan=False)。"
     ))
 
     @field_validator('expected_outputs')

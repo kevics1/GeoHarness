@@ -35,6 +35,12 @@ def _usage(metadata):
 
 
 def _status(usage, settings, page=None):
+    if settings.workflow == 'single_pass':
+        return {'automatic_review_stopped': False, 'task_review_limit_reached': False,
+                'page_review_limit_reached': False, 'review_requests_used': usage['total'],
+                'page_review_requests_used': usage['pages'].get(str(page), 0),
+                'review_workflow': 'single_pass', 'next_action':
+                    '全册只审查一轮，最多修图一轮后直接交付，不复审。'}
     total_reached = usage['total'] >= settings.max_review_requests_per_task
     page_reached = usage['pages'].get(str(page), 0) >= settings.max_review_requests_per_page
     outcomes = usage.get('outcomes', {})
@@ -62,6 +68,17 @@ def reserve_review_request(metadata, config, *, page):
     """Reserve before awaiting transport, so concurrent calls cannot exceed the cap."""
     with _usage(metadata) as usage:
         status = _status(usage, config.map_review, page)
+        if config.map_review.workflow == 'single_pass':
+            policy = usage.setdefault('single_pass', {})
+            pages = policy.setdefault('requested_pages', [])
+            if str(page) in pages:
+                return False, {**status, 'review_budget_exhausted': True,
+                    'single_pass_no_repeat': True,
+                    'next_action': '本页已审查一次，不再复审，直接交付。'}
+            pages.append(str(page))
+            usage['total'] += 1
+            usage['pages'][str(page)] = usage['pages'].get(str(page), 0) + 1
+            return True, _status(usage, config.map_review, page)
         if status['task_review_limit_reached'] or status['page_review_limit_reached']:
             usage.setdefault('outcomes', {})[str(page)] = 'unverified'
             return False, {**status, 'automatic_review_stopped': True, 'next_action': STOP_MESSAGE}
@@ -84,3 +101,6 @@ def refund_review_request(metadata, *, page):
         key = str(page)
         usage['total'] = max(0, usage['total'] - 1)
         usage['pages'][key] = max(0, usage['pages'].get(key, 0) - 1)
+        pages = usage.get('single_pass', {}).get('requested_pages', [])
+        if key in pages:
+            pages.remove(key)

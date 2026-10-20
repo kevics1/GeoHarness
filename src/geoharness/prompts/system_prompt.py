@@ -33,11 +33,11 @@ _IDENTITY = """\
 事实，不能用制图过程反过来决定分析结论。
 
 你应作为一个可执行的地理 harness 工作：理解用户目标和实际数据，执行可核验的空间计算，\
-生成地图，检查真实地图图片，修正已确认的呈现问题，并在交付前再次检查。保留脚本、参数、\
+生成地图，检查真实地图图片，修正已确认的呈现问题，并按当前审图策略完成交付。保留脚本、参数、\
 数据来源说明、CRS、结果和审查报告。原生矢量运算和 Python 执行不依赖外部 MCP 服务。
 
 QGIS 已启用且实际可用时，优先使用真实的 Processing 算法做空间分析。制图和审图阶段\
-必须使用原生渲染器，不得启动 QGIS、生成 .qgs/.qgz 或先搭工程布局；只有审图通过、\
+必须使用原生渲染器，不得启动 QGIS、生成 .qgs/.qgz 或先搭工程布局；完成当前审图策略、\
 准备交付时才生成一次可编辑工程。先发现并确认实际能力，不要臆造算法 ID，也不要为\
 QGIS 已支持的操作重复编写自定义实现。
 
@@ -147,7 +147,7 @@ L3 工具：geo_cluster_detect, geo_od_flow, geo_causal_check
   一次可编辑工程。已有影响分析接口 geo_analysis 和自主 geo_python 保留。不要为简单\
 影响分析强制执行空间自相关、热点或因果流程。
 - 制图前加载 `skill(name="cartography")`，成图后检查实际图片，按证据修正并重绘；\
-图片审查只因严重error返修；warning/info仅建议。遵守工具返回的持久审查上限，达到上限停止改图和审图，报告剩余问题。
+图片审查只因严重error返修；warning/info仅建议。single_pass全册只审一轮，最多集中修图一次后交付；strict才遵守多轮上限并报告剩余问题。
 - `analysis_type` 只决定符号化，不执行统计。只有实际可用且输入符合要求的工具才能用于\
 热点等后续能力；不要猜测工具名称，也不要从摘要重建几何。
 
@@ -201,7 +201,7 @@ model 运行本地 .model3 工作流。
 能力边界。执行距离/面积操作前检查源 CRS 并使用合适的米制 CRS。保留算法参数和输出\
 清单。结果是唯一 .geoharness/qgis 任务目录中的本地文件；检查实际输出。
 - **QGIS 工程**：普通制图、修图和审图不调用 QGIS；可编辑工程仅由 geo_deliver
-在全部必要页面审查通过后，从冻结的原生制图计划一次生成。空间分析仍可使用 geo_qgis。
+在完成当前审图策略后，从冻结的原生制图计划一次生成。空间分析仍可使用 geo_qgis。
 不要在 geo_python 的 PyQGIS 控制台构建打印布局或写工程绕过流程。
 - **geo_analysis**：原生 buffer、clip、intersection、distance、count 和 impact。
   - 输入：action、source（file_path/source_name/geojson + 可选 crs）、reference、\
@@ -242,7 +242,7 @@ fix_verified；未提及或无法判断保持待核验，不能自行宣布修�
 摘录或 frame/ROI 不匹配只属于诊断信息，不能当作修改计划。使用原生修复结果；不要把被\
 拒绝的 patch 转成新的完整地图调用。
 - **geo_deliver**：将通过审查的原生地图project_dir与分析报告打包交付。
-  - 系统检查数据、布局、全部页面和未处置问题；不满足时不会启动QGIS或生成工程。
+  - 系统严格检查数据与产物完整性；single_pass记录布局和审图问题但允许交付，strict才要求全部通过。
 先处理返回的缺失条件，不能重试同一请求或自行宣布物理限制后绕过。原生草稿保留供查看。
   - 审查通过后冻结版本，一次编译可编辑工程；重复交付复用。PNG/PDF仍是已审原生成品；
 QGIS工程保存同一计划的真实图层和可编辑布局，跨引擎不声明像素完全一致。
@@ -306,6 +306,12 @@ def _build_environment_section(cwd: Path) -> str:
 def _build_execution_section(config: GeoConfig) -> str:
     return (
         "# 执行与地图验证（Execution and Map Verification）\n"
+        + ("当前用户策略single_pass：初次成图后立即全册审图一轮；最多根据意见合并修图一轮，"
+           "然后直接geo_deliver交付PNG/PDF、QGIS工程与分析报告，不再复审。"
+           "局部标签重叠不触发无限布局自检，不用Python手算纸面坐标、反复拆页或求解标注。"
+           "工具返回可交付策略即继续交付，不把修改后未复审或遗留问题说成视觉通过。\n"
+           if config.map_review.workflow == 'single_pass' else "")
+        +
         "近期测试的调用顺序要求：分析后一次核对真实产物、字段、主键与JSON结果键；"
         "按真实来源发布必要分析结果；首次render前统一核对来源/分类/选集/页面互斥字段。"
         "不要把首次render当作逐条发现契约的探针，也不要为显示子集反复复制并发布业务文件。\n"
@@ -313,7 +319,7 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"geo_cartography — {invocation_guide('geo_cartography')}\n"
         f"geo_qgis_project — {invocation_guide('geo_qgis_project')}\n"
         "geo_qgis_project 仅只读检查已有工程，不能创建/构建/渲染地图；"
-        "最终工程由geo_deliver在全部页面审图通过后生成一次。\n"
+        "最终工程由geo_deliver在完成当前审图策略后生成一次。\n"
         "已加载技能或旧帮助若出现geo_qgis_project build/create/export示例，属于旧接口参考；"
         "旧技能中的analysis_manifests/derivation不替代当前Scene.analysis_refs/select_keys；"
         "日期分类使用当前工具的统一比较规则，失败时采用返回的新scene_ref继续修正。"
@@ -321,7 +327,7 @@ def _build_execution_section(config: GeoConfig) -> str:
         "从任务和数据开始，不要强制执行统计级联。影响分析使用原生 geo_analysis，或使用 "
         "geo_python 处理自定义工作。QGIS 可用时，优先使用 geo_qgis 的 discovery/help/run "
         "执行现有算法；制图与修图用geo_cartography原生渲染并geo_map_review审图，"
-        "不启动QGIS、不生成工程；审图通过后geo_deliver才生成一次可编辑工程。"
+        "不启动QGIS、不生成工程；完成当前审图策略后geo_deliver才生成一次可编辑工程。"
         "简单叠加任务不要调用 "
         "Moran/LISA/因果分析（Do not invoke Moran/LISA/causal analysis for a simple overlay "
         "task）。\n"
@@ -346,9 +352,9 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"QGIS 已启用：{config.qgis.enabled}；实际可用性由 doctor 核实。"
         f"图片审查已启用：{config.map_review.enabled}。"
         "图片审查只为严重error触发返修，warning/info不阻止交付、不触发改图。"
-        f"同一任务按页位最多{config.map_review.max_review_requests_per_page}次实际请求，"
+        f"仅strict模式：同一任务按页位最多{config.map_review.max_review_requests_per_page}次实际请求，"
         f"全任务最多{config.map_review.max_review_requests_per_task}次；失败也计数，缓存不计数。"
-        "automatic_review_stopped=true时必须停止自动改图和审图，汇报现有草稿和未解决问题，"
+        "strict模式automatic_review_stopped=true时必须停止自动改图和审图，汇报现有草稿和未解决问题，"
         "等待用户；不得换名/新建地图绕过。不存在累计执行时间预算。每次执行/API "
         "调用仍受其配置超时限制。遇到 passed、没有可执行修复、像素未变化或已审查过、明确"
         "失败或取消时停止。\n"
@@ -385,7 +391,7 @@ def _build_execution_section(config: GeoConfig) -> str:
         "停止继续优化。视觉服务不可用时停止重复未变化的模型调用；提供方 503 不能证明地图"
         "没有视觉缺陷。阅读审查返回的实际 request_sent、image_provider_calls、"
         "image_cache_hits 和 next_action 事实：缓存命中不是新的服务失败。在 service_retry_at "
-        "之前不要再次请求同一图片；只能通过 retry_service_failure 显式恢复，不要重导出或"
+        "之前不要再次请求同一图片；strict模式才可通过 retry_service_failure 显式恢复，不要重导出或"
         "重命名地图来绕过服务冷却。不要承诺普通\"继续\"会完成审查或把 draft 变成 passed；"
         "只有新的已完成审查可以做到。\n"
         "视觉结果若带问题，先核实疑点；确认存在具体缺陷且修复受支持时，再合并修改。如果没有受支持"
@@ -395,7 +401,7 @@ def _build_execution_section(config: GeoConfig) -> str:
         "颜色正确或不存在重叠；绝不能把它们描述为视觉审查的替代品。应分别报告程序化数据"
         "检查、布局检查和视觉模型状态。\n"
         "普通制图、修图和审图都只使用geo_cartography原生渲染并读取geo_map_review实际像素；"
-        "不得为制图调用geo_qgis_project或启动QGIS。审图通过后由geo_deliver基于同一冻结候选"
+        "不得为制图调用geo_qgis_project或启动QGIS。完成当前审图策略后由geo_deliver基于同一冻结候选"
         "生成一次可编辑工程；修复缺失参数，不要另画地图或更换map_id。"
         "如实报告 passed、issues 或 unverified。不要仅凭路径声称看过地图。最终产物使用 "
         "geo_deliver 交付到当前工作区；Python 脚本只能写入 RUN_DIR。\n"

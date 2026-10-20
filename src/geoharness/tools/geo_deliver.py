@@ -49,7 +49,7 @@ class GeoDeliverInput(BaseModel):
         default="selected",
         description=(
         "可选，默认 selected。selected = 严格交付 primary_map/project_dir 对应的同一已登记"
-        "版本，绝不静默替换成历史候选；新原生候选须审图通过后才生成交付工程。"
+        "版本，绝不静默替换成历史候选；新原生候选完成当前审图策略后生成交付工程；single_pass允许保留问题交付。"
         "prefer_checked为兼容值，同样保留选择；未指定图片时使用当前版本。"
         "两者都不会伪造视觉通过。"
     ))
@@ -158,6 +158,10 @@ class GeoDeliverTool(BaseTool):
         config = context.metadata.get("geoharness_config")
         if config is None:
             return ToolResult(output="Error: GeoHarness config is missing.", is_error=True)
+        from geoharness.cartography.review_policy import delivery_authorization, single_pass
+
+        if single_pass(config):
+            arguments = arguments.model_copy(update={'version_policy': 'selected'})
         workspace = context.cwd.resolve()
         directory = Path(config.delivery.outputs_dir).expanduser()
         directory = (directory if directory.is_absolute() else workspace / directory).resolve()
@@ -379,11 +383,14 @@ class GeoDeliverTool(BaseTool):
 
                     approved = map_job_receipt(context.metadata, cwd=workspace, config=config,
                         artifact_path=project_root / recorded_project['preview'])
+                    policy_delivery = delivery_authorization(context.metadata, config, approved)
+                    required = ('data_checked', 'rendered', 'packaged') if policy_delivery else (
+                        'data_checked', 'layout_checked', 'visual_checked', 'packaged')
                     if (not approved.get('artifact_registered') or any(
                             approved.get('stages', {}).get(k, {}).get('status') != 'passed'
-                            for k in ('data_checked', 'layout_checked',
-                                      'visual_checked', 'packaged'))
-                            or pending_findings(context.metadata, cwd=workspace,
+                            for k in required)
+                            or not policy_delivery and pending_findings(
+                                context.metadata, cwd=workspace,
                                 map_ids={approved.get('job_id')})):
                         raise ValueError('delivery_not_ready: 最终工程的审查准入已失效，先核实问题')
                 if isinstance(recorded_project, dict) and recorded_project.get("backend") == "qgis":
@@ -709,6 +716,13 @@ class GeoDeliverTool(BaseTool):
                 payload['historical_findings'] = [item for item in pending if item not in current]
                 payload['finding_status'] = 'needs_explicit_disposition'
 
+            if recorded_project.get('review_workflow') == 'single_pass':
+                payload.update(review_workflow='single_pass',
+                    delivery_authorization='user_requested_one_review',
+                    post_repair_visual_review=recorded_project.get('post_repair_visual_review'))
+                if not payload['ledger_errors']:
+                    payload['next_action'] = (
+                        '交付已完成；不再自动改图或审图，遗留问题和未复审状态见交付清单。')
             payload.update(write_delivery_summary(
                 destination, payload, receipt,
                 manifest_path=destination / "project/project.json" if project_files else None,

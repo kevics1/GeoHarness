@@ -258,6 +258,11 @@ def build_delivery_summary(
               f"当前已列出{issue_count}项错误或警告，其他逐页限制见审查记录。分析科学正确性："
               f"{receipt.get('analysis_correctness', 'unverified')}。"
               "工程打包或文件存在不代表分析与视觉质量均已通过。")
+    if delivery.get('review_workflow') == 'single_pass':
+        notice += ('按用户单轮策略交付：全册只审一轮、最多修图一轮；'
+                   '修改后未复审，遗留问题保留。' if delivery.get(
+                       'post_repair_visual_review') == 'not_performed' else
+                   '按用户单轮策略交付；不追加自动审查，原检查状态与问题保留。')
     return {
         "schema_version": 1,
         "primary_map": primary,
