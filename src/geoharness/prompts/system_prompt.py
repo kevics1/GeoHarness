@@ -168,7 +168,7 @@ L2 统计工具（moran/getis_ord）接受 `geometries` 参数；直接传坐标
 _TOOL_CATALOG = """\
 # 工具目录（Tool Catalog）
 
-## 原生工具（10 个，另有 2 个可选 QGIS 工具）
+## 原生工具（以当前注册工具Schema为准）
 - **geo_task**：普通单步直接调用原生工具，系统自动登记、执行和复用，无需先plan再run。
 需要明确多步依赖时用plan增量提交稳定节点ID、arguments和depends_on，再用run执行就绪链；
 未列出的旧节点保留，只有replace_plan=true才整体替换。execute(node={...})可一次显式登记并执行。
@@ -315,6 +315,8 @@ def _build_execution_section(config: GeoConfig) -> str:
         "geo_qgis_project 仅只读检查已有工程，不能创建/构建/渲染地图；"
         "最终工程由geo_deliver在全部页面审图通过后生成一次。\n"
         "已加载技能或旧帮助若出现geo_qgis_project build/create/export示例，属于旧接口参考；"
+        "旧技能中的analysis_manifests/derivation不替代当前Scene.analysis_refs/select_keys；"
+        "日期分类使用当前工具的统一比较规则，失败时采用返回的新scene_ref继续修正。"
         "当前模型工具仅inspect，不要照旧示例调用。以本轮真实工具Schema和上述阶段契约为准。\n"
         "从任务和数据开始，不要强制执行统计级联。影响分析使用原生 geo_analysis，或使用 "
         "geo_python 处理自定义工作。QGIS 可用时，优先使用 geo_qgis 的 discovery/help/run "

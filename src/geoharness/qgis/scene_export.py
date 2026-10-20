@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -34,6 +35,51 @@ def frozen_palette(plan):
     return colors
 
 
+def equivalent_attribute(left, right):
+    """Permit only a few binary rounding units during provider serialization."""
+    if type(left) in (int, float) and type(right) in (int, float):
+        if left == right:
+            return True
+        if type(left) is int or type(right) is int:
+            return False
+        if isinstance(left, float) or isinstance(right, float):
+            a, b = float(left), float(right)
+            return (math.isfinite(a) and math.isfinite(b)
+                    and abs(a - b) <= 4 * max(math.ulp(a), math.ulp(b)))
+        return False
+    return type(left) is type(right) and str(left) == str(right)
+
+
+def validate_snapshot(original, snapshot, fields, layer_id):
+    """Match the full feature multiset, retaining strict geometry and text checks."""
+    def geometry_key(feature):
+        geometry = feature.geometry()
+        geometry.convertToMultiType()
+        return bytes(geometry.asWkb())
+
+    buckets = {}
+    for feature in snapshot.getFeatures():
+        buckets.setdefault(geometry_key(feature), []).append([feature[name] for name in fields])
+    for feature in original.getFeatures():
+        rows = buckets.get(geometry_key(feature), [])
+        values = [feature[name] for name in fields]
+        found = next((i for i, row in enumerate(rows)
+                      if all(equivalent_attribute(a, b) for a, b in zip(values, row))), None)
+        if found is None:
+            differences = ([{'field': name, 'source': str(a)[:160],
+                             'snapshot': str(b)[:160]}
+                            for name, a, b in zip(fields, values, rows[0])
+                            if not equivalent_attribute(a, b)] if rows else [])
+            raise ValueError('Snapshot differs from reviewed source: ' + json.dumps({
+                'layer_id': layer_id, 'feature_id': feature.id(),
+                'geometry_match': bool(rows), 'attribute_differences': differences[:8],
+                'recovery': '内部工程快照差异；不要修改无关业务图层或重复制图审图。'},
+                ensure_ascii=False))
+        rows.pop(found)
+    if any(buckets.values()):
+        raise ValueError('Snapshot has extra features: ' + layer_id)
+
+
 def dispatch(action, payload, context):
     from qgis.core import (
         QgsCategorizedSymbolRenderer,
@@ -59,7 +105,7 @@ def dispatch(action, payload, context):
         QgsVectorFileWriter,
         QgsVectorLayer,
     )
-    from qgis.PyQt.QtCore import QPointF
+    from qgis.PyQt.QtCore import QDate, QDateTime, QPointF, Qt
     from qgis.PyQt.QtGui import QFont, QFontDatabase, QPolygonF
 
     if action != 'native_scene_export':
@@ -155,7 +201,7 @@ def dispatch(action, payload, context):
                 if not layer.setSubsetString(expr):
                     raise ValueError('Could not apply frozen entity selection')
             fields = [f.name() for f in layer.fields()]
-            expected_features = fingerprint(layer, fields)
+            original_layer = layer
             destination = data_dir / f'{index}.gpkg'
             options = QgsVectorFileWriter.SaveVectorOptions()
             options.driverName, options.layerName = 'GPKG', 'features'
@@ -166,15 +212,31 @@ def dispatch(action, payload, context):
             layer = QgsVectorLayer(str(destination) + '|layername=features', layer.name(), 'ogr')
             if layer.featureCount() != source['feature_count']:
                 raise ValueError('Final project entity selection differs from reviewed scene')
-            if fingerprint(layer, fields) != expected_features:
-                raise ValueError('Snapshot geometry or attributes differ from reviewed source')
+            validate_snapshot(original_layer, layer, fields, source['id'])
+            # Once exported, reopening must match the snapshot exactly; the
+            # narrow numeric tolerance is only for crossing the file providers.
+            expected_features = fingerprint(layer, fields)
             kind = {0: 'point', 1: 'line', 2: 'polygon'}.get(int(layer.geometryType()))
             if kind is None:
                 raise ValueError('Unsupported geometry for editable scene')
             style = source['symbol']
             if style['categories']:
+                field = layer.fields().field(style['field'])
+
+                def category_native(value):
+                    if value is None or not isinstance(value, str):
+                        return value
+                    if field.typeName().lower() in {'datetime', 'timestamp'}:
+                        parsed = QDateTime.fromString(value, Qt.ISODate)
+                        if not parsed.isValid():
+                            raise ValueError('Invalid frozen datetime category: ' + value)
+                        return parsed
+                    if field.typeName().lower() == 'date':
+                        return QDate.fromString(value[:10], Qt.ISODate)
+                    return value
+
                 renderer = QgsCategorizedSymbolRenderer(style['field'], [QgsRendererCategory(
-                    c['value'], symbol(style, kind, c['color']), c['label'])
+                    category_native(c['value']), symbol(style, kind, c['color']), c['label'])
                     for c in style['categories']])
                 layer.setRenderer(renderer)
             else:

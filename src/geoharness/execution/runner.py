@@ -13,15 +13,50 @@ import codecs
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import sys
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+
+def json_console_value(value, depth=0):
+    """Convert known scalar/array values; never stringify GIS/dataframe objects."""
+    if depth > 32:
+        raise ValueError('CONSOLE_RESULT nesting exceeds 32 levels')
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Path):
+        return str(value)
+    if type(value).__name__ in {'NAType', 'NaTType'} and (
+            type(value).__module__.startswith('pandas')):
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            key = json_console_value(key, depth + 1)
+            if not isinstance(key, (str, int, float, bool, type(None))):
+                raise TypeError('CONSOLE_RESULT字典键必须是JSON标量')
+            key = key if isinstance(key, str) else json.dumps(key, allow_nan=False)
+            if key in result:
+                raise ValueError('CONSOLE_RESULT键转换后重复：' + key)
+            result[key] = json_console_value(item, depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [json_console_value(item, depth + 1) for item in value]
+    if type(value).__module__.startswith('numpy'):
+        return json_console_value(value.tolist() if hasattr(value, 'tolist') else value.item(),
+                                  depth + 1)
+    raise TypeError('CONSOLE_RESULT不支持' + type(value).__name__ + '；请另存文件返回路径')
 
 
 def _contracts():
@@ -996,13 +1031,23 @@ def _child_main() -> None:
     result_name = spec.get('result_variable', 'CONSOLE_RESULT')
     if result_name in namespace:
         try:
-            returned = json.dumps(namespace[result_name], ensure_ascii=False, allow_nan=False)
+            returned = json.dumps(json_console_value(namespace[result_name]),
+                                  ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise ValueError(f'{result_name} must contain JSON values, not native GIS/array '
                              'objects; convert scalar values or return a file reference') from exc
         if len(returned) > spec.get('result_max_chars', 12000):
-            raise ValueError(f'{result_name} exceeds configured max_output_chars; '
-                             'return a short summary and named artifacts')
+            artifact = run_dir / 'console-result.json'
+            if artifact.exists():
+                artifact = run_dir / ('console-result-' + uuid4().hex[:12] + '.json')
+            artifact.write_text(returned, encoding='utf-8')
+            original_result = json.loads(returned)
+            returned = json.dumps({'offloaded': True, 'file_path': str(artifact),
+                'characters': len(returned), 'item_count': len(original_result)
+                    if isinstance(original_result, (dict, list)) else None,
+                'keys': list(original_result)[:32] if isinstance(original_result, dict) else [],
+                'next_action': '完整JSON已保存且计算成功；只按需读取此文件，不要重做分析。'},
+                ensure_ascii=False)
         (run_dir / '.python-result.json').write_text(returned, encoding='utf-8')
     # Raw JSON/native writes also need a read-back check. Keep failed partial
     # files for diagnosis, but the parent never registers them as usable output.

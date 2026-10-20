@@ -345,6 +345,8 @@ class GeoPythonInput(BaseModel):
         "两个backend共用的可选返回变量名，默认 CONSOLE_RESULT；脚本可给该变量赋值，"
         "该值必须可 JSON 序列化，不能是 QGIS 原生对象、DataFrame 或不可序列化异常。"
         "业务结果在result.console_result返回，不必创建ok.json；print仅放少量诊断。"
+        "Python后端自动转换NumPy/日期/Path和缺失值；超长JSON自动另存console-result.json，"
+        "返回offloaded/file_path，不因返回内容过长重做分析。"
     ))
 
     @field_validator('expected_outputs')

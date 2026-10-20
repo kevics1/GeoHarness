@@ -104,6 +104,8 @@ class GeoNativeMapTool(BaseTool):
         from geoharness.cartography.scene_render import render_scene
         from geoharness.cartography.tracking import receipt_summary
 
+        reference = ''
+        identity = ''
         try:
             if arguments.action == 'help':
                 return ToolResult(output=json.dumps({
@@ -257,9 +259,13 @@ class GeoNativeMapTool(BaseTool):
         except (ValueError, OSError, KeyError, TypeError) as exc:
             return ToolResult(output=json.dumps({'status': 'failed', 'error_summary': str(exc),
                 'error_code': 'native_scene_contract',
+                **({'scene_ref': reference, 'map_id': identity,
+                    'inspect_call': {'action': 'inspect', 'scene_ref': reference},
+                    'retry_base': '此scene_ref包含本次已保存的edits；后续修正以它为基准，'
+                    '不要退回旧scene_ref丢失上次修改。'} if reference else {}),
                 'next_action': '只修正诊断字段或引用；保留已成功结果，不生成QGIS工程。'
                 '不清楚业务含义时询问用户。'}, ensure_ascii=False), is_error=True,
-                metadata={'render_executed': False})
+                metadata={'render_executed': False, 'scene_ref': reference, 'map_id': identity})
 
     def is_read_only(self, arguments):
         return arguments.action in {'inspect', 'help'}

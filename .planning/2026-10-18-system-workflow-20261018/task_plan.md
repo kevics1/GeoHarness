@@ -68,3 +68,5 @@ K轮 engineering_checked / real_delivery_completed（2026-10-20紧急修复）�
 L轮 engineering_checked / model_retest_pending（2026-10-20用户要求两个目录汇总写入提示词）：已对森林火灾保存片段42调用14错和改4多个已捕获任务错误归类，汇总为Python名称/JSON/时间/输入引用/几何/精度与制图来源/事实绑定/主键/互斥字段/模板规则，前置到主提示词、两个工具描述/help和对应Scene字段Schema。并修复同批浅复制metadata产生私有任务锁的真实缺陷，测试先复现maximum=2再修为1。源码54项39.08秒、实际安装15项8.67秒通过，136模块+34资源零差异，配置SHA保持；未重跑业务或审图，不声明实际模型错误率已下降。报告diagnostics/2026-10-20-python-cartography-prompt-cautions.md。
 
 M轮 engineering_checked / model_retest_pending（2026-10-20用户要求最新问题写提示词及修复无内容问答）：改5保存片段27调用5错；封顶由待回答问题改为独立停止状态，保留额度/草稿，旧会话迁移与显式原任务整理，人工提高配置后有额度才恢复。兼容误放issues.basis为severity_reason，真实保留passed/info响应离线复放成功；不改原任务通过状态。实际安装143项及两种停止路径2项通过（重叠不合计），136模块+34资源一致、CLI17工具通过、配置SHA保持。报告diagnostics/2026-10-20-review-stop-and-schema-repair.md。
+
+O轮 urgent_runtime_checked / user_business_test_pending（2026-10-20）：用户要求最快修改、可只检查运行。已安装工程浮点尾差/细化差异、日期分类统一、失败候选引用返回、Python标量标准化与超长结果自动文件化、授权字面路径与已登记动态助手绑定、当前提示词契约纠正。原失败行政区只读比较、QGIS日期API、真实隔离Python文件化、绑定与安装后失败引用运行检查通过；Ruff/compileall/dry-run17工具通过，136模块+34资源一致、配置不变。未跑完整pytest/真实视觉/业务交付；完整实际测试由用户执行。报告diagnostics/2026-10-20-urgent-runtime-hotfix.md。

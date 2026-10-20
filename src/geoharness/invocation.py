@@ -20,12 +20,18 @@ PYTHON_CAUTIONS = (
     "CONSOLE_RESULT只放有界JSON：NumPy标量用.item()，数组用.tolist()，日期用.isoformat()，"
     "Path用str()，NA/NaN等缺失值转None而非0；GeoDataFrame/geometry另存文件并返回真实路径，"
     "不能原样塞进结果。",
-    "input_refs绑定具体文件，动态循环读取也须声明全部依赖；RUN_DIR是目录，manifest_path是文件，"
+    "已登记read_vector/read_raster动态循环可自动绑定；其他动态文件读取须用input_refs声明"
+    "具体文件；精确字面文件路径在授权范围内自动绑定。RUN_DIR是目录，manifest_path是文件，"
     "不得把二者当业务输入文件/目录互换。data:引用逐字复制实际返回值，不编造哈希；"
     "Windows字面路径用正斜杠或原始字符串，避免反斜杠r/t/n变控制字符。",
     "距离/面积原值保留完整精度，不在分析字段round取整，显示格式交给制图；缓冲/叠置后先查"
     "is_valid，出现自交须核实并修复几何再写输出，保留来源，不用忽略错误代替修复。"
     "同任务geo_python/发布/制图写操作串行；锁冲突先读状态，不新建任务或重复执行分析。",
+    "Python后端会转换常见NumPy/日期/Path/缺失值；超长CONSOLE_RESULT自动保存为"
+    "console-result.json并返回offloaded/file_path，计算仍成功，不要重做。"
+    "排错读取台账用geo_task(action=evidence,operation_id=...,section=result)，"
+    "不要Python读取tasks/evidence；scene-plan.json是文件而非目录。"
+    "publish_analysis的scope_name若需填写放在facts内，不能猜顶层字段，以当前Schema为准。",
     "最新实测：动态循环读取前把全部文件逐项放input_refs；从时间索引生成t0/t1等列后，"
     "在筛列/merge后的实际对象检查columns，不能假定这些列仍存在。数值索引可能因赋值变成"
     "float，f't{0.0}'得到t0.0而非t0；确认整数语义后统一int再生成/读取列名。"
@@ -66,6 +72,9 @@ NATIVE_CARTOGRAPHY_CAUTIONS = (
     "重新发布该文件并核实来源关系，不把旧包强绑新文件。",
     "审图达到上限是停止通知，不是待回答问题；停止自动改图/重审，整理现有草稿与严重问题，"
     "明确哪些页未完成，不反复要求用户回答通知或用继续重置次数。格式校验失败不同于网络超时。",
+    "render失败也会返回包含本次edits的新scene_ref；下一次从该引用修正，不能退回旧引用"
+    "撤销前次来源/字段修改。日期对象与日期字符串由工具统一比较，原始字段不改写。"
+    "工程导出失败查看返回的layer_id/attribute_differences，不靠重做子集或审图修内部编译器。",
 )
 
 QGIS_CAUTIONS = (

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 from pathlib import Path
 
@@ -17,6 +18,7 @@ def bind_managed_inputs(arguments, context):
 
     tree = ast.parse(arguments.code)
     values, imports, reads = {}, {}, []
+    registered_helpers_only = True
 
     def literal(node):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -60,13 +62,22 @@ def bind_managed_inputs(arguments, context):
         if name in {'read_vector', 'resolve_data', 'read_raster', 'mask_raster',
                     'raster_backdrop', 'sample_raster_points', 'native_layer',
                     'geopandas.read_file', 'pandas.read_csv', 'rasterio.open'}:
-            reads.append(literal(node.args[0]))
-    if any(value is None for value in reads) and not arguments.input_refs:
-        raise ValueError('动态业务读取需要input_refs；系统不会猜测变量最终指向哪个文件。')
+            value = literal(node.args[0])
+            reads.append(value)
+            if value is None and name not in {'read_vector', 'resolve_data', 'read_raster'}:
+                registered_helpers_only = False
     config, cwd = context.metadata['geoharness_config'], Path(context.cwd)
     records = data_ref_snapshot(context.metadata, cwd=cwd, config=config)
     bindings = dict(arguments.input_refs)
     requirements = dict(arguments.input_requirements)
+    if any(value is None for value in reads) and not bindings:
+        if not registered_helpers_only or not records or len(records) > 64:
+            raise ValueError('动态文件读取需要input_refs；请逐项声明文件。'
+                             '已登记数据的read_vector/read_raster循环可自动绑定。')
+        # Dynamic helper reads can only resolve the existing catalog. Bind the
+        # full catalog conservatively; runtime still checks the actual reads.
+        bindings.update({f'catalog_{index}': record['ref']
+                         for index, record in enumerate(records.values())})
     for value in dict.fromkeys(v for v in reads if v is not None):
         try:
             record = lookup_reference(value, records)
@@ -82,6 +93,17 @@ def bind_managed_inputs(arguments, context):
                 # only as the resolved file value. Never send a valid declared
                 # input to an unregistered-reference precondition failure.
                 if explicit or value in bindings:
+                    continue
+                if target.is_file():
+                    from geoharness.qgis.worker_context import WorkerContext
+                    from geoharness.tools.geo_qgis import qgis_read_roots
+
+                    # An exact literal file is not a guessed reference. Apply
+                    # the same authorized roots and normal file validation.
+                    target = WorkerContext(cwd, cwd, qgis_read_roots(config, cwd)).read_path(
+                        str(target))
+                    alias = 'file_' + hashlib.sha256(str(target).encode()).hexdigest()[:16]
+                    bindings[alias] = str(target)
                     continue
                 raise ValueError(f'读取引用未登记或不唯一：{value!r}；'
                                  '请inspect数据或声明input_refs。')

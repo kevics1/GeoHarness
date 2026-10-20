@@ -14,6 +14,25 @@ from geoharness.cartography.scene import digest, directory
 _DRAW_LOCK = threading.RLock()  # Matplotlib's font/layout state is process-global.
 
 
+def category_value(value):
+    """Use one comparable JSON value for date objects and date-shaped strings."""
+    from datetime import date, datetime
+
+    import pandas as pd
+
+    if pd.isna(value):
+        return None
+    if isinstance(value, (datetime, date, pd.Timestamp)) or (
+            isinstance(value, str) and re.fullmatch(
+                r'\d{4}[-/]\d{2}[-/]\d{2}(?:[ T]\d{2}:\d{2}'
+                r'(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?', value)):
+        try:
+            return pd.Timestamp(value).isoformat()
+        except (ValueError, TypeError):
+            pass
+    return value
+
+
 def _sha(path):
     import hashlib
 
@@ -108,14 +127,25 @@ def _sources(scene, context):
         if source.symbol.categories:
             if not source.symbol.field:
                 raise ValueError('categories必须声明真实field')
-            declared = [v.value for v in source.symbol.categories]
+            declared = [category_value(v.value) for v in source.symbol.categories]
             if len({json.dumps(v, sort_keys=True) for v in declared}) != len(declared):
                 raise ValueError('分类值不能重复')
             for value in frame[source.symbol.field]:
-                import pandas as pd
-
-                if not any((pd.isna(value) and c is None) or value == c for c in declared):
-                    raise ValueError(f'图层{source.id}分类未声明：{value!r}')
+                if category_value(value) not in declared:
+                    actual = list(dict.fromkeys(category_value(v)
+                                                for v in frame[source.symbol.field]))
+                    raise ValueError(f'图层{source.id}分类未声明：{value!r}；'
+                                     f'实际可用分类值：{actual[:32]}')
+            # Freeze categories in the provider's actual type/spelling so the
+            # final editable QGIS renderer matches the original field as well.
+            actual_values = list(frame[source.symbol.field])
+            for category in packed['symbol']['categories']:
+                actual = next((v for v in actual_values
+                               if category_value(v) == category_value(category['value'])),
+                              category['value'])
+                category['value'] = (actual if isinstance(actual, str) else
+                    actual.isoformat() if hasattr(actual, 'isoformat') else
+                    actual.item() if hasattr(actual, 'item') else category_value(actual))
         frames[source.id] = frame.to_crs(scene.crs)
         packed.update(crs=str(original.crs), feature_count=len(frame),
             source_feature_count=len(original), data_sha256=digest(layer_inventory))
@@ -156,13 +186,12 @@ def _bounds(page, frames, scene):
 
 
 def _colors(layer, frame):
-    import pandas as pd
-
     categories = layer['symbol']['categories']
     if not categories:
         return [layer['symbol']['color']] * len(frame)
-    return [next(c['color'] for c in categories if (pd.isna(v) and c['value'] is None)
-        or v == c['value']) for v in frame[layer['symbol']['field']]]
+    return [next(c['color'] for c in categories
+                 if category_value(v) == category_value(c['value']))
+            for v in frame[layer['symbol']['field']]]
 
 
 def _rgba(color, opacity=1):
