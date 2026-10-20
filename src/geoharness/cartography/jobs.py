@@ -876,7 +876,7 @@ def record_map_review(
         )
         issues = review.get("issues", [])
         issue = isinstance(issues, list) and any(
-            isinstance(item, dict) and item.get("severity") in {"warning", "error"}
+            isinstance(item, dict) and item.get("severity") == "error"
             for item in issues
         )
         patch = review.get("layout_patch", {})

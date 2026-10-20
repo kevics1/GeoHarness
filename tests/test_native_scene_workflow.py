@@ -164,6 +164,13 @@ async def test_reviewed_native_scene_generates_editable_project_once(tmp_path, w
                                                      ).hexdigest()}}})
     before = len(list(tmp_path.rglob('*.qgz')))
     assert before == 0
+    from geoharness.cartography.review_limits import reserve_review_request, review_limit_status
+
+    # Exhausting review attempts forbids more redraws, but must not reject an
+    # already fully approved candidate or cause a second project compilation.
+    for _ in range(3):
+        assert reserve_review_request(context.metadata, config, page=0)[0]
+    assert review_limit_status(context.metadata, config)['automatic_review_stopped']
     args = GeoDeliverInput(project_dir=str(root))
     first = await GeoDeliverTool().execute(args, context)
     assert not first.is_error, first.output

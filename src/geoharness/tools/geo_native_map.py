@@ -192,6 +192,18 @@ class GeoNativeMapTool(BaseTool):
                     'render_call': {'action': 'render', 'scene_ref': reference}},
                     ensure_ascii=False), metadata={'scene_ref': reference, 'map_id': identity})
             async with map_mutation(context, map_id=identity, operation='native_scene_render'):
+                from geoharness.cartography.review_limits import (
+                    STOP_MESSAGE,
+                    review_limit_status,
+                )
+
+                limit = review_limit_status(context.metadata, config)
+                if limit['automatic_review_stopped']:
+                    return ToolResult(output=json.dumps({**limit,
+                        'status': 'automatic_review_stopped', 'summary': STOP_MESSAGE},
+                        ensure_ascii=False), metadata={
+                        **limit, 'status': 'automatic_review_stopped',
+                        'render_executed': False, 'scene_ref': reference, 'map_id': identity})
                 # Cancellation drains the thread before releasing the mutation lease.
                 pending = asyncio.create_task(asyncio.to_thread(render_scene, scene, reference,
                                                                  context))

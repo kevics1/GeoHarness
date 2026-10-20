@@ -115,6 +115,30 @@ class ProbeClient:
         )
 
 
+async def test_review_limit_pauses_before_another_main_model_request(tmp_path):
+    class ReviewTool(ProbeTool):
+        name = 'geo_map_review'
+
+        async def execute(self, arguments, context):
+            self.calls += 1
+            return ToolResult(output=json.dumps({'status': 'issues',
+                'automatic_review_stopped': True, 'summary': '严重缺陷未解决'}))
+
+    class ReviewClient(ProbeClient):
+        async def stream_message(self, request):
+            self.calls += 1
+            assert self.calls == 1, '上限后不应再请求主模型继续修图'
+            yield ApiMessageCompleteEvent(message=ConversationMessage(role='assistant', content=[
+                ToolUseBlock(id='review-cap', name='geo_map_review', input={})]),
+                usage=UsageSnapshot(), stop_reason='tool_calls')
+
+    client, tool = ReviewClient(), ReviewTool()
+    runtime = engine(tmp_path, client, tool, turns=1)
+    events = [event async for event in runtime.submit_message('检查地图')]
+    assert client.calls == tool.calls == 1
+    assert any(isinstance(e, StatusEvent) and '已达到自动审图上限' in e.message for e in events)
+
+
 def engine(tmp_path, client, tool, *, turns=1):
     registry = ToolRegistry()
     registry.register(tool)

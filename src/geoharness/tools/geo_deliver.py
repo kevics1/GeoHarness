@@ -507,7 +507,7 @@ class GeoDeliverTool(BaseTool):
             if (
                 review
                 and review.status == "passed"
-                and any(issue.severity in {"error", "warning"} for issue in review.issues)
+                and any(issue.severity == "error" for issue in review.issues)
             ):
                 review_status = "issues"
             if (
@@ -842,7 +842,7 @@ class GeoDeliverTool(BaseTool):
             'manifest_path', 'receipt_status', 'delivery_status', 'finding_status', 'files')
             if key in result}
         visible['file_count'] = len(result.get('files', []))
-        visible['current_issue_count'] = sum(i.get('severity') in {'error', 'warning'}
+        visible['current_issue_count'] = sum(i.get('severity') == 'error'
             for i in result.get('remaining_issues', []))
         visible['historical_finding_count'] = len(result.get('historical_findings', []))
         visible['next_action'] = '依据summary.json/summary.md中的实际版本、页面和事实说明交付。'

@@ -147,7 +147,7 @@ L3 工具：geo_cluster_detect, geo_od_flow, geo_causal_check
   一次可编辑工程。已有影响分析接口 geo_analysis 和自主 geo_python 保留。不要为简单\
 影响分析强制执行空间自相关、热点或因果流程。
 - 制图前加载 `skill(name="cartography")`，成图后检查实际图片，按证据修正并重绘；\
-无版数上限，按实际停止条件结束。
+图片审查只因严重error返修；warning/info仅建议。遵守工具返回的持久审查上限，达到上限停止改图和审图，报告剩余问题。
 - `analysis_type` 只决定符号化，不执行统计。只有实际可用且输入符合要求的工具才能用于\
 热点等后续能力；不要猜测工具名称，也不要从摘要重建几何。
 
@@ -340,7 +340,11 @@ def _build_execution_section(config: GeoConfig) -> str:
         f"Python 已启用：{config.execution.enabled}。"
         f"QGIS 已启用：{config.qgis.enabled}；实际可用性由 doctor 核实。"
         f"图片审查已启用：{config.map_review.enabled}。"
-        "地图生成、呈现修复和图片审查次数不设上限；不存在累计审查时间预算。每次执行/API "
+        "图片审查只为严重error触发返修，warning/info不阻止交付、不触发改图。"
+        f"同一任务按页位最多{config.map_review.max_review_requests_per_page}次实际请求，"
+        f"全任务最多{config.map_review.max_review_requests_per_task}次；失败也计数，缓存不计数。"
+        "automatic_review_stopped=true时必须停止自动改图和审图，汇报现有草稿和未解决问题，"
+        "等待用户；不得换名/新建地图绕过。不存在累计执行时间预算。每次执行/API "
         "调用仍受其配置超时限制。遇到 passed、没有可执行修复、像素未变化或已审查过、明确"
         "失败或取消时停止。\n"
         "首次制图前准备标题、图例、图层、范围和可读标注，用geo_cartography(action=render,"

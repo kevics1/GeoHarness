@@ -1621,7 +1621,10 @@ class GeoQgisProjectTool(BaseTool):
                                         project_path)
             except (OSError, ValueError) as exc:
                 return ToolResult(output=f"Error: map task could not start: {exc}", is_error=True)
-            reserve_map_render(identity, context.metadata, config)
+            if stopped := reserve_map_render(identity, context.metadata, config):
+                result = {'status': 'automatic_review_stopped', 'automatic_review_stopped': True,
+                          'summary': stopped, 'render_executed': False}
+                return ToolResult(output=json.dumps(result, ensure_ascii=False), metadata=result)
         payload["map_id"] = identity
         payload['_page_reuse'] = list(context.metadata.get('geo_page_reuse', {}).get(
             identity, {}).values())

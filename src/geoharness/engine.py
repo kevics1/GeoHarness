@@ -194,9 +194,20 @@ class GeoQueryEngine(QueryEngine):
                             count = counts.setdefault(event.tool_name, {'calls': 0, 'errors': 0})
                             count['calls'] += 1
                             count['errors'] += int(event.is_error)
-                            if event.tool_name == 'geo_map_review' and not event.is_error:
+                            if (event.tool_name in {'geo_map_review', 'geo_cartography',
+                                                   'geo_python', 'geo_qgis_project'}
+                                    and not event.is_error):
                                 try:
                                     review, _ = json.JSONDecoder().raw_decode(event.output.lstrip())
+                                    stopped = review.get('automatic_review_stopped') or review.get(
+                                        'diagnostics', {}).get('automatic_review_stopped')
+                                    if stopped and review.get('status') != 'passed':
+                                        from geoharness.cartography.review_limits import (
+                                            STOP_MESSAGE,
+                                        )
+
+                                        self.tool_metadata['geo_clarification']['pending'] = {
+                                            'question': STOP_MESSAGE}
                                     progress = review.get('diagnostics', {}).get(
                                         'repair_progress', {})
                                     if progress.get('requires_user_decision') is True:

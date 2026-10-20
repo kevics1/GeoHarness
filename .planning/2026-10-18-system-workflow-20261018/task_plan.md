@@ -58,3 +58,7 @@ H轮 engineering_checked / business_acceptance_pending：H1–H4已实施并安�
 I轮 implementation_in_progress（2026-10-20用户授权）：以最新57分33秒会话为基线。I1目标节点依赖与同轮文件校验；I2纸面布局编译、真实区域合同；I3稳定页ID问题/区域迁移与退役；I4验收要求与修复备注分离、观察与裁决；I5真实链、回归、独立审查、wheel/安装/CLI。主模型high及视觉/用户配置保持，不设时间或调用硬上限。
 
 I轮 engineering_checked / business_acceptance_pending：I1–I4实现并安装；I5工程链及发布检查完成，有效独立审查仍缺失。扩大源码141项、集成wheel24项、最终wheel14项、实际安装9项通过，计数重叠不合计；135模块+34资源零差异，CLI17工具通过。受控实际视觉三页通过、重建任务后零请求复用真实三份报告；此前总览warning原报告保留，不能称视觉模型零误判。真实完整high主模型业务对话耗时仍待新会话验收，20分钟不是硬预算。详见diagnostics/2026-10-20-review-system-repair-validation.md。
+
+J轮 implementation_in_progress（2026-10-20用户新要求，覆盖H/I轮不设审图上限的旧约定）：仅严重error触发自动返修；warning/info保留建议且不阻断。默认同任务每页位最多3次实际图片请求、全任务12次，失败计数、缓存免费、任务SQLite持久化；达到上限停止自动绘图/重审并保留未通过草稿，不能伪造通过。更新工具/主模型提示词/调度停止门，验证并准备简单与复杂两个可复现案例。20分钟仍不是执行预算。
+
+J轮 engineering_checked / full_business_acceptance_pending：严重error唯一返修/阻断门槛，warning/info保留建议；默认3次/任务页位、12次/任务的实际请求上限已持久化、原子预留并接入绘图与自动续跑停止。缓存/冷却免费、失败计数；封顶页最后一次通过不阻止其他有额度页及已通过候选交付。源码扩大121项、最终差异24项、最终实际安装18项通过，组间重叠不合计；136模块+34资源零差异，CLI17工具通过。实际视觉合成单页1请求通过，留白/轻微符号贴近为info无返修。简单/复杂两个合成案例及独立答案已生成，140条实体距离独立核对。配置只新增两个上限键，其余解析值相等、主模型high/视觉配置保持；.env.example/原始业务输入未修改。完整主模型耗时和有效独立审查仍待验收。报告diagnostics/2026-10-20-severe-review-limits.md。

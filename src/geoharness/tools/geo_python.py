@@ -617,13 +617,17 @@ class GeoPythonTool(BaseTool):
         identity = arguments.map_id or map_identity(arguments.name)
         state = context.metadata.get("map_workflow_state", {})
         previous_renders = state.get("maps", {}).get(identity, {}).get("renders", 0)
-        reserve_python_render(
+        stopped = reserve_python_render(
             code=arguments.code,
             name=arguments.name,
             map_id=arguments.map_id,
             metadata=context.metadata,
             config=config,
         )
+        if stopped:
+            payload = {'status': 'automatic_review_stopped', 'automatic_review_stopped': True,
+                       'summary': stopped, 'script_executed': False, 'render_executed': False}
+            return ToolResult(output=json.dumps(payload, ensure_ascii=False), metadata=payload)
         reserved = (
             context.metadata.get("map_workflow_state", {})
             .get("maps", {})

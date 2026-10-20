@@ -125,7 +125,7 @@ def observe_findings(metadata, *, cwd, map_id, page_index, image_sha256, review,
                     if item['map_id'] == map_id and _same_page(item, page_id, page_index)]
         current = []
         for issue in review.get('issues', []) if review.get('status') == 'issues' else []:
-            if issue.get('severity') not in {'warning', 'error'}:
+            if issue.get('severity') != 'error':
                 continue
             issue = {key: value for key, value in issue.items()
                      if key not in {'issue_id', 'state', 'map_id', 'page_index'}}
@@ -164,6 +164,7 @@ def observe_findings(metadata, *, cwd, map_id, page_index, image_sha256, review,
         _save(db, findings)
     open_items = [item for item in findings.values() if item['map_id'] == map_id
                   and _same_page(item, page_id, page_index)
+                  and item['issue'].get('severity') == 'error'
                   and item['state'] not in {'dismissed', 'fix_verified'}]
     return {'current': [{'issue_id': i['issue_id'], 'state': i['state'], 'issue': i['issue']}
                         for i in current], 'open_count': len(open_items),
@@ -236,7 +237,7 @@ def pending_findings(metadata, *, cwd, map_ids):
     pending = []
     for item in findings.values():
         if (item['map_id'] not in identities or item['state'] in {'dismissed', 'fix_verified'}
-                or item.get('page_active') is False):
+                or item.get('page_active') is False or item['issue'].get('severity') != 'error'):
             continue
         # The visual model may return an empty issue_id. Spread first, then restore
         # system-owned identity/state/page/version fields so whitespace or an empty
@@ -261,6 +262,7 @@ def pending_page_targets(metadata, *, cwd, map_id, page_index, page_id='', page_
         findings = _load(db)
     targets = [dict(item) for item in findings.values()
                if item['map_id'] == map_id and _same_page(item, page_id, page_index)
+               and item['issue'].get('severity') == 'error'
                and item['state'] not in {'dismissed', 'fix_verified'}]
     for item in targets:
         old, current = item.get('page_contract') or {}, page_contract or {}
@@ -321,7 +323,7 @@ def apply_targeted_assessments(metadata, *, cwd, map_id, page_index, image_path,
                     or any(_same_concern(target['issue'], _located_issue(issue, review,
                                current.get('page_contract') or {}))
                            for issue in review.get('issues', [])
-                           if issue.get('severity') in {'warning', 'error'})):
+                           if issue.get('severity') == 'error')):
                 continue
             nondefect = assessment['state'] == 'not_a_defect'
             if nondefect and assessment.get('basis') not in {

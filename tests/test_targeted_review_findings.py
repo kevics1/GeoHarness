@@ -26,7 +26,7 @@ class Reviewer:
             "summary": "模拟像素复核",
             "issues": [
                 {
-                    "severity": "warning",
+                    "severity": "error",
                     "description": "北侧编号重叠",
                     "issue_code": "label_overlap",
                     "location": "北侧",
@@ -52,6 +52,12 @@ class Reviewer:
 
 async def test_new_pixels_explicit_assessment_closes_finding_only_after_committed_report(tmp_path):
     context, scene = setup(tmp_path)
+    # Four distinct assessment outcomes are the subject of this test.
+    from dataclasses import replace
+
+    config = context.metadata['geoharness_config']
+    context.metadata['geoharness_config'] = replace(config,
+        map_review=config.map_review.model_copy(update={'max_review_requests_per_page': 4}))
     begin_task(context.metadata, cwd=tmp_path, goal="验证问题闭环")
     native, review = GeoNativeMapTool(), GeoMapReviewTool()
     first = await native.execute(NativeMapInput(action="render", scene=scene), context)

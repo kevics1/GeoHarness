@@ -183,7 +183,7 @@ def distinguish_pixel_findings(result):
     for issue in result.issues:
         outside = issue.assessment_scope != 'current_page'
         no_impact = issue.reading_impact == 'none'
-        if issue.reading_impact == 'uncertain' and not outside:
+        if issue.reading_impact == 'uncertain' and not outside and issue.severity == 'error':
             uncertain.append(issue.model_dump())
         if (issue.evidence_kind in {'semantic', 'suggestion'} or outside or no_impact
                 or issue.reading_impact == 'uncertain') and issue.severity != 'info':
@@ -202,6 +202,12 @@ def distinguish_pixel_findings(result):
             result.status = 'unverified'
         result.diagnostics['uncertain_pixel_observations'] = uncertain
         result.limitations.append('存在无法确证的关键像素观察；保持unverified，不以猜测升级为通过。')
+    # The automatic repair gate is deliberately severe-only. Preserve all
+    # warnings in the report, but never spend another render/review on cosmetics.
+    result.diagnostics['acceptance_policy'] = 'severe_only_v1'
+    result.diagnostics['advisory_count'] = sum(i.severity == 'warning' for i in result.issues)
+    if result.status == 'issues' and not any(i.severity == 'error' for i in result.issues):
+        result.status = 'unverified' if uncertain or not result.issues else 'passed'
 
 
 def resolve_issue_roi(issue: MapIssue, rois: list[dict]) -> dict:
@@ -754,13 +760,14 @@ async def review_map(
         "不要把制图风格偏好当作错误。不能判断的部分说明未知。"
         "需要修正时只建议可确认的呈现参数；禁止换数据、改统计方法/字段/阈值。"
         "集中解决标签/符号与线路、主体面压盖、过大空白和底栏密集；不要只放大所有符号。"
-        "密集区已有可见遮挡时可立即建议下一版加详图或分图；制图版本不设数量限制。"
+        "仅严重可见缺陷允许建议返修，遵守持久审图请求上限；warning/info仅建议。"
         "使用issue_code标识具体问题；若previous_visual_reviews有同类问题仍未解决且"
         "next_strategy应明确提出当前请求内下一版的可实施策略。"
         "详图/分图必须保留必要图层、分类与分析口径，范围须由实际坐标证据确定；"
         "不要从图片编造坐标或静默删层。"
         "无法靠呈现参数修复的问题保留在issues。"
-        "passed仅在没有error或warning且可完成视觉检查时使用；否则issues或unverified。"
+        "仅严重error时为issues；完成检查且无严重error时为passed，允许warning/info。"
+        "关键内容无法检查则unverified，不猜测。"
         "summary不超过80个汉字，issues最多5条，每条description不超过60个汉字。"
         "不要复述任务/图层列表，语言混用等风格偏好不能独立判为warning。"
         "每个可修复问题必须给唯一issue_id、frame_id、roi_ref、原图ROI内归一化bbox、"
@@ -1013,7 +1020,7 @@ async def review_map(
         diagnostics["raw_review_status"] = result.status
         if pixel_only:
             distinguish_pixel_findings(result)
-        actionable = any(issue.severity in {"error", "warning"} for issue in result.issues)
+        actionable = any(issue.severity == "error" for issue in result.issues)
         if (backend != "matplotlib" or not actionable) and (
             result.layout_patch.model_dump(exclude_none=True)
         ):
@@ -1037,7 +1044,7 @@ async def review_map(
             diagnostics["ignored_next_strategy"] = result.next_strategy.model_dump()
             result.next_strategy = None
         if result.status == "passed" and any(
-            issue.severity in {"error", "warning"} for issue in result.issues
+            issue.severity == "error" for issue in result.issues
         ):
             result.status = "issues"
         if not pixel_only:

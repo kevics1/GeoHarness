@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class PixelIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    severity: Literal["error", "warning", "info"]
+    severity: Literal["error", "warning", "info"] = Field(
+        description='error仅用于严重影响当前页核心阅读的可证缺陷并阻断；'
+                    'warning/info仅保留建议，不能触发自动返修。')
+    severity_reason: str = Field(default='', max_length=300,
+        description='error时说明为何严重影响本页必需内容；轻微拥挤、留白、风格偏好不成立。')
     description: str = Field(min_length=1, max_length=400)
     location: str = Field(default="", max_length=160)
     reading_impact: Literal['unspecified', 'none', 'unreadable', 'ambiguous', 'hidden',
@@ -138,7 +142,7 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
         "正常留白与风格偏好不单独判为错误。不能仅凭像素声称两点同址或数据重复。"
         "先区分观察与阅读影响：每个问题填写reading_impact和affected_content；"
         "留白、符号靠近、需沿引线阅读本身不等于无法辨认，正常情况reading_impact=none。"
-        "只有当前页必需内容确实不可读、归属有歧义、被遮住/裁切或图例误导时才报warning/error；"
+        "仅严重缺陷报error并阻止交付：主图空白、必需主题/大片重要内容缺失、关键文字整体不可读、图例与主题含义明显矛盾，或主要对象被遮住/裁切而无法判断。error必须给出具体affected_content、reading_impact和严重影响依据。轻微拥挤、局部小字号、留白、对比度偏好、少数非关键标签靠近只报warning或info，不要求返修；"
         "看不清而不能确证写uncertain，不把缩图限制当作已证缺陷。"
         "图例不匹配指当前页图例与当前页实际符号矛盾；其他页承担的时段或内容未出现在本页，"
         "不能据此报legend_mismatch。assessment_scope区分本页、其他页、数据含义与偏好。"
@@ -149,8 +153,8 @@ def pixel_prompt(task: str, evidence: dict[str, Any], response_format: str = "to
         "表头和数值重复写单位等纯格式偏好属于suggestion，除非确实误导单位含义。"
         "总览图不要求逐点数清全部背景对象，重点详图才检查编号归属；"
         "无法判断的部分写入limitations，不把疑点当成确定缺陷；"
-        "关键内容无法检查时为unverified，有error/warning时为issues，"
-        "只有完成当前页检查且无error/warning时为passed。"
+        "关键内容确实无法检查时为unverified，只有严重error时为issues，"
+        "完成检查且无严重error即为passed，允许保留warning和info建议。不要为凑问题反复提高标准。"
         + ("通过record_map_review提交结果；若返回文本，必须为同结构JSON对象，不含Markdown。\n"
            if response_format == "tool" else
            "直接返回JSON对象，不调用函数，不含Markdown；字段须符合以下JSON Schema："

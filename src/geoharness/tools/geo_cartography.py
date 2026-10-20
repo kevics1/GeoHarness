@@ -913,7 +913,10 @@ class GeoCartographyTool(BaseTool):
             from geoharness.cartography.qgis_bridge import render_qgis_map
 
             return await render_qgis_map(self, args, rule, context)
-        reserve_map_render(identity, context.metadata, config)
+        if stopped := reserve_map_render(identity, context.metadata, config):
+            payload = {'status': 'automatic_review_stopped', 'automatic_review_stopped': True,
+                       'summary': stopped, 'render_executed': False}
+            return ToolResult(output=json.dumps(payload, ensure_ascii=False), metadata=payload)
         try:
             result = await self._run_off_loop(
                 lambda: self._render_blocking(args, rule, outputs_dir, context),
@@ -1150,7 +1153,9 @@ class GeoCartographyTool(BaseTool):
             if patched.model_dump_json() in seen_layouts:
                 break
             seen_layouts.add(patched.model_dump_json())
-            reserve_map_render(args.map_id, context.metadata, config)
+            if stopped := reserve_map_render(args.map_id, context.metadata, config):
+                history[-1]['automatic_review_stopped'] = stopped
+                break
             snapshot = artifacts / f"attempt-{attempt}{written.suffix}"
             previous = current
             try:

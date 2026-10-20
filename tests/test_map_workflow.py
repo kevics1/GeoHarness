@@ -54,7 +54,7 @@ async def test_shared_budget_keeps_history_of_actual_historical_map(tmp_path, mo
     job.mkdir(parents=True)
     (job / "receipt.json").write_text(json.dumps({"job_id": actual, "versions": [{
         "version": 1, "image_sha256": "old", "stages": {"visual_checked": {"report": {
-            "status": "issues", "issues": [{"severity": "warning", "description": "Crowded",
+            "status": "issues", "issues": [{"severity": "error", "description": "Unreadable legend",
                                              "issue_code": "label_overlap"}],
         }}},
     }]}), encoding="utf-8")
@@ -71,7 +71,7 @@ async def test_shared_budget_keeps_history_of_actual_historical_map(tmp_path, mo
     await review_with_budget(image, config=config, task="Check", evidence={}, metadata=metadata,
                              map_id=actual)
     assert captured[0]["remaining_render_versions"] is None
-    assert captured[0]["generation_unlimited"] is True
+    assert captured[0]["generation_unlimited"] is False
     assert captured[0]["previous_visual_reviews"][0]["issues"][0]["issue_code"] == "label_overlap"
 
 

@@ -13,12 +13,12 @@ def test_semantic_question_does_not_become_a_confirmed_map_defect():
 
 def test_visible_occlusion_still_blocks_with_a_style_suggestion_present():
     review = MapReview.model_validate({'status': 'issues', 'summary': '文字遮挡',
-        'issues': [{'severity': 'warning', 'description': '文字被截断', 'issue_code': 'other'},
+        'issues': [{'severity': 'error', 'description': '关键文字截断', 'issue_code': 'other'},
                    {'severity': 'warning', 'description': '更喜欢单位只写在表头',
                     'evidence_kind': 'suggestion'}]})
     distinguish_pixel_findings(review)
     assert review.status == 'issues'
-    assert review.issues[0].severity == 'warning'
+    assert review.issues[0].severity == 'error'
 
 
 def test_uncertain_visual_review_is_not_promoted_by_nonvisual_advice():
@@ -42,12 +42,12 @@ def test_explicit_no_reading_impact_and_other_page_duty_are_observations():
 
 def test_uncertain_pixel_impact_is_unverified_and_true_occlusion_remains_blocking():
     review = MapReview.model_validate({'status':'issues','summary':'不能确认小符号', 'issues':[
-        {'severity':'warning','description':'缩图看不清', 'reading_impact':'uncertain',
+        {'severity':'error','description':'缩图看不清', 'reading_impact':'uncertain',
          'affected_content':'编号归属'}]})
     distinguish_pixel_findings(review)
     assert review.status == 'unverified'
     review = MapReview.model_validate({'status':'issues','summary':'确证遮挡', 'issues':[
-        {'severity':'warning','description':'文字被符号遮住', 'reading_impact':'hidden',
+        {'severity':'error','description':'关键文字被符号遮住', 'reading_impact':'hidden',
          'affected_content':'对象编号', 'issue_code':'label_overlap'}]})
     distinguish_pixel_findings(review)
-    assert review.status == 'issues' and review.issues[0].severity == 'warning'
+    assert review.status == 'issues' and review.issues[0].severity == 'error'

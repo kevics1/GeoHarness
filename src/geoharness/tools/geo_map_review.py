@@ -277,6 +277,9 @@ class GeoMapReviewTool(BaseTool):
         '直接复用，仅无有效证据页发给图片模型。page_checks按真实page_id持久修改验收要求。服务失败保持unve'
         'rified；先读request_sent和diagnostics再决定'
         '恢复，缓存/冷却命中不算新服务请求。'
+        '仅严重error阻止交付并允许返修；warning/info仅建议，不为留白或轻微拥挤反复重审。'
+        '默认每任务每页位3次、全任务12次实际请求，失败也计数，持久跨重启。'
+        'automatic_review_stopped=true必须停止自动改图/审图，报告现有成果和剩余问题。'
     )
     )
     input_model = GeoMapReviewInput
@@ -395,7 +398,7 @@ class GeoMapReviewTool(BaseTool):
                                                                   for p in summary}]
                 return result
             issues = body.get("issues", [])
-            status = ("issues" if any(i.get("severity") in {"warning", "error"}
+            status = ("issues" if any(i.get("severity") == "error"
                                       for i in issues) else
                       diagnostics.get("page_visual_status") or
                       result.metadata.get("visual_review_status",
@@ -414,6 +417,7 @@ class GeoMapReviewTool(BaseTool):
                         else 'completed')),
                 "repair_progress": diagnostics.get('repair_progress', {}),
                 "request_sent": result.metadata.get("request_sent", False),
+                "automatic_review_stopped": result.metadata.get('automatic_review_stopped', False),
                 "registration_status": result.metadata.get('registration_status'),
                 "reused_reason": ("cached_pixel_conclusion"
                                   if result.metadata.get("review_cached") else None)})
@@ -447,6 +451,12 @@ class GeoMapReviewTool(BaseTool):
             'reused_count': len(payload['reused_pages']),
             'page_contracts_changed': [item["page_index"] for item in summary
                                         if item.get("reused_reason") == "page_contract_changed"]}
+        payload['automatic_review_stopped'] = any(
+            item['automatic_review_stopped'] for item in summary)
+        if payload['automatic_review_stopped'] and status != 'passed':
+            from geoharness.cartography.review_limits import STOP_MESSAGE
+
+            payload['next_action'] = STOP_MESSAGE
         receipt = map_job_receipt(context.metadata, cwd=context.cwd, config=config,
                                   map_id=identity, artifact_path=path)
         payload["quality_status"] = receipt.get("quality_status", "draft")
@@ -457,6 +467,11 @@ class GeoMapReviewTool(BaseTool):
         result, budget = await review_pixels(path, arguments=arguments, context=context,
             identity=arguments.map_id or path.stem,
             evidence={"backend": "unknown", "ledger_unavailable": True})
+        if budget.get('review_budget_exhausted'):
+            return ToolResult(output=json.dumps({'status': 'unverified',
+                'summary': result.summary, 'diagnostics': result.diagnostics},
+                ensure_ascii=False), metadata={**budget, 'review_status': 'unverified',
+                    'render_executed': False, 'quality_status': 'draft'})
         result.diagnostics.update(ledger_error=error, repair_authorized=False,
                                   quality_status="draft", receipt_status="unregistered")
         payload = public_payload(result.model_dump())
@@ -598,6 +613,14 @@ class GeoMapReviewTool(BaseTool):
         # Geometry checks belong to rendering; they never substitute for image review.
         result, budget = await review_pixels(path, arguments=arguments, context=context,
             identity=identity, evidence=evidence)
+        if budget.get('review_budget_exhausted'):
+            # A refused request is not fresh evidence. Keep the last actual
+            # report and its severe findings intact rather than overwriting it.
+            return ToolResult(output=json.dumps({'status': 'unverified',
+                'summary': result.summary, 'diagnostics': result.diagnostics},
+                ensure_ascii=False), metadata={**budget, 'review_status': 'unverified',
+                    'render_executed': False, 'map_id': identity,
+                    'registration_status': 'retained_previous_evidence'})
         # Persist the exact page/review question with the conclusion. A later
         # batch may reuse the pixels only if the page duty and checks still match.
         from geoharness.cartography.review_contract import stable_contract
@@ -643,7 +666,7 @@ class GeoMapReviewTool(BaseTool):
             clean_pixels = (result.status == "passed" or result.diagnostics.get(
                 "page_visual_status") == "passed") and (
                 not result.diagnostics.get("failure_stage")
-                and not any(issue.severity in {"warning", "error"} for issue in result.issues)
+                and not any(issue.severity == "error" for issue in result.issues)
                 and result.qgis_patch is None and result.next_strategy is None
                 and not result.layout_patch.model_dump(exclude_none=True))
             if clean_pixels:
@@ -662,7 +685,7 @@ class GeoMapReviewTool(BaseTool):
                                              "unreviewed_page_indices": unreviewed}
         if (not unreviewed and result.diagnostics.get("page_visual_status") == "passed"
                 and not result.diagnostics.get("failure_stage")
-                and not any(issue.severity in {"warning", "error"} for issue in result.issues)
+                and not any(issue.severity == "error" for issue in result.issues)
                 and result.qgis_patch is None and result.next_strategy is None
                 and not result.layout_patch.model_dump(exclude_none=True)):
             result.status = "passed"
@@ -755,7 +778,7 @@ class GeoMapReviewTool(BaseTool):
                     else ""
                 )
                 + (
-                    "STOP visual retries: deliver an unreviewed draft with remaining issues.\n"
+                    "已达到审图上限，停止自动改图和重审；保留草稿并报告未解决问题。\n"
                     if budget["review_budget_exhausted"]
                     else ""
                 )

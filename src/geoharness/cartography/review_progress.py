@@ -87,4 +87,4 @@ def assess_repair_progress(history: list, current: dict) -> dict:
             "message": ("不同版本仍报告同类可定位问题，换措辞不算改善。先核实原因并更换方法，"
                         "不要重复相同改动；只有涉及业务或表达取舍时调用ask_user_question。"
                         if repeated else "核实读图疑点并合并有依据的修改；"
-                        "不猜测、不按轮数强制停止。")}
+                        "不猜测；遵守持久审图请求上限，warning/info不触发返修。")}

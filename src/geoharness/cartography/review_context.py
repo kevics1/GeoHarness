@@ -1,4 +1,4 @@
-"""Bounded review history and unlimited generation, without changing receipts."""
+"""Bounded review history; task-owned request limits live in review_limits."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def build_review_iteration_context(
     result = {
         "version_limit": None,
         "remaining_render_versions": None,
-        "generation_unlimited": True,
+        "generation_unlimited": False,
         "previous_visual_reviews": [],
     }
     supplied = isinstance(receipt, dict)
@@ -85,7 +85,7 @@ def build_review_iteration_context(
             continue
         bounded = []
         for issue in issues[:5]:
-            if not isinstance(issue, dict) or issue.get("severity") not in {"error", "warning"}:
+            if not isinstance(issue, dict) or issue.get("severity") != "error":
                 continue
             code = issue.get("issue_code", "other")
             bounded.append({

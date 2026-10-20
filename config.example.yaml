@@ -66,7 +66,10 @@ map_review:
   reasoning_effort: max
   response_format: tool  # tool=function calling; json=JSON text (json_object support needed).
   # geo_map_review only reads images and reports findings; it never repairs or rebuilds.
-  # Map generation and review have no version/count/cumulative-time budget.
+  # Only severe errors block acceptance; warnings are retained as advice.
+  max_review_requests_per_page: 3  # Initial review + at most two rechecks per task/page position.
+  max_review_requests_per_task: 12  # All pages/maps combined; failures count, cache hits do not.
+  # At the cap, stop automatic redraw/review and retain unresolved drafts.
   # Legacy max_repairs/max_reviews_per_request/total_timeout_seconds are ignored.
   timeout_seconds: 180  # Total image preparation + streamed generation deadline.
   read_timeout_seconds: 90  # Network idle limit; active thinking may exceed this duration.

@@ -23,7 +23,7 @@ _REVIEW_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDic
 _REPAIR_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 # Bump only when the response contract/compatibility changes. Legacy failed
 # cache entries can then recover without repeatedly resending unchanged images.
-REVIEW_CONTRACT_VERSION = 10
+REVIEW_CONTRACT_VERSION = 11
 _BUDGET_LOCK = threading.RLock()
 
 
@@ -159,7 +159,11 @@ def reserve_map_render(
     metadata: dict[str, Any],
     config: GeoConfig,
 ) -> str | None:
-    """Record a render attempt; legacy callers never receive a budget stop."""
+    """Stop automatic drawing when the durable image-review ceiling is reached."""
+    from geoharness.cartography.review_limits import STOP_MESSAGE, review_limit_status
+
+    if review_limit_status(metadata, config)['automatic_review_stopped']:
+        return STOP_MESSAGE
     with _BUDGET_LOCK:
         _, entry = _budget_entry(name, metadata, config)
         entry["renders"] += 1
@@ -225,6 +229,7 @@ def reserve_python_render(
                         "render_static",
                         "render_layers",
                         "save_map_figure",
+                        "render_scene",
                     }
                 )
 
@@ -247,6 +252,7 @@ def reserve_python_render(
                     "render_static",
                     "render_layers",
                     "save_map_figure",
+                    "render_scene",
                 }
                 and qualified_name(node.func.value) in draw_modules
             )
@@ -396,6 +402,8 @@ async def _review_once(
 ) -> tuple[MapReview, dict[str, Any]]:
     settings = config.map_review
     fingerprint, evidence = review_fingerprint(config, evidence, task=task, pixel_only=pixel_only)
+    page = (evidence.get('review_binding') or {}).get('page_index',
+        (evidence.get('render_metadata') or {}).get('review_page_index', 0))
     flags = {
         "image_sha256": digest,
         "pixel_sha256": pixel_digest,
@@ -420,6 +428,8 @@ async def _review_once(
             request_counted = True
 
     def facts(review: MapReview, *, cached: bool) -> dict[str, Any]:
+        from geoharness.cartography.review_limits import record_review_outcome, review_limit_status
+
         if cached:
             activity["cache_hits"] += 1
             state["cache_hits_total"] += 1
@@ -461,6 +471,11 @@ async def _review_once(
             ),
         }
         review.diagnostics.update(evidence)
+        record_review_outcome(metadata, page=page,
+                              status=review.status if completed else 'unverified')
+        limit = review_limit_status(metadata, config, page=page)
+        evidence.update(limit)
+        review.diagnostics.update(limit)
         return evidence
 
     recovery = False
@@ -526,7 +541,15 @@ async def _review_once(
     if recovery:
         state["validation_retries"][retry_key] = True
         flags["invalid_response_retry"] = True
-    # Keep usage accounting without stopping later images or shortening requests.
+    from geoharness.cartography.review_limits import reserve_review_request
+
+    reserved, limit = reserve_review_request(metadata, config, page=page)
+    if not reserved:
+        held = MapReview(status='unverified', summary=limit['next_action'], diagnostics={
+            **limit, 'failure_stage': 'review_limit', 'request_sent': False})
+        return held, {**flags, **limit, 'review_budget_exhausted': True,
+                      'visual_review_status': 'unverified'}
+    # Count failed network/schema attempts as well; only local nonrequests refund.
     state["reviews"] += 1
     entry["reviews"] += 1
     timeout = settings.timeout_seconds
@@ -552,6 +575,11 @@ async def _review_once(
     finally:
         state["seconds"] += time.monotonic() - started
         state["reserved_seconds"] = max(0.0, state["reserved_seconds"] - timeout)
+        if not request_counted and not (
+            'result' in locals() and result.diagnostics.get('request_sent')):
+            from geoharness.cartography.review_limits import refund_review_request
+
+            refund_review_request(metadata, page=page)
     if _transient_review_failure(result):
         delay = max(settings.service_failure_ttl_seconds,
                     result.diagnostics.get("retry_after_seconds", 0))
@@ -572,6 +600,11 @@ async def _review_once(
     flags["request_sent"] = result.diagnostics.get("request_sent", True)
     flags["review_failure_stage"] = result.diagnostics.get("failure_stage", "")
     flags.update(facts(result, cached=False))
+    from geoharness.cartography.review_limits import review_limit_status
+
+    limit = review_limit_status(metadata, config, page=page)
+    flags.update(limit)
+    result.diagnostics.update(limit)
     state["cache"][cache_key] = result.model_dump()
     state["cache_settings"][cache_key] = fingerprint
     # Keep the file-key alias for checkpoint compatibility with older sessions.

@@ -36,7 +36,7 @@ def test_reordering_and_retiring_page_does_not_transfer_its_findings(tmp_path):
         "status": "issues",
         "issues": [
             {
-                "severity": "warning",
+                "severity": "error",
                 "issue_code": "label_overlap",
                 "description": "重点图编号相压",
                 "location": "北部",
@@ -109,7 +109,7 @@ def test_legacy_index_cannot_be_guessed_and_stale_bbox_needs_relocation(tmp_path
             "status": "issues",
             "issues": [
                 {
-                    "severity": "warning",
+                    "severity": "error",
                     "issue_code": "label_overlap",
                     "description": "编号相压",
                     "bbox": [0.2, 0.2, 0.3, 0.3],

@@ -22,7 +22,7 @@ class Reviewer:
         self.calls += 1
         yield ApiMessageCompleteEvent(message=ConversationMessage.from_user_text(json.dumps({
             'status': self.status, 'summary': '模拟图片已检查', 'issues': [
-                {'severity': 'warning', 'issue_code': 'label_overlap',
+                {'severity': 'error', 'issue_code': 'label_overlap',
                  'description': '模拟标签重叠', 'location': '图中上部'}
             ] if self.status == 'issues' else []})), usage=UsageSnapshot())
 

@@ -158,12 +158,16 @@ class MapReviewConfig(BaseModel):
         description=("Review response contract: function calling or JSON text; "
                      "no automatic fallback."),
     )
-    # Accepted for existing configuration files; generation has no count or
-    # cumulative review-time limit. timeout_seconds still bounds each request.
+    max_review_requests_per_page: int = Field(default=3, ge=1, le=20,
+        description='同一任务同一页位最多实际审图请求数；默认首审加两次复核，失败请求也计数。')
+    max_review_requests_per_task: int = Field(default=12, ge=1, le=200,
+        description='整个任务最多实际审图请求数，跨页/地图/重启累计；缓存复用不计数。')
+    # Accepted for existing files. Only the explicitly named request caps above
+    # are enforced; no cumulative execution-time deadline is introduced.
     max_repairs: int = Field(default=4, ge=0, deprecated=True,
                             description="Legacy setting; ignored for map generation.")
     max_reviews_per_request: int = Field(default=5, ge=0, deprecated=True,
-                                        description="Legacy setting; review count is unlimited.")
+        description="Legacy setting; use max_review_requests_per_page/task.")
     total_timeout_seconds: float = Field(default=120, gt=0, deprecated=True,
                                         description="Legacy setting; cumulative time is unlimited.")
     timeout_seconds: float = Field(default=180, gt=0, le=300)

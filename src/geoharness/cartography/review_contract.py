@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-CONTRACT_VERSION = 13
+CONTRACT_VERSION = 14
 
 def _bounded(value: Any, depth: int = 0) -> Any:
     if depth > 5:
