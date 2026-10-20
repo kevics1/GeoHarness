@@ -10,6 +10,7 @@ from openharness.tools.base import BaseTool, ToolResult
 from pydantic import Field, model_validator
 
 from geoharness.cartography.scene import Contract, Edit, Scene, edit_scene, load_scene, save_scene
+from geoharness.invocation import invocation_guide
 
 
 class NativeMapInput(Contract):
@@ -93,6 +94,7 @@ class GeoNativeMapTool(BaseTool):
         'Page.layout自动求解图框/图例；label_offsets_mm可调整文字并自动生成引线，'
         'locator_pages自动绘制实际详图范围框，不要用Python重复造标签点、引线或测PNG图框。'
         '不清楚业务含义时问用户；不要调用geo_qgis_project反复构建。'
+        + invocation_guide('geo_cartography')
     )
     input_model = NativeMapInput
 
@@ -153,6 +155,7 @@ class GeoNativeMapTool(BaseTool):
                         '处理layout确定缺陷→geo_map_review(all_pages=true，自动沿用未变页)→全部通过且问题'
                         '处置后geo_deliver一次生成可编辑工程。',
                     'no_qgis': '普通制图、修图、预览、审图阶段不要调用geo_qgis_project。',
+                    'call_time_cautions': invocation_guide('geo_cartography'),
                 }, ensure_ascii=False))
 
             if arguments.action == 'inspect' and not arguments.scene_ref:

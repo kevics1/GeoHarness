@@ -306,6 +306,9 @@ def _build_environment_section(cwd: Path) -> str:
 def _build_execution_section(config: GeoConfig) -> str:
     return (
         "# 执行与地图验证（Execution and Map Verification）\n"
+        "近期测试的调用顺序要求：分析后一次核对真实产物、字段、主键与JSON结果键；"
+        "按真实来源发布必要分析结果；首次render前统一核对来源/分类/选集/页面互斥字段。"
+        "不要把首次render当作逐条发现契约的探针，也不要为显示子集反复复制并发布业务文件。\n"
         f"geo_python — {invocation_guide('geo_python')}\n"
         f"geo_cartography — {invocation_guide('geo_cartography')}\n"
         f"geo_qgis_project — {invocation_guide('geo_qgis_project')}\n"

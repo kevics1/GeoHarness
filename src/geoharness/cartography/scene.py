@@ -43,17 +43,21 @@ class Symbol(Contract):
 
 class Layer(Contract):
     id: str = Field(min_length=1, max_length=80, description='稳定图层ID，编辑/页面引用使用。')
-    source_ref: str = Field(min_length=1, description='实际文件路径或已返回的data:引用。')
+    source_ref: str = Field(min_length=1,
+        description='实际文件路径或原样复制的data:引用；不编造哈希。'
+        '分析主题直接用已发布的原生产物；子集使用select_keys，不另造显示用业务文件。')
     name: str = Field(default='', description='显示名称，默认使用id。')
     kind: Literal['vector', 'raster'] = Field(default='vector', description='矢量或栅格。')
     source_layer: str = Field(default='', description='多图层GPKG的真实图层名；不猜测。')
     key: str = Field(default='', description='实体唯一非空字段；选择或标注时必须提供。')
     select_keys: list[str | int | float] | None = Field(default=None,
-        description='按key选择实际对象；null保留全部，空数组为空选集，不移动几何。')
+        description='按源key列实际值及其类型选择对象；不填行号/显示排名。null保留全部，'
+        '空数组为空选集，不移动几何。')
     label_field: str = Field(default='', description='标注字段；文字可避让，真实点位不移动。')
     label_size_pt: float = Field(default=8, ge=5, le=30, description='标注字号，pt。')
     label_offsets_mm: dict[str, list[float]] = Field(default_factory=dict,
-        description='可选：真实实体key字符串到标注(dx,dy)纸面毫米偏移；只移动文字，自动连接原点。'
+        description='可选：真实实体key字符串到标注(dx,dy)纸面毫米偏移；不能填Layer.id或排名。'
+        '只移动文字，自动连接原点。'
         '无需生成标签点/引线文件或重新发布分析。省略的实体自动避让。')
     show_in_legend: bool = Field(default=True,
         description='是否进入专题图例；重复强调层、辅助编号层可设false，不改变实际绘制。')
@@ -129,12 +133,13 @@ class Page(Contract):
     locator_pages: list[str] = Field(default_factory=list, max_length=16,
         description='在本页绘制指定真实Page.id的实际详图范围框；系统与目标取景同步，无需Python生成定位框。')
     extent: list[float] | None = Field(default=None, min_length=4, max_length=4,
-        description='显示CRS的xmin,ymin,xmax,ymax；省略按focus_layers拟合。')
+        description='显示CRS的xmin,ymin,xmax,ymax；提供时focus_layers须省略或[]，二者互斥。')
     focus_layers: list[str] = Field(default_factory=list,
-        description='范围拟合目标；默认当前页图层。')
+        description='范围拟合目标；使用时extent必须省略，默认当前页图层。')
     table: Table | None = Field(default=None, description='名册定义；有表格时该页只绘表。')
     coverage: list[Coverage] = Field(default_factory=list, max_length=16,
-        description='可选逐实体覆盖承诺；系统核对指定对象确在本页范围内且真实绘出，不能用少量样本冒充全集。')
+        description='仅地图页可选逐实体覆盖承诺；名册table页禁止提供。系统核对指定对象'
+        '确在本页范围内且真实绘出，不能用少量样本冒充全集。')
     footer: str = Field(default='', description='来源/限制文字；分页支持{row_start}/{row_end}/'
         '{total_rows}/{page_number}/{page_count}，由系统按当前页展开。')
 

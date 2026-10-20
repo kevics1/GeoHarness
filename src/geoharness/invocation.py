@@ -14,6 +14,18 @@ PYTHON_CAUTIONS = (
     "`nodata, not fill_value`（nodata 而非 fill_value）。只能写 RUN_DIR；保留源数据。",
     "失败后先检查实测原因，修改对应输入/代码，只重跑失败阶段；未变化的重复调用仅用于"
     "已确认的瞬态故障。",
+    "近期实测易错项：Path须先from pathlib import Path；循环变量i等须在当前脚本定义。"
+    "先describe_input检查中间对象的字段/类型；合并后字段可能带后缀，不能猜label/gid或汇总JSON键。"
+    "Timestamp是标量，不能切片；格式化用isoformat/strftime。",
+    "CONSOLE_RESULT只放有界JSON：NumPy标量用.item()，数组用.tolist()，日期用.isoformat()，"
+    "Path用str()，NA/NaN等缺失值转None而非0；GeoDataFrame/geometry另存文件并返回真实路径，"
+    "不能原样塞进结果。",
+    "input_refs绑定具体文件，动态循环读取也须声明全部依赖；RUN_DIR是目录，manifest_path是文件，"
+    "不得把二者当业务输入文件/目录互换。data:引用逐字复制实际返回值，不编造哈希；"
+    "Windows字面路径用正斜杠或原始字符串，避免反斜杠r/t/n变控制字符。",
+    "距离/面积原值保留完整精度，不在分析字段round取整，显示格式交给制图；缓冲/叠置后先查"
+    "is_valid，出现自交须核实并修复几何再写输出，保留来源，不用忽略错误代替修复。"
+    "同任务geo_python/发布/制图写操作串行；锁冲突先读状态，不新建任务或重复执行分析。",
 )
 
 NATIVE_CARTOGRAPHY_CAUTIONS = (
@@ -29,6 +41,19 @@ NATIVE_CARTOGRAPHY_CAUTIONS = (
     "全部必要页面通过且没有待处置问题后，geo_deliver 才生成一次可编辑工程。",
     "Page.layout自动编译图框/图例；label_offsets_mm与locator_pages处理文字/引线/范围框，"
     "不需要Python测图或复制辅助业务数据。验收职责写purpose/review_requirements，修复进度写repair_notes。",
+    "首次render前一次核对所有Layer的实际字段/key/分类值/选集与事实绑定：子集不继承假想字段；"
+    "没有分类字段就用单色。select_keys来自该源真实key值，保留其类型；label_offsets_mm的键是"
+    "真实实体key字符串，不能填图层ID、行号或显示排名。",
+    "已发布的分析原生产物须直接作为source_ref并出现在地图页layers中，不能只列analysis_refs"
+    "或仅放名册。重点子集复用原生产物+select_keys，不另造res_key/标签点文件。",
+    "真正新增的派生矢量先按唯一文件publish_analysis并把实际analysis_ref放入Scene.analysis_refs；"
+    "别在render报错后逐个补包。原始事件/行政区等背景直接用原始已登记来源，不能为样式复制"
+    "为GeoJSON后冒充可证明成员来源的分析产物，也不为过关编造field_changes。",
+    "显式extent时focus_layers必须省略或[]；自动聚焦时extent省略。名册table页不能带coverage。"
+    "标题只用Schema允许的{subject_count}且须有唯一coverage；footer仅用{row_start}/"
+    "{row_end}/{total_rows}/{page_number}/{page_count}，不把业务字段写成模板占位符。",
+    "查已有计划用inspect(scene_ref)，不要用未绑定的Python读取scene-plan.json或glob审图报告。"
+    "analysis_refs只用实际analysis_ref/package_path或原生manifest_path，不用Markdown报告路径。",
 )
 
 QGIS_CAUTIONS = (

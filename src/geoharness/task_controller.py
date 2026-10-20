@@ -13,6 +13,7 @@ from dataclasses import asdict, is_dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,6 +23,7 @@ from geoharness.task_store import connect, execution_lock, task_directory
 _TOOLS = Literal['geo_qgis', 'geo_python', 'geo_analysis', 'geo_accessibility',
                  'geo_cartography', 'geo_qgis_project', 'geo_map_review', 'geo_deliver',
                  'geo_task']
+_TASK_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 
 
 class TaskNode(BaseModel):
@@ -470,8 +472,15 @@ def _resolve(value, rows, directory, context):
 
 def _in_process_task_lock(context):
     directory = _directory(context)
-    locks = context.metadata.setdefault('_geo_task_locks', {})
-    return locks.setdefault(str(directory), asyncio.Lock())
+    # Upstream creates a shallow metadata copy for every sibling call. A lock
+    # first inserted into that copy is private, so siblings hit the OS lease
+    # instead of waiting. Keep synchronization outside checkpointed metadata.
+    key = (id(asyncio.get_running_loop()), str(directory.resolve()))
+    lock = _TASK_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _TASK_LOCKS[key] = lock
+    return lock
 
 async def run_plan(context, *, node_id='', _lock_held=False):
     """Run a deterministic ready chain; stop on a real failure or pending decision."""
